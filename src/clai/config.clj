@@ -3,7 +3,8 @@
 
   The config file is plain EDN (https://github.com/edn-format/edn) and may
   contain any subset of the recognized keys; anything omitted falls back to
-  the usual environment variables / defaults documented in `clai.core`.
+  the usual environment variables / defaults documented in `clai.core` and
+  `clai.providers.ollama`.
 
   ## Recognized keys
 
@@ -32,9 +33,10 @@
 
   If none of these exist, an empty map is returned and `clai` behaves exactly
   as it did before config-file support (env vars + defaults)."
-  (:require [clojure.edn :as edn]
+  (:require [clai.log]
+            [clojure.edn :as edn]
             [clojure.java.io :as io]
-            [clojure.string :as str])
+            [taoensso.telemere :as tel])
   (:import [java.io File]))
 
 ;; ---------------------------------------------------------------------------
@@ -88,6 +90,9 @@
     (with-open [r (java.io.PushbackReader. (io/reader file))]
       (edn/read {:readers *data-readers* :eof nil} r))
     (catch Throwable e
+      (tel/error! {:id   ::config-read-failed
+                   :data {:file (.getAbsolutePath file)}}
+                  e)
       (throw (ex-info (str "Failed to read clai config file "
                            (.getAbsolutePath file) ": "
                            (or (ex-message e) (class e)))
@@ -121,11 +126,45 @@
   ([]
    (if-let [^File f (first-existing (candidate-files))]
      (load-config f)
-     {}))
+     (do
+       (tel/log! {:level :debug
+                  :id    ::no-config-file
+                  :data  {:candidates (vec (candidates))}}
+                 "No clai config file found; using defaults")
+       {})))
   ([path]
    (let [^File f (if (instance? File path) path (File. (str path)))]
      (cond
-       (not (.exists f)) {}
-       (.isDirectory f)  {}
-       :else             (let [parsed (read-edn-file f)]
-                           (if (map? parsed) parsed {}))))))
+       (not (.exists f))
+       (do
+         (tel/log! {:level :debug
+                    :id    ::config-not-found
+                    :data  {:path (.getAbsolutePath f)}}
+                   "Config file does not exist; using defaults")
+         {})
+
+       (.isDirectory f)
+       (do
+         (tel/log! {:level :warn
+                    :id    ::config-is-directory
+                    :data  {:path (.getAbsolutePath f)}}
+                   "Config path is a directory; using defaults")
+         {})
+
+       :else
+       (let [parsed (read-edn-file f)]
+         (if (map? parsed)
+           (do
+             (tel/log! {:level :debug
+                        :id    ::config-loaded
+                        :data  {:path (.getAbsolutePath f)
+                                :keys (vec (keys parsed))}}
+                       "Loaded clai config")
+             parsed)
+           (do
+             (tel/log! {:level :warn
+                        :id    ::config-not-a-map
+                        :data  {:path (.getAbsolutePath f)
+                                :type (str (class parsed))}}
+                       "Config file did not contain a map; using defaults")
+             {})))))))

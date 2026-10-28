@@ -22,21 +22,23 @@
 
   Example:
 
-      (require '[clai.core :as clai])
+      (require '[clai.providers.ollama :as ollama])
 
-      (def c (clai/make-client))                 ;; localhost:11434
-      (clai/chat c {:model \"gemma4\"
-                    :messages [{:role \"user\"
-                                :content \"Why is the sky blue?\"}]
-                    :stream false})
+      (def c (ollama/make-client))              ;; localhost:11434
+      (ollama/chat c {:model \"gemma4\"
+                      :messages [{:role \"user\"
+                                  :content \"Why is the sky blue?\"}]
+                      :stream false})
       ;; => {:model \"gemma4\" :message {:role \"assistant\" :content \"...\"} ...}
   "
-  (:require [cheshire.core :as json]
+  (:require [clai.log]
+            [cheshire.core :as json]
             [clj-http.client :as http]
             [clojure.java.io :as io]
             [clojure.string :as str]
             [malli.core :as m]
-            [malli.error :as me])
+            [malli.error :as me]
+            [taoensso.telemere :as tel])
   (:import [java.net URL]
            [java.util Base64]
            [java.io InputStream BufferedReader]))
@@ -201,9 +203,14 @@
   an `ex-info` with a human-readable malli error explanation otherwise."
   [schema value fn-name]
   (if-let [errors (and schema (m/explain schema value))]
-    (throw (ex-info (str "Invalid " fn-name " request: "
-                         (-> errors me/humanize pr-str))
-                    {:fn fn-name :schema schema :value value :errors errors}))
+    (let [explained (me/humanize errors)]
+      (tel/log! {:level :error
+                 :id    ::invalid-request
+                 :data  {:fn fn-name :errors explained}}
+                (str "Invalid " fn-name " request"))
+      (throw (ex-info (str "Invalid " fn-name " request: "
+                           (pr-str explained))
+                      {:fn fn-name :schema schema :value value :errors errors})))
     value))
 
 ;; ---------------------------------------------------------------------------
@@ -238,8 +245,8 @@
                `OLLAMA_API_KEY` environment variable.
     :timeout   Request timeout in milliseconds. Defaults to 600000 (10 min).
 
-  Returns a `clai.core.Client` record. With no arguments the default local
-  client is returned."
+  Returns a `clai.providers.ollama.Client` record. With no arguments the
+  default local client is returned."
   ([] (make-client nil))
   ([{:keys [host api-key timeout]
      :or {host     (or (System/getenv "OLLAMA_HOST") default-host)
@@ -247,6 +254,12 @@
           timeout  default-timeout-ms}}]
    (let [client (map->Client {:host host :api-key api-key :timeout timeout})]
      (validate! client-schema client "make-client")
+     (tel/log! {:level :debug
+                :id    ::client-created
+                :data  {:host     host
+                        :api-key? (some? api-key)
+                        :timeout  timeout}}
+               "Created Ollama client")
      client)))
 
 (defn- resolve-client
@@ -320,6 +333,14 @@
                     (and parsed (str parsed))
                     (when (bytes? raw) (String. raw "UTF-8"))
                     (str "Ollama API error"))]
+    (tel/log! {:level :error
+               :id    ::api-error
+               :data  {:method method
+                       :url    url
+                       :status status
+                       :message message}}
+              (str "Ollama API " (name method) " " url " failed: "
+                   status " " message))
     (throw (ex-info (str "Ollama API " (name method) " " url " failed: "
                          status " " message)
                     {:method method :url url :status status
@@ -365,6 +386,7 @@
   throw on a non-2xx response."
   [^Client client method path req]
   (let [url    (api-url client path)
+        start  (System/nanoTime)
         opts   (-> (base-http-opts client)
                    (assoc :request-method method
                           :url url
@@ -372,7 +394,15 @@
                           :as :byte-array)
                    (cond-> (some? req)
                      (assoc :body (request-body req))))
-        resp   (http/request opts)]
+        resp   (http/request opts)
+        msecs  (quot (- (System/nanoTime) start) 1000000)]
+    (tel/log! {:level :debug
+               :id    ::http-request
+               :data  {:method     method
+                       :url        url
+                       :status     (:status resp)
+                       :elapsed-ms msecs}}
+              (str "Ollama " (name method) " " path))
     (when-not (<= 200 (:status resp) 299)
       (throw-api-error method url (:status resp) (:body resp)))
     (parse-response resp)))
@@ -392,7 +422,14 @@
         resp   (http/request opts)]
     (cond
       (<= 200 (:status resp) 299)
-      (ndjson-seq (:body resp))
+      (do
+        (tel/log! {:level :debug
+                   :id    ::http-stream-opened
+                   :data  {:method method
+                           :url    url
+                           :status (:status resp)}}
+                  (str "Ollama stream " (name method) " " path))
+        (ndjson-seq (:body resp)))
 
       :else
       (throw-api-error method url (:status resp) (:body resp)))))
@@ -602,6 +639,10 @@
                           :headers (auth-headers client nil)
                           :as :byte-array))
          resp  (http/request opts)]
+     (tel/log! {:level :debug
+                :id    ::blob-exists
+                :data  {:digest digest :status (:status resp)}}
+               "Checked Ollama blob")
      (cond
        (= (:status resp) 200) true
        (= (:status resp) 404) false
@@ -640,6 +681,12 @@
                           :body bytes
                           :as :byte-array))
          resp  (http/request opts)]
+     (tel/log! {:level :debug
+                :id    ::create-blob
+                :data  {:digest digest
+                        :bytes  (alength ^bytes bytes)
+                        :status (:status resp)}}
+               "Uploaded Ollama blob")
      (when-not (<= 200 (:status resp) 299)
        (throw-api-error :post url (:status resp) (:body resp)))
      true)))
@@ -670,6 +717,11 @@
                           :headers (auth-headers client nil)
                           :as :byte-array))
          resp  (http/request opts*)]
+     (tel/log! {:level :debug
+                :id    ::cloud-usage
+                :data  {:query  qopts
+                        :status (:status resp)}}
+               "Fetched Ollama cloud usage")
      (when-not (<= 200 (:status resp) 299)
        (throw-api-error :get url (:status resp) (:body resp)))
      (parse-response resp))))
@@ -685,12 +737,13 @@
 ;; ---------------------------------------------------------------------------
 
 (defmacro with-client
-  "Bind `clai.core/*client*` for the body, so calls that omit an explicit
-  client use `client`.
+  "Bind `clai.providers.ollama/*client*` for the body, so calls that omit an
+  explicit client use `client`.
 
-      (clai/with-client (clai/make-client {:host \"https://ollama.com\"
-                                           :api-key key})
-        (clai/chat {:model \"gemma4\" :messages ... :stream false}))"
+      (clai.providers.ollama/with-client
+        (clai.providers.ollama/make-client {:host \"https://ollama.com\"
+                                            :api-key key})
+        (clai.providers.ollama/chat {:model \"gemma4\" :messages ... :stream false}))"
   [client & body]
   `(binding [*client* ~client]
      ~@body))

@@ -30,9 +30,11 @@
   `clojure.core/locking` keyed on the session id, so concurrent updates to a
   single session are serialized. Different sessions use independent files and
   do not contend."
-  (:require [cheshire.core :as json]
+  (:require [clai.log]
+            [cheshire.core :as json]
             [clojure.java.io :as io]
-            [clojure.string :as str])
+            [clojure.string :as str]
+            [taoensso.telemere :as tel])
   (:import [java.time Instant]
            [java.util UUID]
            [java.io File]))
@@ -56,6 +58,10 @@
   []
   (let [dir (sessions-dir)]
     (when-not (.exists dir)
+      (tel/log! {:level :debug
+                 :id    ::create-sessions-dir
+                 :data  {:path (.getAbsolutePath dir)}}
+                "Creating sessions directory")
       (.mkdirs dir))
     dir))
 
@@ -78,15 +84,28 @@
   Returns nil if the file does not exist."
   [^File file]
   (when (.exists file)
-    (with-open [r (io/reader file)]
-      (json/parse-stream r true))))
+    (try
+      (with-open [r (io/reader file)]
+        (json/parse-stream r true))
+      (catch Throwable e
+        (tel/error! {:id   ::session-read-failed
+                     :data {:file (.getAbsolutePath file)}}
+                    e)
+        (throw e)))))
 
 (defn- write-json-file
   "Write `data` (a map) to `file` as pretty-printed JSON."
   [^File file data]
   (ensure-sessions-dir)
-  (with-open [w (io/writer file)]
-    (json/generate-stream data w {:pretty true})))
+  (try
+    (with-open [w (io/writer file)]
+      (json/generate-stream data w {:pretty true}))
+    (catch Throwable e
+      (tel/error! {:id   ::session-write-failed
+                   :data {:file      (.getAbsolutePath file)
+                          :sessionId (:sessionId data)}}
+                  e)
+      (throw e))))
 
 ;; ---------------------------------------------------------------------------
 ;; Public API
@@ -126,13 +145,22 @@
                    :history    []}
          file     (session-file id)]
      (write-json-file file state)
+     (tel/log! {:level :info
+                :id    ::session-created
+                :data  {:sessionId id :cwd (str cwd) :model model}}
+               "Created persistent session")
      state)))
 
 (defn load-session
   "Read and return the state map for `session-id`, or nil if no such session
   is recorded."
   [session-id]
-  (read-json-file (session-file session-id)))
+  (let [state (read-json-file (session-file session-id))]
+    (tel/log! {:level :debug
+               :id    ::session-loaded
+               :data  {:sessionId session-id :found? (some? state)}}
+              "Loaded session")
+    state))
 
 (defn lookup-session
   "Alias for `load-session`, mirroring the naming used in `clai.core`."
@@ -151,10 +179,13 @@
   "Delete the JSON file for `session-id`, if present. Returns true if a file
   was removed, false otherwise."
   [session-id]
-  (let [file (session-file session-id)]
-    (if (.exists file)
-      (.delete file)
-      false)))
+  (let [file     (session-file session-id)
+        deleted? (if (.exists file) (.delete file) false)]
+    (tel/log! {:level :debug
+               :id    ::session-deleted
+               :data  {:sessionId session-id :deleted? deleted?}}
+              "Deleted session file")
+    deleted?))
 
 (defn list-sessions
   "Return a vector of all recorded session state maps, sorted by `:createdAt`
@@ -162,13 +193,18 @@
   `list-session-summaries` for lightweight metadata only."
   []
   (ensure-sessions-dir)
-  (->> (sessions-dir)
-       (file-seq)
-       (filter #(and (.isFile %)
-                     (str/ends-with? (.getName %) ".json")))
-       (keep read-json-file)
-       (sort-by :createdAt)
-       (vec)))
+  (let [sessions (->> (sessions-dir)
+                      (file-seq)
+                      (filter #(and (.isFile %)
+                                    (str/ends-with? (.getName %) ".json")))
+                      (keep read-json-file)
+                      (sort-by :createdAt)
+                      (vec))]
+    (tel/log! {:level :debug
+               :id    ::sessions-listed
+               :data  {:count (count sessions)}}
+              "Listed sessions")
+    sessions))
 
 (defn list-session-summaries
   "Like `list-sessions` but returns only metadata (no `:history`), suitable
@@ -187,6 +223,14 @@
 ;; History & parameter mutation
 ;; ---------------------------------------------------------------------------
 
+(defn- warn-unknown-session
+  "Emit a warning for a mutation targeting a session that is not recorded."
+  [op session-id]
+  (tel/log! {:level :warn
+             :id    ::unknown-session
+             :data  {:op op :sessionId session-id}}
+            "Session not found"))
+
 (defn append-history
   "Append a `{role content}` message to session `session-id` and persist it.
   Returns the message that was appended.
@@ -195,10 +239,16 @@
   returned unchanged (callers should `create-session` first)."
   [session-id message]
   (locking session-id
-    (when-let [state (load-session session-id)]
-      (let [state' (update state :history (fnil conj []) message)]
-        (save-session state'))
-      message)))
+    (if-let [state (load-session session-id)]
+      (do
+        (save-session (update state :history (fnil conj []) message))
+        (tel/log! {:level :debug
+                   :id    ::history-appended
+                   :data  {:sessionId session-id
+                           :role      (:role message)}}
+                  "Appended message to session history")
+        message)
+      (do (warn-unknown-session :append-history session-id) nil))))
 
 (defn session-history
   "Return the message history vector for `session-id`, or an empty vector if
@@ -211,33 +261,57 @@
   Returns the updated full state map, or nil if the session is unknown."
   [session-id key value]
   (locking session-id
-    (when-let [state (load-session session-id)]
-      (-> state
-          (assoc-in [:params key] value)
-          (save-session)))))
+    (if-let [state (load-session session-id)]
+      (let [state' (-> state
+                       (assoc-in [:params key] value)
+                       (save-session))]
+        (tel/log! {:level :debug
+                   :id    ::set-param
+                   :data  {:sessionId session-id :key key}}
+                  "Set session parameter")
+        state')
+      (do (warn-unknown-session :set-param session-id) nil))))
 
 (defn set-params
   "Merge `m` into the session's `:params` map and persist. Returns the
   updated full state map, or nil if the session is unknown."
   [session-id m]
   (locking session-id
-    (when-let [state (load-session session-id)]
-      (-> state
-          (update :params (fnil merge {}) m)
-          (save-session)))))
+    (if-let [state (load-session session-id)]
+      (let [state' (-> state
+                       (update :params (fnil merge {}) m)
+                       (save-session))]
+        (tel/log! {:level :debug
+                   :id    ::set-params
+                   :data  {:sessionId session-id :keys (vec (keys m))}}
+                  "Merged session parameters")
+        state')
+      (do (warn-unknown-session :set-params session-id) nil))))
 
 (defn set-model
   "Record the model name used by `session-id` and persist. Returns the
   updated full state map, or nil if the session is unknown."
   [session-id model]
   (locking session-id
-    (when-let [state (load-session session-id)]
-      (save-session (assoc state :model model)))))
+    (if-let [state (load-session session-id)]
+      (let [state' (save-session (assoc state :model model))]
+        (tel/log! {:level :debug
+                   :id    ::set-model
+                   :data  {:sessionId session-id :model model}}
+                  "Set session model")
+        state')
+      (do (warn-unknown-session :set-model session-id) nil))))
 
 (defn clear-history
   "Empty the message history for `session-id` and persist. Returns the
   updated full state map, or nil if the session is unknown."
   [session-id]
   (locking session-id
-    (when-let [state (load-session session-id)]
-      (save-session (assoc state :history [])))))
+    (if-let [state (load-session session-id)]
+      (let [state' (save-session (assoc state :history []))]
+        (tel/log! {:level :debug
+                   :id    ::clear-history
+                   :data  {:sessionId session-id}}
+                  "Cleared session history")
+        state')
+      (do (warn-unknown-session :clear-history session-id) nil))))

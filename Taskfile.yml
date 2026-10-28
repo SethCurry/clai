@@ -1,0 +1,17 @@
+# https://taskfile.dev
+
+version: "3"
+
+vars:
+    GREETING: Hello, World!
+
+tasks:
+    test:
+        cmds:
+            - lein test
+    build:
+        cmds:
+            - lein uberjar
+    run:
+        cmds:
+            - lein run

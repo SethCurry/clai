@@ -9,7 +9,7 @@
   (:require [clojure.test :refer :all]
             [clojure.java.io :as io]
             [cheshire.core :as json]
-            [clai.acp :as acp])
+            [clai.acp.agent :as acp])
   (:import [java.io PipedInputStream PipedOutputStream ByteArrayInputStream
             ByteArrayOutputStream InputStream OutputStream]
            [java.util UUID]))

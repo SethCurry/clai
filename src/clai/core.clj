@@ -3,7 +3,7 @@
 
   Wires together the three halves of the project:
 
-    * `clai.acp`          -- the agent side of the Agent Client Protocol,
+    * [[clai.acp.agent]]  -- the agent side of the Agent Client Protocol,
                               spoken over stdio.
     * `clai.providers.ollama` -- an HTTP client for a local or cloud Ollama
                               server, used to generate agent responses.
@@ -32,14 +32,6 @@
   tool-round cap defaults to 8 and can be overridden via the config file's
   `:max-tool-rounds` key or `CLAI_MAX_TOOL_ROUNDS`.
 
-  The Ollama client is built from the same environment variables as
-  `clai.providers.ollama` (`OLLAMA_HOST`, `OLLAMA_API_KEY`), unless a config
-  file overrides them (see `clai.config`). The model used
-  for chat defaults to `gemma3` and can be overridden via the config file's
-  `:model` key or the `CLAI_MODEL` environment variable. The per-prompt
-  tool-round cap defaults to 8 and can be overridden via the config file's
-  `:max-tool-rounds` key or `CLAI_MAX_TOOL_ROUNDS`.
-
   ## Running
 
       lein run            # start the agent over stdio
@@ -47,13 +39,17 @@
       CLAI_CONFIG=./my-clai.edn lein run
 
   A client (e.g. an ACP-compatible editor) launches this as a subprocess and
-  speaks newline-delimited JSON-RPC 2.0 to it; see `clai.acp` for the wire
-  format."
-  (:require [clai.acp :as acp]
+  speaks newline-delimited JSON-RPC 2.0 to it; see [[clai.acp.agent]] for the
+  wire format."
+  (:require [clai.log]
+            [clai.acp.agent :as acp]
+            [clai.acp.errors :as acp-errors]
             [clai.config :as config]
             [clai.providers.ollama :as ollama]
-            [clai.tools :as tools])
-  (:import [java.util UUID]))
+            [clai.tools :as tools]
+            [taoensso.telemere :as tel])
+  (:import [java.util UUID])
+  (:gen-class))
 
 ;; ---------------------------------------------------------------------------
 ;; Configuration
@@ -100,6 +96,10 @@
   [cwd]
   (let [id (str (UUID/randomUUID))]
     (swap! sessions assoc id {:cwd cwd :history []})
+    (tel/log! {:level :info
+               :id    ::session-created
+               :data  {:sessionId id :cwd cwd}}
+              "Created session")
     {:sessionId id}))
 
 (defn- lookup-session
@@ -111,12 +111,22 @@
   "Remove `id` from the session store."
   [id]
   (swap! sessions dissoc id)
+  (tel/log! {:level :debug
+             :id    ::session-dropped
+             :data  {:sessionId id}}
+            "Dropped session")
   {})
 
 (defn- append-history
   "Append a `{role content}` message to session `id` and return it."
   [id message]
   (swap! sessions update-in [id :history] (fnil conj []) message)
+  (tel/log! {:level :debug
+             :id    ::history-append
+             :data  {:sessionId id
+                     :role      (:role message)
+                     :chars     (count (str (:content message)))}}
+            "Appended message to history")
   message)
 
 (defn- session-history
@@ -163,8 +173,8 @@
   Ollama messages.
 
   ACP v2 sends `:prompt` as a vector of `Message` objects. To be tolerant of
-  simpler clients (and the echo example in `clai.acp`), a bare string or a
-  single message map is also accepted."
+  simpler clients (and the echo example in [[clai.acp.agent]]), a bare string
+  or a single message map is also accepted."
   [prompt]
   (cond
     (nil? prompt)             []
@@ -172,11 +182,6 @@
     (map? prompt)             [(acp-message->ollama prompt)]
     (sequential? prompt)      (mapv acp-message->ollama prompt)
     :else                     [{:role "user" :content (str prompt)}]))
-
-(defn- ollama->acp-content
-  "Wrap a plain-text assistant reply as ACP content parts."
-  [text]
-  [{:type "text" :text text}])
 
 ;; ---------------------------------------------------------------------------
 ;; Tool-calling loop
@@ -202,7 +207,15 @@
   tool is offered."
   [cfg]
   (if (contains? cfg :tools)
-    (tools/specs-for (:tools cfg))
+    (let [requested (:tools cfg)
+          known     (set (keys (tools/registered-tools)))
+          unknown   (remove known requested)]
+      (when (seq unknown)
+        (tel/log! {:level :warn
+                   :id    ::unknown-configured-tools
+                   :data  {:tools (vec unknown)}}
+                  "Ignoring unknown tool ids from config"))
+      (tools/specs-for requested))
     (tools/specs)))
 
 (defn- session-tool-ctx
@@ -243,13 +256,21 @@
     (let [ctx      (session-tool-ctx session-id)
           results  (tools/execute-calls tool-calls ctx)]
       (doseq [call tool-calls]
-        (acp/send-session-update conn session-id
-          {:sessionUpdate "agent_message"
-           :messageId     (str (UUID/randomUUID))
-           :role          "agent"
-           :content       (ollama->acp-content
-                           (describe-tool-call call))}))
+        (tel/log! {:level :info
+                   :id    ::tool-call
+                   :data  {:sessionId session-id
+                           :tool      (or (-> call :function :name)
+                                          (:name call)
+                                          "?")}}
+                  "Executing tool call")
+        (acp/send-agent-message-chunk conn session-id
+                           (describe-tool-call call)))
       (run! #(append-history session-id %) results)
+      (tel/log! {:level :debug
+                 :id    ::tool-round-complete
+                 :data  {:sessionId session-id
+                         :results   (count results)}}
+                "Tool round complete")
       (session-history session-id))))
 
 (defn- run-agent-loop
@@ -268,17 +289,37 @@
   [conn client model tool-specs chat-opts max-rounds session-id]
   (loop [round 0]
     (if (>= round max-rounds)
-      (str "Stopped after " max-rounds
-           " tool rounds without a final reply.")
-      (let [resp (try
-                   (ollama/chat client
-                     (merge {:model    model
-                             :messages (session-history session-id)
-                             :tools    tool-specs
-                             :stream   false}
-                            chat-opts))
-                   (catch Throwable e
-                     {:__error__ (ex-message e)}))]
+      (do
+        (tel/log! {:level :warn
+                   :id    ::tool-round-cap
+                   :data  {:sessionId session-id
+                           :maxRounds max-rounds}}
+                  "Stopped after tool round cap without a final reply")
+        (str "Stopped after " max-rounds
+             " tool rounds without a final reply."))
+      (let [history (session-history session-id)
+            _       (tel/log! {:level :debug
+                               :id    ::chat-request
+                               :data  {:sessionId session-id
+                                       :round     round
+                                       :model     model
+                                       :messages  (count history)
+                                       :tools     (count tool-specs)}}
+                              "Sending Ollama chat request")
+            resp    (try
+                      (ollama/chat client
+                        (merge {:model    model
+                                :messages history
+                                :tools    tool-specs
+                                :stream   false}
+                               chat-opts))
+                      (catch Throwable e
+                        (tel/error! {:id   ::chat-request-failed
+                                     :data {:sessionId session-id
+                                            :round     round
+                                            :model     model}}
+                                    e)
+                        {:__error__ (ex-message e)}))]
         (cond
           (:__error__ resp)
           (str "Ollama request failed: " (:__error__ resp))
@@ -291,6 +332,12 @@
               (let [content (or (:content msg) "")]
                 (append-history session-id
                                 {:role "assistant" :content content})
+                (tel/log! {:level :debug
+                           :id    ::chat-response
+                           :data  {:sessionId session-id
+                                   :round     round
+                                   :chars     (count content)}}
+                          "Received Ollama chat response")
                 content))))))))
 
 ;; ---------------------------------------------------------------------------
@@ -321,20 +368,34 @@
                                     (when-some [v (get cfg k)]
                                       [k v])))
                             [:options :think :format])]
+     (tel/log! {:level :info
+                :id    ::agent-configured
+                :data  {:model          model
+                        :tools          (count tool-specs)
+                        :max-rounds     max-rounds
+                        :system-prompt? (some? sys-prompt)
+                        :host           (:host client)}}
+               "Configured clai agent")
      (reify acp/AgentHandler
        (handle-initialize [_ _conn {:keys [protocolVersion]}]
-         {:protocolVersion (min acp/current-protocol-version
-                                (long (or protocolVersion 2)))
-          :info            {:name    "clai"
-                            :title   "clai agent"
-                            :version "0.1.0-SNAPSHOT"}
-          :capabilities    {}})
+         (let [negotiated (min acp/current-protocol-version
+                               (long (or protocolVersion 2)))]
+           (tel/log! {:level :debug
+                      :id    ::initialize
+                      :data  {:client-protocol protocolVersion
+                              :negotiated      negotiated}}
+                     "Initialized ACP connection")
+           {:protocolVersion negotiated
+            :info            {:name    "clai"
+                              :title   "clai agent"
+                              :version "0.1.0-SNAPSHOT"}
+            :capabilities    {}}))
 
        (handle-auth-login [_ _conn _params]
-         (acp/acp-error acp/err-method))
+         (acp-errors/acp-error acp-errors/err-method))
 
        (handle-auth-logout [_ _conn _params]
-         (acp/acp-error acp/err-method))
+         (acp-errors/acp-error acp-errors/err-method))
 
        (handle-session-new [_ _conn {:keys [cwd]}]
          (let [res (create-session cwd)]
@@ -344,6 +405,10 @@
            res))
 
        (handle-session-list [_ _conn _params]
+         (tel/log! {:level :debug
+                    :id    ::session-list
+                    :data  {:count (count @sessions)}}
+                   "Listed sessions")
          {:sessions (for [[id {:keys [cwd]}] @sessions]
                       {:sessionId id :cwd cwd})})
 
@@ -354,68 +419,98 @@
          ;; If the session is unknown, register a fresh one under the
          ;; requested id (with the configured system prompt, if any) so
          ;; resume degrades to new rather than erroring.
-         (when-not (lookup-session sessionId)
-           (swap! sessions assoc sessionId
-                  {:cwd     cwd
-                   :history (if sys-prompt
-                              [{:role "system" :content sys-prompt}]
-                              [])}))
+         (if (lookup-session sessionId)
+           (tel/log! {:level :debug
+                      :id    ::session-resumed
+                      :data  {:sessionId sessionId}}
+                     "Resumed existing session")
+           (do
+             (swap! sessions assoc sessionId
+                    {:cwd     cwd
+                     :history (if sys-prompt
+                                [{:role "system" :content sys-prompt}]
+                                [])})
+             (tel/log! {:level :info
+                        :id    ::session-registered
+                        :data  {:sessionId sessionId :cwd cwd}}
+                       "Registered session during resume")))
          {:sessionId sessionId})
 
        (handle-session-close [_ _conn {:keys [sessionId]}]
          (drop-session sessionId))
 
        (handle-session-set-config-option [_ _conn _params]
-         (acp/acp-error acp/err-method))
+         (acp-errors/acp-error acp-errors/err-method))
 
        (handle-session-prompt [_ conn {:keys [sessionId prompt]}]
          (let [msg-id (str (UUID/randomUUID))]
            (if-not (lookup-session sessionId)
              ;; Unknown session: tell the client and bail.
              (do
-               (acp/send-session-update conn sessionId
-                 {:sessionUpdate "agent_message"
-                  :messageId     msg-id
-                  :role          "agent"
-                  :content       (ollama->acp-content
-                                  (str "No session " sessionId))})
-               (acp/send-session-update conn sessionId
-                 {:sessionUpdate "state_update"
-                  :state         "idle"
-                  :stopReason    "error"})
-               {:messageId msg-id})
+               (tel/log! {:level :warn
+                          :id    ::unknown-session-prompt
+                          :data  {:sessionId sessionId}}
+                         "Received prompt for unknown session")
+               (acp/send-agent-message-chunk conn sessionId
+                                  (str "No session " sessionId))
+               {:stopReason "end_turn"})
              ;; Append the incoming prompt, then drive the Ollama conversation
              ;; to completion -- executing any tool calls the model makes along
              ;; the way -- and relay the final reply.
              (let [incoming (acp-prompt->ollama-messages prompt)
                    _        (run! #(append-history sessionId %) incoming)
+                   _        (tel/log! {:level :info
+                                      :id    ::prompt-received
+                                      :data  {:sessionId sessionId
+                                              :messages  (count incoming)
+                                              :chars     (reduce + 0
+                                                                 (map #(count (str (:content %)))
+                                                                      incoming))}}
+                                     "Received prompt")
                    reply    (run-agent-loop conn client model
                                             tool-specs chat-opts
                                             max-rounds sessionId)]
-               (acp/send-session-update conn sessionId
-                 {:sessionUpdate "agent_message"
-                  :messageId     msg-id
-                  :role          "agent"
-                  :content       (ollama->acp-content reply)})
-               (acp/send-session-update conn sessionId
-                 {:sessionUpdate "state_update"
-                  :state         "idle"
-                  :stopReason    "end_turn"})
-               {:messageId msg-id}))))
+               (tel/log! {:level :info
+                          :id    ::prompt-complete
+                          :data  {:sessionId sessionId
+                                  :messageId msg-id
+                                  :chars     (count (str reply))}}
+                         "Prompt complete")
+               (acp/send-agent-message-chunk conn sessionId
+                  reply)
+               {:stopReason "end_turn"}))))
 
        (on-session-cancel [_ conn {:keys [sessionId]}]
          ;; No background work to cancel for the synchronous handler; just
          ;; return to idle so the client can issue the next prompt.
+         (tel/log! {:level :debug
+                    :id    ::session-cancel
+                    :data  {:sessionId sessionId}}
+                   "Session cancelled")
          (acp/send-session-update conn sessionId
            {:sessionUpdate "state_update"
             :state         "idle"
             :stopReason    "cancelled"})
          nil)
 
-       (on-cancel-request [_ _conn _params] nil)
-       (on-notification [_ _conn _method _params] nil)
-       (on-ext-request [_ _conn _method _params]
-         (acp/acp-error acp/err-method))))))
+       (on-cancel-request [_ _conn params]
+         (tel/log! {:level :debug
+                    :id    ::cancel-request
+                    :data  {:requestId (:requestId params)}}
+                   "Cancel request received")
+         nil)
+       (on-notification [_ _conn method _params]
+         (tel/log! {:level :debug
+                    :id    ::extension-notification
+                    :data  {:method method}}
+                   "Ignoring extension notification")
+         nil)
+       (on-ext-request [_ _conn method _params]
+         (tel/log! {:level :debug
+                    :id    ::extension-request
+                    :data  {:method method}}
+                   "Rejecting extension request")
+         (acp-errors/acp-error acp-errors/err-method))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Entry point
@@ -426,4 +521,13 @@
   `session/prompt` requests by calling the Ollama chat API. Blocks until stdin
   reaches EOF (the client disconnected)."
   [& _args]
-  (acp/run (ollama-agent)))
+  (tel/log! {:level :info :id ::agent-starting}
+            "Starting clai ACP agent over stdio")
+  (try
+    (acp/run (ollama-agent))
+    (catch Throwable e
+      (tel/error! {:id ::agent-failed} e)
+      (throw e))
+    (finally
+      (tel/log! {:level :info :id ::agent-stopping}
+                "clai ACP agent stopped"))))

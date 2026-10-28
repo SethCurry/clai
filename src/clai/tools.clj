@@ -29,9 +29,11 @@
   Tool execution never throws out to the caller: if a tool function raises,
   the exception message is returned as the tool result so the model can react.
   "
-  (:require [cheshire.core :as json]
+  (:require [clai.log]
+            [cheshire.core :as json]
             [clojure.java.io :as io]
-            [clojure.string :as str])
+            [clojure.string :as str]
+            [taoensso.telemere :as tel])
   (:import [java.io File]
            [java.util.concurrent TimeUnit]))
 
@@ -48,13 +50,22 @@
   replacing any existing tool with the same id. Returns the tool."
   [tool]
   (swap! registry assoc (:id tool) tool)
+  (tel/log! {:level :debug
+             :id    ::register-tool
+             :data  {:tool (:id tool)}}
+            "Registered tool")
   tool)
 
 (defn unregister-tool!
   "Remove the tool with `id` from the registry, if present. Returns nil."
   [id]
-  (swap! registry dissoc id)
-  nil)
+  (let [removed? (contains? @registry id)]
+    (swap! registry dissoc id)
+    (tel/log! {:level :debug
+               :id    ::unregister-tool
+               :data  {:tool id :removed? removed?}}
+              "Unregistered tool")
+    nil))
 
 (defn registered-tools
   "Return the current registry as a map `{id tool}`. Mainly for inspection
@@ -97,6 +108,10 @@
       (try
         (json/parse-string arguments true)
         (catch Exception _
+          (tel/log! {:level :debug
+                     :id    ::unparseable-arguments
+                     :data  {:length (count arguments)}}
+                    "Could not parse tool arguments as JSON")
           {:__parse_error__ arguments})))
     :else                {}))
 
@@ -128,13 +143,39 @@
   (let [tool (get @registry id)]
     (cond
       (nil? tool)
-      (str "Error: unknown tool '" id "'")
+      (do
+        (tel/log! {:level :warn
+                   :id    ::unknown-tool
+                   :data  {:tool id}}
+                  "Attempted to invoke unknown tool")
+        (str "Error: unknown tool '" id "'"))
 
       :else
-      (try
-        (coerce-result ((:fn tool) (normalize-args args) ctx))
-        (catch Throwable e
-          (str "Error: " (or (ex-message e) (class e))))))))
+      (let [args'  (normalize-args args)
+            start  (System/nanoTime)]
+        (tel/log! {:level :debug
+                   :id    ::tool-invoke
+                   :data  {:tool     id
+                           :arg-keys (vec (keys args'))
+                           :cwd      (:cwd ctx)}}
+                  "Invoking tool")
+        (try
+          (let [result (coerce-result ((:fn tool) args' ctx))
+                msecs  (quot (- (System/nanoTime) start) 1000000)]
+            (tel/log! {:level :debug
+                       :id    ::tool-complete
+                       :data  {:tool         id
+                               :elapsed-ms   msecs
+                               :result-chars (count result)
+                               :error?       (str/starts-with? result "Error:")}}
+                      "Tool completed")
+            result)
+          (catch Throwable e
+            (tel/error! {:id   ::tool-failed
+                         :data {:tool     id
+                                :arg-keys (vec (keys args'))}}
+                        e)
+            (str "Error: " (or (ex-message e) (class e)))))))))
 
 (defn- tool-call->id+args
   "Extract `[tool-id args]` from one Ollama `tool_calls` entry. Tolerates both
@@ -154,6 +195,12 @@
   `ctx` is passed to each tool function; it should carry at least `:cwd` for
   the filesystem/shell tools."
   [tool-calls ctx]
+  (tel/log! {:level :debug
+             :id    ::execute-tool-calls
+             :data  {:count (count tool-calls)
+                     :tools (mapv #(or (-> % :function :name) (:name %) "?")
+                                  tool-calls)}}
+            "Executing tool calls")
   (vec
    (for [call tool-calls]
      (let [[id args] (tool-call->id+args call)
@@ -228,6 +275,11 @@
                                   (io/file)
                                   .getAbsoluteFile))
                   (.redirectErrorStream true))]
+    (tel/log! {:level :debug
+               :id    ::run-command
+               :data  {:command (str command)
+                       :cwd     (:cwd ctx)}}
+              "Running shell command")
     (let [proc (.start builder)]
       (try
         (let [^String joined (with-open [r (io/reader (.getInputStream proc))]
@@ -241,6 +293,15 @@
                        (.waitFor proc 30 TimeUnit/SECONDS)
                        (catch InterruptedException _ false))
               code   (when exited (.exitValue proc))]
+          (if exited
+            (tel/log! {:level (if (zero? code) :debug :warn)
+                       :id    ::run-command-complete
+                       :data  {:exit-code code :chars (count body)}}
+                      "Shell command completed")
+            (tel/log! {:level :warn
+                       :id    ::run-command-timeout
+                       :data  {:command (str command)}}
+                      "Shell command timed out after 30s"))
           (cond-> (str body)
             (not exited) (str "\n[timed out after 30s]")
             (and exited (not (zero? code))) (str "\n[exit code " code "]")))

@@ -1,7 +1,8 @@
 (ns clai.config-test
   (:require [clojure.test :refer :all]
             [clojure.java.io :as io]
-            [clai.config :as config]))
+            [clai.config :as config]
+            [clai.test-support :refer [quiet-logs]]))
 
 ;; ---------------------------------------------------------------------------
 ;; Helpers
@@ -20,6 +21,8 @@
   (let [path (tmp-file)]
     (spit path content)
     path))
+
+(use-fixtures :once quiet-logs)
 
 (use-fixtures :each
   (fn [f]
@@ -88,8 +91,13 @@
       (is (= path (config/config-path))))))
 
 (deftest config-path-nil-when-none-exist
-  (with-redefs [config/env-config-path (constantly nil)]
-    (is (nil? (config/config-path)))))
+  ;; Point every candidate location at an absent file so the result does not
+  ;; depend on whether the machine running the tests has a real config file.
+  (let [missing (java.io.File. (tmp-file))]
+    (with-redefs [config/env-config-path (constantly nil)
+                  config/cwd-config-file (constantly missing)
+                  config/home-config-file (constantly missing)]
+      (is (nil? (config/config-path))))))
 
 (deftest candidates-are-absolute-strings
   (with-redefs [config/env-config-path (constantly "/tmp/clai-candidate.edn")]

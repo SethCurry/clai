@@ -1,4 +1,4 @@
-(ns clai.acp
+(ns clai.acp.agent
   "Agent-side [Agent Client Protocol][acp] (v2) connection over stdio.
 
   [acp]: https://agentclientprotocol.com/protocol/v2/overview
@@ -60,11 +60,14 @@
   ACP schema (`:protocolVersion`, `:sessionId`, `:sessionUpdate`, ...), the
   same convention used by the rest of `clai`.
   "
-  (:require [cheshire.core :as json]
+  (:require [clai.log]
+            [cheshire.core :as json]
             [clojure.java.io :as io]
             [clojure.string :as str]
-            [malli.core :as m]
-            [malli.error :as me])
+            [clai.acp.schemas :as schemas]
+            [clai.acp.jsonrpc :as jsonrpc]
+            [clai.acp.errors :as errors]
+            [taoensso.telemere :as tel])
   (:import [java.io BufferedReader BufferedWriter InputStream OutputStream
             Reader Writer]
            [java.util.concurrent Callable Executors ExecutorService
@@ -87,249 +90,35 @@
   [protocol-version-2])
 
 ;; ---------------------------------------------------------------------------
-;; JSON-RPC / ACP error codes
+;; Re-exported helpers
 ;; ---------------------------------------------------------------------------
 
-(def ^:const err-parse        -32700)
-(def ^:const err-invalid      -32600)
-(def ^:const err-method       -32601)
-(def ^:const err-params       -32602)
-(def ^:const err-internal     -32603)
-(def ^:const err-cancelled    -32800)
-(def ^:const err-auth         -32000)
-(def ^:const err-not-found    -32002)
-(def ^:const err-protocol-ver -32022)
+;; These names used to live in this namespace before `errors` and `jsonrpc`
+;; were split out. Keep them available here so handlers only need one require.
+(def err-parse        errors/err-parse)
+(def err-invalid      errors/err-invalid)
+(def err-method       errors/err-method)
+(def err-params       errors/err-params)
+(def err-internal     errors/err-internal)
+(def err-cancelled    errors/err-cancelled)
+(def err-auth         errors/err-auth)
+(def err-not-found    errors/err-not-found)
+(def err-protocol-ver errors/err-protocol-ver)
 
-(def ^:private default-error-messages
-  {err-parse        "Parse error"
-   err-invalid      "Invalid request"
-   err-method       "Method not found"
-   err-params       "Invalid params"
-   err-internal     "Internal error"
-   err-cancelled    "Request cancelled"
-   err-auth         "Authentication required"
-   err-not-found    "Resource not found"
-   err-protocol-ver "Unsupported protocol version"})
+(def acp-error    errors/acp-error)
+(def acp-error?   errors/acp-error?)
+(def throw-acp    errors/throw-acp)
+(def ex->acp-error errors/ex->acp-error)
 
-(defrecord AcpError
-    [^long code ^String message data])
-
-(defn acp-error
-  "Build an ACP error value. Handlers return or throw these to signal a
-  JSON-RPC error response. `data` is optional, opaque to the protocol."
-  ([code] (acp-error code nil nil))
-  ([code message] (acp-error code message nil))
-  ([code message data]
-   (->AcpError (long code)
-               (or message (default-error-messages code "ACP error"))
-               data)))
-
-(defn ^:no-doc acp-error?
-  [x]
-  (instance? AcpError x))
-
-(defn ^:no-doc throw-acp
-  "Throw an `AcpError` as an `ex-info` carrying `:acp/error`."
-  [^AcpError err]
-  (throw (ex-info (or (.-message err) "ACP error")
-                  {:acp/error err})))
-
-(defn- ex->acp-error
-  "Extract an `AcpError` from an exception, defaulting to internal error."
-  [^Exception e]
-  (if-let [err (-> (ex-data e) :acp/error)]
-    err
-    (let [msg (or (ex-message e) "Internal error")]
-      (cond-> (acp-error err-internal msg)
-        (instance? InterruptedException e)
-        (assoc :code err-cancelled
-               :message (default-error-messages err-cancelled))))))
-
-;; ---------------------------------------------------------------------------
-;; Schemas
-;; ---------------------------------------------------------------------------
-
-(def non-empty-string
-  "A string of at least one character."
-  [:re #".+"])
-
-(def session-id
-  "ACP session identifier (opaque string)."
-  non-empty-string)
-
-(def request-id
-  "A JSON-RPC id: integer, string, or nil (for notifications)."
-  [:or int? string? :nil])
-
-(def json-rpc-request
-  "A JSON-RPC 2.0 request object."
-  [:map
-   [:jsonrpc [:= "2.0"]]
-   [:id request-id]
-   [:method non-empty-string]
-   [:params {:optional true} [:map]]])
-
-(def json-rpc-notification
-  "A JSON-RPC 2.0 notification (no id)."
-  [:map
-   [:jsonrpc [:= "2.0"]]
-   [:method non-empty-string]
-   [:params {:optional true} [:map]]])
-
-(def json-rpc-error-object
-  "The `error` object inside an error response."
-  [:map
-   [:code int?]
-   [:message string?]
-   [:data {:optional true} :any]])
-
-(def json-rpc-response
-  "A JSON-RPC 2.0 response object (success or error)."
-  [:and
-   [:map
-    [:jsonrpc [:= "2.0"]]
-    [:id request-id]]
-   [:or
-    [:map [:result :any]]
-    [:map [:error json-rpc-error-object]]]])
-
-(def implementation-info
-  "The `:info` map advertised by an agent/client."
-  [:map
-   [:name non-empty-string]
-   [:version non-empty-string]
-   [:title {:optional true} string?]])
-
-(def agent-capabilities
-  "The `capabilities` map advertised by an agent."
-  [:map])
-
-(def auth-method
-  "A single entry in `authMethods`."
-  [:map
-   [:methodId non-empty-string]
-   [:title {:optional true} string?]
-   [:description {:optional true} string?]])
-
-(def initialize-params
-  "Params for the `initialize` request."
-  [:map
-   [:protocolVersion pos-int?]
-   [:info {:optional true} implementation-info]
-   [:capabilities {:optional true} [:map]]])
-
-(def initialize-response
-  "Result of the `initialize` request."
-  [:map
-   [:protocolVersion pos-int?]
-   [:info implementation-info]
-   [:capabilities {:optional true} agent-capabilities]
-   [:authMethods {:optional true} [:sequential auth-method]]])
-
-(def session-new-params
-  "Params for `session/new`."
-  [:map
-   [:cwd {:optional true} string?]
-   [:additionalDirectories {:optional true} [:sequential string?]]
-   [:mcpServers {:optional true} [:sequential [:map]]]])
-
-(def session-new-response
-  "Result of `session/new`."
-  [:map
-   [:sessionId session-id]])
-
-(def session-list-params
-  "Params for `session/list`."
-  [:map
-   [:cwd {:optional true} string?]
-   [:cursor {:optional true} string?]])
-
-(def session-list-response
-  "Result of `session/list`."
-  [:map
-   [:sessions {:optional true} [:sequential [:map]]]
-   [:nextCursor {:optional true} string?]])
-
-(def session-id-params
-  "Params for methods that only take a `:sessionId` (delete/close)."
-  [:map
-   [:sessionId session-id]])
-
-(def session-resume-params
-  "Params for `session/resume`."
-  [:map
-   [:sessionId session-id]
-   [:cwd {:optional true} string?]
-   [:additionalDirectories {:optional true} [:sequential string?]]
-   [:mcpServers {:optional true} [:sequential [:map]]]
-   [:replayFrom {:optional true} string?]])
-
-(def session-prompt-params
-  "Params for `session/prompt`."
-  [:map
-   [:sessionId session-id]
-   [:prompt [:or string? [:sequential [:map]]]]])
-
-(def session-prompt-response
-  "Result of `session/prompt`."
-  [:map
-   [:messageId non-empty-string]])
-
-(def session-cancel-params
-  "Params for the `session/cancel` notification."
-  [:map
-   [:sessionId session-id]])
-
-(def cancel-request-params
-  "Params for the `$/cancel_request` notification."
-  [:map
-   [:requestId [:or int? string?]]])
-
-(def session-update
-  "One `SessionUpdate` object, discriminated by `:sessionUpdate`."
-  [:map
-   [:sessionUpdate non-empty-string]])
-
-(def session-update-params
-  "Params carried by a `session/update` notification."
-  [:map
-   [:sessionId session-id]
-   [:update session-update]])
-
-(def request-permission-opts
-  "Body of `session/request_permission`."
-  [:map
-   [:sessionId session-id]
-   [:title string?]
-   [:options [:sequential [:map]]]
-   [:description {:optional true} string?]
-   [:subject {:optional true} [:map]]])
-
-(def create-elicitation-opts
-  "Body of `elicitation/create`."
-  [:map])
-
-(def complete-elicitation-params
-  "Body of `elicitation/complete`."
-  [:map
-   [:elicitationId non-empty-string]])
-
-(def acp-error-schema
-  "An `AcpError` value (code/message/data)."
-  [:map
-   [:code int?]
-   [:message string?]
-   [:data {:optional true} :any]])
-
-(defn validate!
-  "Validate `value` against `schema`, returning `value` when valid or throwing
-  an `ex-info` with a human-readable malli error explanation otherwise."
-  [schema value what]
-  (if-let [errors (and schema (m/explain schema value))]
-    (throw (ex-info (str "Invalid " what ": "
-                         (-> errors me/humanize pr-str))
-                    {:schema schema :value value :errors errors})))
-  value)
+(def ^:private clean jsonrpc/clean)
+(def write-message     jsonrpc/write-message)
+(def response-envelope jsonrpc/response-envelope)
+(def error-envelope    jsonrpc/error-envelope)
+(def send-response     jsonrpc/send-response)
+(def send-error        jsonrpc/send-error)
+(def send-notification jsonrpc/send-notification)
+(def send-request      jsonrpc/send-request)
+(def await-request     jsonrpc/await-request)
 
 ;; ---------------------------------------------------------------------------
 ;; Agent handler protocol
@@ -424,34 +213,34 @@
                  :info            (or info default-info)}
           (some? capabilities)  (assoc :capabilities capabilities)
           (seq auth-methods)    (assoc :authMethods auth-methods))
-        (throw-acp
-         (acp-error err-protocol-ver
-                    (default-error-messages err-protocol-ver)
+        (errors/throw-acp
+         (errors/acp-error errors/err-protocol-ver
+                    (errors/default-error-messages errors/err-protocol-ver)
                     {:requested protocolVersion
                      :supported (vec supported)})))))
   (handle-auth-login [_ _conn _params]
-    (acp-error err-method))
+    (errors/acp-error errors/err-method))
   (handle-auth-logout [_ _conn _params]
-    (acp-error err-method))
+    (errors/acp-error errors/err-method))
   (handle-session-new [_ _conn _params]
-    (acp-error err-method))
+    (errors/acp-error errors/err-method))
   (handle-session-list [_ _conn _params]
-    (acp-error err-method))
+    (errors/acp-error errors/err-method))
   (handle-session-delete [_ _conn _params]
-    (acp-error err-method))
+    (errors/acp-error errors/err-method))
   (handle-session-resume [_ _conn _params]
-    (acp-error err-method))
+    (errors/acp-error errors/err-method))
   (handle-session-close [_ _conn _params]
-    (acp-error err-method))
+    (errors/acp-error errors/err-method))
   (handle-session-set-config-option [_ _conn _params]
-    (acp-error err-method))
+    (errors/acp-error errors/err-method))
   (handle-session-prompt [_ _conn _params]
-    (acp-error err-method))
+    (errors/acp-error errors/err-method))
   (on-session-cancel [_ _conn _params] nil)
   (on-cancel-request [_ _conn _params] nil)
   (on-notification [_ _conn _method _params] nil)
   (on-ext-request [_ _conn _method _params]
-    (acp-error err-method)))
+    (errors/acp-error errors/err-method)))
 
 (defn default-handler
   "Build a `DefaultHandler` with the given options:
@@ -492,13 +281,13 @@
 
 (def ^:private request-method->params-schema
   "Maps each known request method to the malli schema for its `params`."
-  {"initialize"                 initialize-params
-   "session/new"                session-new-params
-   "session/list"               session-list-params
-   "session/delete"             session-id-params
-   "session/resume"             session-resume-params
-   "session/close"              session-id-params
-   "session/prompt"             session-prompt-params})
+  {"initialize"                 schemas/initialize-params
+   "session/new"                schemas/session-new-params
+   "session/list"               schemas/session-list-params
+   "session/delete"             schemas/session-id-params
+   "session/resume"             schemas/session-resume-params
+   "session/close"              schemas/session-id-params
+   "session/prompt"             schemas/session-prompt-params})
 
 (def ^:private notification-method->handler-fn
   {"session/cancel"     #'on-session-cancel
@@ -548,130 +337,43 @@
   loop. Construction does no I/O."
   ([handler] (make-connection handler nil))
   ([handler {:keys [in out]
-             :or {in  (System/in)
-                  out (System/out)}}]
+             :or {in  System/in
+                  out System/out}}]
    (let [^Reader   reader (cond-> in (instance? InputStream in) (io/reader))
-         ^Writer   writer (cond-> out (instance? OutputStream out) (io/writer))]
-     (->StdioConnection
-      (BufferedReader. reader)
-      (BufferedWriter. writer)
-      (Object.)
-      (AtomicLong. 1)
-      (atom {})                            ; pending
-      (atom {})                            ; cancellable
-      (atom {:initialized? false
-             :protocol-version nil
-             :client-info nil
-             :client-capabilities nil})
-      (make-executor)
-      handler))))
+         ^Writer   writer (cond-> out (instance? OutputStream out) (io/writer))
+         conn
+         (->StdioConnection
+          (BufferedReader. reader)
+          (BufferedWriter. writer)
+          (Object.)
+          (AtomicLong. 1)
+          (atom {})                            ; pending
+          (atom {})                            ; cancellable
+          (atom {:initialized? false
+                 :protocol-version nil
+                 :client-info nil
+                 :client-capabilities nil})
+          (make-executor)
+          handler)]
+     (tel/log! {:level :debug
+                :id    ::connection-created
+                :data  {:handler (str (class handler))}}
+               "Created ACP stdio connection")
+     conn)))
 
 (defn shutdown
   "Stop the connection's worker pool. The reader loop exits on stdin EOF and
   calls this automatically; call it explicitly when integrating elsewhere."
   ([conn] (shutdown conn 1))
   ([conn ^long await-seconds]
+   (tel/log! {:level :debug
+              :id    ::shutdown
+              :data  {:await-seconds await-seconds}}
+             "Shutting down ACP connection")
    (let [^ExecutorService ex (:executor conn)]
      (when ex
        (.shutdownNow ex)
        (.awaitTermination ex await-seconds TimeUnit/SECONDS)))))
-
-;; ---------------------------------------------------------------------------
-;; Output: JSON-RPC framing
-;; ---------------------------------------------------------------------------
-
-(defn- clean
-  "Drop top-level keys whose value is `nil`, so omitted fields stay off the
-  wire. Nested maps are left untouched."
-  [m]
-  (if (map? m)
-    (into {} (remove (comp nil? val)) m)
-    m))
-
-(defn- write-message
-  "Encode `obj` as a single-line JSON document, write it to stdout followed by
-  a newline, and flush. Serialized through `out-lock` so concurrent writers
-  never interleave bytes."
-  [{:keys [^Writer out ^Object out-lock]} obj]
-  (locking out-lock
-    (.write out (json/generate-string (clean obj)))
-    (.write out "\n")
-    (.flush out)))
-
-(defn- response-envelope
-  [id result]
-  {:jsonrpc "2.0" :id id :result result})
-
-(defn- error-envelope
-  [id ^AcpError err]
-  {:jsonrpc "2.0"
-   :id id
-   :error (cond-> {:code (.-code err) :message (.-message err)}
-            (some? (.-data err)) (assoc :data (.-data err)))})
-
-(defn send-response
-  "Send a successful JSON-RPC response for `id` with `result`."
-  [conn id result]
-  (write-message conn (response-envelope id result))
-  nil)
-
-(defn send-error
-  "Send a JSON-RPC error response for `id`. `err` is an `AcpError` or a
-  `[code message data]` triple."
-  [conn id err]
-  (let [err (cond
-              (acp-error? err) err
-              (vector? err)    (apply acp-error err)
-              :else            (acp-error err-internal))]
-    (write-message conn (error-envelope id err)))
-  nil)
-
-(defn send-notification
-  "Send a JSON-RPC notification (no `id`, no response expected). `params` may
-  be `nil` to omit the `params` field."
-  ([conn method] (send-notification conn method nil))
-  ([conn method params]
-   (let [msg (cond-> {:jsonrpc "2.0" :method method}
-               (some? params) (assoc :params params))]
-     (write-message conn msg))
-   nil))
-
-(defn send-request
-  "Send a JSON-RPC request to the client and return a `clojure.core/promise`
-  that will deliver a response envelope: `{:result ...}` on success or
-  `{:error {:code ... :message ... :data ...}}` on failure.
-
-  Use `await-request` to block for the result."
-  ([conn method] (send-request conn method nil))
-  ([conn method params]
-   (let [id      (.getAndIncrement ^AtomicLong (:next-id conn))
-         promise (promise)
-         msg     (cond-> {:jsonrpc "2.0" :id id :method method}
-                   (some? params) (assoc :params params))]
-     (swap! (:pending conn) assoc id promise)
-     (write-message conn msg)
-     promise)))
-
-(defn await-request
-  "Block on a promise from `send-request` for up to `timeout-ms` milliseconds,
-  returning the `result` on success. On error or timeout, throws an `ex-info`
-  carrying `:acp/error`."
-  ([promise] (await-request promise 60000))
-  ([promise ^long timeout-ms]
-   (let [envelope (deref promise timeout-ms ::timeout)]
-     (cond
-       (identical? envelope ::timeout)
-       (throw (ex-info "ACP request timed out"
-                       {:acp/error (acp-error err-internal "ACP request timed out")}))
-
-       (:error envelope)
-       (throw (ex-info (-> envelope :error :message)
-                       {:acp/error (->AcpError
-                                     (-> envelope :error :code)
-                                     (-> envelope :error :message)
-                                     (-> envelope :error :data))}))
-
-       :else (:result envelope)))))
 
 ;; ---------------------------------------------------------------------------
 ;; Convenience senders for common agent -> client messages
@@ -683,32 +385,60 @@
   discriminator (e.g. `{:sessionUpdate \"agent_message\" :messageId ...
   :role \"agent\" :content [...]}`)."
   [conn sid update]
-  (validate! session-id sid "send-session-update sessionId")
-  (validate! session-update update "send-session-update update")
-  (send-notification conn "session/update"
+  (schemas/validate! schemas/session-id sid "send-session-update sessionId")
+  (schemas/validate! schemas/session-update update "send-session-update update")
+  (tel/log! {:level :debug
+             :id    ::session-update
+             :data  {:sessionId sid
+                     :update    (:sessionUpdate update)}}
+            "Sending session update")
+  (jsonrpc/send-notification conn "session/update"
                      {:sessionId sid :update update}))
 
+(defn send-agent-message-chunk
+  [conn sid content]
+  (send-session-update conn sid {:sessionUpdate "agent_message_chunk"
+                                 :_meta nil
+                                 :messageId nil
+                                 :content {
+                                   :_meta nil
+                                   :annotations nil
+                                   :type "text"
+                                   :text content
+                                   }}))
 (defn request-permission
   "Send a `session/request_permission` request and return its promise. Blocks
   the caller only if they `await-request` the result. `opts` is the
   `RequestPermissionRequest` body (`:sessionId`, `:title`, `:options`,
   optional `:description`/`:subject`)."
   ([conn opts]
-   (validate! request-permission-opts opts "request-permission")
-   (send-request conn "session/request_permission" opts)))
+   (schemas/validate! schemas/request-permission-opts opts "request-permission")
+   (tel/log! {:level :debug
+              :id    ::request-permission
+              :data  {:sessionId (:sessionId opts)
+                      :title     (:title opts)}}
+             "Requesting permission from client")
+   (jsonrpc/send-request conn "session/request_permission" opts)))
 
 (defn create-elicitation
   "Send an `elicitation/create` request and return its promise. `opts` is the
   `CreateElicitationRequest` body."
   ([conn opts]
-   (validate! create-elicitation-opts opts "create-elicitation")
-   (send-request conn "elicitation/create" opts)))
+   (schemas/validate! schemas/create-elicitation-opts opts "create-elicitation")
+   (tel/log! {:level :debug
+              :id    ::create-elicitation}
+             "Creating elicitation")
+   (jsonrpc/send-request conn "elicitation/create" opts)))
 
 (defn complete-elicitation
   "Send an `elicitation/complete` notification for `elicitation-id`."
   [conn elicitation-id]
-  (validate! non-empty-string elicitation-id "complete-elicitation elicitationId")
-  (send-notification conn "elicitation/complete"
+  (schemas/validate! schemas/non-empty-string elicitation-id "complete-elicitation elicitationId")
+  (tel/log! {:level :debug
+             :id    ::complete-elicitation
+             :data  {:elicitationId elicitation-id}}
+            "Completing elicitation")
+  (jsonrpc/send-notification conn "elicitation/complete"
                      {:elicitationId elicitation-id}))
 
 ;; ---------------------------------------------------------------------------
@@ -723,22 +453,30 @@
   [conn handler-fn-var method params]
   (try
     (when-let [schema (request-method->params-schema method)]
-      (validate! schema params (str "params for " method)))
+      (schemas/validate! schema params (str "params for " method)))
     (@handler-fn-var (:handler conn) conn params)
     (catch clojure.lang.ExceptionInfo e
-      (if (-> (ex-data e) :errors)
-        (acp-error err-params
-                   (default-error-messages err-params)
-                   (-> (ex-data e) :errors))
-        (ex->acp-error e)))
+      (if-let [errors (-> (ex-data e) :errors)]
+        ;; `schemas/validate!` has already logged the validation failure.
+        (errors/acp-error errors/err-params
+                   (errors/default-error-messages errors/err-params)
+                   errors)
+        (do
+          (tel/log! {:level :warn
+                     :id    ::handler-acp-error
+                     :data  {:method   method
+                             :acp-code (some-> (ex-data e) :acp/error :code)}}
+                    (or (ex-message e) "ACP handler error"))
+          (errors/ex->acp-error e))))
     (catch Throwable e
-      (ex->acp-error e))))
+      (tel/error! {:id ::handler-threw :data {:method method}} e)
+      (errors/ex->acp-error e))))
 
 (defn- resolve-result
   "Normalize a handler return value into either `{:result ...}` or
   `{:error ...}`."
   [value]
-  (if (acp-error? value)
+  (if (errors/acp-error? value)
     {:error value}
     {:result value}))
 
@@ -747,6 +485,10 @@
   cancellable, and send its response when complete. Returns nil; the response
   write is scheduled asynchronously."
   [{:keys [handler cancellable executor] :as conn} id method params]
+  (tel/log! {:level :debug
+             :id    ::request-received
+             :data  {:id id :method method}}
+            "Handling ACP request")
   (let [run-fn (fn []
                  (try
                    (let [result-map
@@ -757,10 +499,14 @@
                            (resolve-result
                             (try
                               (on-ext-request handler conn method params)
-                              (catch Throwable e (ex->acp-error e)))))]
+                              (catch Throwable e
+                                (tel/error! {:id ::ext-request-threw
+                                             :data {:method method}}
+                                            e)
+                                (errors/ex->acp-error e)))))]
                      (if (:error result-map)
-                       (send-error conn id (:error result-map))
-                       (send-response conn id (:result result-map))))
+                       (jsonrpc/send-error conn id (:error result-map))
+                       (jsonrpc/send-response conn id (:result result-map))))
                    (finally
                     (swap! cancellable dissoc id))))]
     (let [fut (.submit ^ExecutorService executor ^Runnable run-fn)]
@@ -775,26 +521,33 @@
     (when-let [rid (some-> params :requestId)]
       (when-let [fut (get @cancellable rid)]
         (future-cancel fut))))
+  (tel/log! {:level :debug
+             :id    ::notification-received
+             :data  {:method method}}
+            "Handling ACP notification")
   (let [run-fn (fn []
                  (try
                    (if-let [hf (notification-method->handler-fn method)]
                      (@hf handler conn params)
                      (on-notification handler conn method params))
                    (catch Throwable e
-                     ;; Notifications get no response; log to stderr.
-                     (.println System/err
-                               (str "clai.acp: notification handler '"
-                                    method "' threw: "
-                                    (ex-message e))))))]
+                     (tel/error! {:id   ::notification-handler-threw
+                                  :data {:method method}}
+                                 e))))]
     (.submit ^ExecutorService executor ^Runnable run-fn))
   nil)
 
 (defn- handle-incoming-response
   "Resolve a pending outbound request promise with its response envelope."
   [{:keys [pending]} id envelope]
-  (when-let [promise (get @pending id)]
-    (swap! pending dissoc id)
-    (deliver promise envelope))
+  (if-let [promise (get @pending id)]
+    (do
+      (swap! pending dissoc id)
+      (deliver promise envelope))
+    (tel/log! {:level :warn
+               :id    ::unexpected-response
+               :data  {:id id}}
+              "Received response for an unknown request id"))
   nil)
 
 (defn- classify
@@ -836,7 +589,10 @@
         (handle-incoming-response conn id envelope))
 
       :invalid
-      (write-message conn (error-envelope nil (acp-error err-invalid))))))
+      (do
+        (tel/log! {:level :warn :id ::invalid-message}
+                  "Received an invalid JSON-RPC message")
+        (jsonrpc/write-message conn (jsonrpc/error-envelope nil (errors/acp-error errors/err-invalid)))))))
 
 ;; `process-entry` sends request responses asynchronously from within
 ;; `handle-incoming-request`, which is correct for single messages but would
@@ -855,10 +611,12 @@
           (resolve-result
            (try
              (on-ext-request (:handler conn) conn method params)
-             (catch Throwable e (ex->acp-error e)))))]
+             (catch Throwable e
+               (tel/error! {:id ::ext-request-threw :data {:method method}} e)
+               (errors/ex->acp-error e)))))]
     (if (:error result-map)
-      (error-envelope id (:error result-map))
-      (response-envelope id (:result result-map)))))
+      (jsonrpc/error-envelope id (:error result-map))
+      (jsonrpc/response-envelope id (:result result-map)))))
 
 (defn- process-batch
   "Handle a JSON-RPC batch array. Each request entry runs on the worker pool;
@@ -866,16 +624,20 @@
   single array (or sends nothing if there are none). Notifications and
   responses inside the batch are dispatched for their side effects only."
   [conn entries]
+  (tel/log! {:level :debug
+             :id    ::batch-received
+             :data  {:count (count entries)}}
+            "Handling JSON-RPC batch")
   (let [response-futs (atom [])
         coordinator   (fn []
                         (let [responses (doall (keep deref @response-futs))]
                           (when (seq responses)
-                            (write-message conn responses))))]
+                            (jsonrpc/write-message conn responses))))]
     (doseq [entry entries]
       (cond
         (not (map? entry))
         (swap! response-futs conj
-               (future (error-envelope nil (acp-error err-invalid))))
+               (future (jsonrpc/error-envelope nil (errors/acp-error errors/err-invalid))))
 
         (and (contains? entry :method) (contains? entry :id))
         (let [id     (:id entry)
@@ -896,7 +658,7 @@
 
         :else
         (swap! response-futs conj
-               (future (error-envelope nil (acp-error err-invalid))))))
+               (future (jsonrpc/error-envelope nil (errors/acp-error errors/err-invalid))))))
     ;; If any responses are expected, schedule the coordinator to send them.
     (when (seq @response-futs)
       (.submit ^ExecutorService (:executor conn) ^Runnable coordinator)))
@@ -909,7 +671,10 @@
     (vector? parsed)
     (cond
       (empty? parsed)
-      (write-message conn (error-envelope nil (acp-error err-invalid)))
+      (do
+        (tel/log! {:level :warn :id ::empty-batch}
+                  "Received an empty JSON-RPC batch")
+        (jsonrpc/write-message conn (jsonrpc/error-envelope nil (errors/acp-error errors/err-invalid))))
       :else
       (process-batch conn parsed))
 
@@ -917,7 +682,10 @@
     (process-entry conn parsed)
 
     :else
-    (write-message conn (error-envelope nil (acp-error err-invalid)))))
+    (do
+      (tel/log! {:level :warn :id ::invalid-message}
+                "Received a non-object JSON-RPC message")
+      (jsonrpc/write-message conn (jsonrpc/error-envelope nil (errors/acp-error errors/err-invalid))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Reader loop
@@ -937,11 +705,20 @@
                 (let [parsed (json/parse-string-strict line true)]
                   (process-message conn parsed))
                 (catch Throwable e
-                  (write-message conn
-                                 (error-envelope nil (acp-error err-parse)))))))
+                  (tel/log! {:level :warn
+                             :id    ::parse-error
+                             :data  {:line-length (count line)
+                                     :error       (or (ex-message e)
+                                                      (str (class e)))}}
+                            "Failed to parse ACP message")
+                  (jsonrpc/write-message conn
+                                 (jsonrpc/error-envelope nil (errors/acp-error errors/err-parse)))))))
           (recur))
         ;; EOF: stop.
-        nil))))
+        (do
+          (tel/log! {:level :debug :id ::eof}
+                    "ACP input reached EOF")
+          nil)))))
 
 (defn run
   "Start the agent: read ACP messages from stdin until EOF, dispatching to
@@ -960,9 +737,15 @@
                    handler
                    (default-handler handler))
          conn    (make-connection handler opts)]
+     (tel/log! {:level :info
+                :id    ::agent-start
+                :data  {:handler (str (class handler))}}
+               "ACP agent starting")
      (try
        (read-loop conn)
        (finally
+         (tel/log! {:level :info :id ::agent-stop}
+                   "ACP agent stopped")
          (shutdown conn 5))))))
 
 (defn -main

@@ -6,6 +6,7 @@
   :dependencies [[org.clojure/clojure "1.12.2"]
                  [clj-http "3.13.0"]
                  [cheshire "5.13.0"]
+                 [com.taoensso/telemere "1.2.1"]
                  [metosin/malli "0.17.0"]]
   :main ^:skip-aot clai.core
   :target-path "target/%s"
