@@ -1,0 +1,37 @@
+;; Example clai configuration.
+;;
+;; Copy this to one of:
+;;   - the path in $CLAI_CONFIG
+;;   - ./clai.edn            (next to where you launch clai)
+;;   - ~/.config/clai/config.edn
+;;
+;; The first file that exists wins. Any key omitted here falls back to the
+;; environment (OLLAMA_HOST, OLLAMA_API_KEY, CLAI_MODEL, ...) and the
+;; built-in defaults, so you only need to set what you want to change.
+
+{:model          "gemma3"
+ ;; Optional system prompt prepended to every session's history.
+ :system-prompt  "You are a concise, helpful coding agent."
+
+ ;; Max consecutive tool-call rounds before the agent gives up.
+ :max-tool-rounds 8
+
+ ;; Forwarded verbatim to Ollama's /api/chat as request keys.
+ :options        {:temperature 0.7}
+ :think          false
+ ;; :format       "json"      ; force JSON output when set
+
+ ;; Ollama server connection. Any subset of :host/:api-key/:timeout may be
+ ;; given; omitted keys fall back to OLLAMA_HOST / OLLAMA_API_KEY / defaults.
+ :ollama         {:host     "http://localhost:11434"
+                  :api-key  "sk-..."
+                  :timeout  600000}           ; milliseconds
+
+ ;; Which built-in tools to expose to the model, in this order. Unknown ids
+ ;; are skipped. Omit the key entirely to enable every built-in tool; set it
+ ;; to [] to disable tools entirely.
+ :tools          ["read_file"
+                  "write_file"
+                  "list_directory"
+                  "run_command"
+                  "eval_clojure"]}

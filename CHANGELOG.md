@@ -11,6 +11,13 @@ All notable changes to this project will be documented in this file. This change
   pull, and push.
 - `encode-image` helper for vision model inputs.
 - `with-client` macro for binding the default client.
+- Agent configuration loaded from an EDN config file (`clai.config`),
+  discovered as the first existing of `$CLAI_CONFIG`, `./clai.edn`, or
+  `~/.config/clai/config.edn`. Supports configuring the model, Ollama
+  host / API key / timeout, the enabled built-in tools, the per-prompt
+  tool-round cap, an optional system prompt, and Ollama `:options` /
+  `:think` / `:format`. See `config.example.edn`.
+- `clai.tools/specs-for` for selecting a subset of registered tool specs.
 
 ### Changed
 - Add a new arity to `make-widget-async` to provide a different widget shape.

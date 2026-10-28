@@ -73,6 +73,13 @@
   []
   (mapv :spec (vals @registry)))
 
+(defn specs-for
+  "Return a vector of tool definitions for the given tool `ids` (in the
+  order given), skipping any ids that are not registered. Useful when a
+  config file selects a subset of the built-in tools."
+  [ids]
+  (vec (keep #(spec %) ids)))
+
 ;; ---------------------------------------------------------------------------
 ;; Invocation
 ;; ---------------------------------------------------------------------------
@@ -240,6 +247,42 @@
         (finally
           (.destroyForcibly proc))))))
 
+(defn- eval-clojure-fn
+  "Tool: evaluate a string of Clojure code in the agent's own Clojure
+  runtime and return the printed result. Both printed stdout (`*out*`) and
+  the evaluation value (via `pr-str`) are captured. Exceptions are reported,
+  not rethrown."
+  [{:keys [code]} _ctx]
+  (let [sw   (java.io.StringWriter.)
+        pr   (java.io.PrintWriter. sw)
+        val  (binding [*out* pr
+                       *err* pr]
+               (try
+                 (if (str/blank? code)
+                   nil
+                   (eval (read-string code)))
+                 (catch Throwable e
+                   (ex-info (or (ex-message e) (str (class e)))
+                            {:cause e}))))
+        _      (.flush pr)
+        printed (.toString sw)
+        result  (cond
+                  (instance? clojure.lang.ExceptionInfo val)
+                  (str "Error: " (ex-message val)
+                       (when-let [c (:cause (ex-data val))]
+                         (str "\n"
+                              (with-out-str
+                                (.printStackTrace c (java.io.PrintWriter. *out*))))))
+
+                  (nil? val)
+                  "nil"
+
+                  :else
+                  (pr-str val))]
+    (str (when-not (str/blank? printed)
+           (str printed (when-not (str/ends-with? printed "\n") "\n")))
+         "=> " result)))
+
 (def ^:private file-read-spec
   {:type "function"
    :function
@@ -300,14 +343,33 @@
                  :description "The shell command to execute."}}
      :required ["command"]}}})
 
+(def ^:private eval-clojure-spec
+  {:type "function"
+   :function
+   {:name "eval_clojure"
+    :description
+    "Evaluate a string of Clojure source code in the same Clojure runtime the
+    agent is running in (the live process), and return the printed output
+    plus the value (as `=> <pr-str value>`). Use this to inspect or mutate
+    the agent's in-memory state, call project functions, or experiment with
+    Clojure. Exceptions are returned as error strings, not thrown."
+    :parameters
+    {:type "object"
+     :properties
+     {"code" {:type "string"
+               "description" "A single Clojure expression to evaluate."}}
+     :required ["code"]}}})
+
 (defn built-in-tools
   "Return a vector of the default tool maps (`:id`, `:fn`, `:spec`) an agent
-  can use to read/write files and run shell commands within its session cwd."
+  can use to read/write files, run shell commands within its session cwd, and
+  evaluate Clojure code in the running process."
   []
   [{:id "read_file"      :fn read-file-fn      :spec file-read-spec}
    {:id "write_file"     :fn write-file-fn     :spec file-write-spec}
    {:id "list_directory" :fn list-directory-fn :spec list-directory-spec}
-   {:id "run_command"    :fn run-command-fn    :spec run-command-spec}])
+   {:id "run_command"    :fn run-command-fn    :spec run-command-spec}
+   {:id "eval_clojure"   :fn eval-clojure-fn   :spec eval-clojure-spec}])
 
 ;; Populate the registry with the built-ins at load time.
 (defn- install-built-ins!

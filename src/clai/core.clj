@@ -25,20 +25,32 @@
   ## Configuration
 
   The Ollama client is built from the same environment variables as
-  `clai.providers.ollama` (`OLLAMA_HOST`, `OLLAMA_API_KEY`). The model used
-  for chat defaults to `gemma3` and can be overridden with the `CLAI_MODEL`
-  environment variable. The per-prompt tool-round cap defaults to 8 and can
-  be overridden with `CLAI_MAX_TOOL_ROUNDS`.
+  `clai.providers.ollama` (`OLLAMA_HOST`, `OLLAMA_API_KEY`), unless a config
+  file overrides them (see `clai.config`). The model used
+  for chat defaults to `gemma3` and can be overridden via the config file's
+  `:model` key or the `CLAI_MODEL` environment variable. The per-prompt
+  tool-round cap defaults to 8 and can be overridden via the config file's
+  `:max-tool-rounds` key or `CLAI_MAX_TOOL_ROUNDS`.
+
+  The Ollama client is built from the same environment variables as
+  `clai.providers.ollama` (`OLLAMA_HOST`, `OLLAMA_API_KEY`), unless a config
+  file overrides them (see `clai.config`). The model used
+  for chat defaults to `gemma3` and can be overridden via the config file's
+  `:model` key or the `CLAI_MODEL` environment variable. The per-prompt
+  tool-round cap defaults to 8 and can be overridden via the config file's
+  `:max-tool-rounds` key or `CLAI_MAX_TOOL_ROUNDS`.
 
   ## Running
 
       lein run            # start the agent over stdio
       CLAI_MODEL=llama3.2 lein run
+      CLAI_CONFIG=./my-clai.edn lein run
 
   A client (e.g. an ACP-compatible editor) launches this as a subprocess and
   speaks newline-delimited JSON-RPC 2.0 to it; see `clai.acp` for the wire
   format."
   (:require [clai.acp :as acp]
+            [clai.config :as config]
             [clai.providers.ollama :as ollama]
             [clai.tools :as tools])
   (:import [java.util UUID]))
@@ -52,15 +64,26 @@
   "gemma3")
 
 (defn- configured-model
-  "Resolve the model to chat with, honoring the `CLAI_MODEL` env var."
-  []
-  (or (System/getenv "CLAI_MODEL") default-model))
+  "Resolve the model to chat with. Precedence: `cfg`, then the `CLAI_MODEL`
+  env var, then the default."
+  [cfg]
+  (or (:model cfg)
+      (System/getenv "CLAI_MODEL")
+      default-model))
 
 (defn- make-ollama-client
-  "Build the Ollama client used for generating responses. Reads `OLLAMA_HOST`
-  and `OLLAMA_API_KEY` from the environment via `ollama/make-client`."
-  []
-  (ollama/make-client))
+  "Build the Ollama client used for generating responses. `cfg` is the loaded
+  config map; its `:ollama` sub-map (with `:host`, `:api-key`, `:timeout`)
+  is forwarded to `ollama/make-client`, and any key not supplied there falls
+  back to the environment (`OLLAMA_HOST`, `OLLAMA_API_KEY`) and defaults."
+  [cfg]
+  (let [ollama-cfg (:ollama cfg)
+        opts       (into {}
+                         (keep (fn [k]
+                                 (when-some [v (get ollama-cfg k)]
+                                   [k v])))
+                         [:host :api-key :timeout])]
+    (ollama/make-client opts)))
 
 ;; ---------------------------------------------------------------------------
 ;; Session state
@@ -164,11 +187,23 @@
 (def ^:private default-max-tool-rounds 8)
 
 (defn- configured-max-tool-rounds
-  "Resolve the tool-round cap, honoring `CLAI_MAX_TOOL_ROUNDS`."
-  []
-  (or (some-> (System/getenv "CLAI_MAX_TOOL_ROUNDS")
+  "Resolve the tool-round cap. Precedence: `cfg`, then the
+  `CLAI_MAX_TOOL_ROUNDS` env var, then the default."
+  [cfg]
+  (or (some-> cfg :max-tool-rounds)
+      (some-> (System/getenv "CLAI_MAX_TOOL_ROUNDS")
               (Integer/parseInt))
       default-max-tool-rounds))
+
+(defn- configured-tool-specs
+  "Resolve the vector of Ollama tool definitions to offer. When `cfg` has a
+  `:tools` key, only the listed built-in tool ids are enabled (in the given
+  order; unknown ids are skipped). When `:tools` is absent, every registered
+  tool is offered."
+  [cfg]
+  (if (contains? cfg :tools)
+    (tools/specs-for (:tools cfg))
+    (tools/specs)))
 
 (defn- session-tool-ctx
   "Build the context map handed to tool functions for `session-id`."
@@ -221,39 +256,42 @@
   "Drive the Ollama chat conversation for `session-id` to completion.
 
   Starts from the current session history, sends it to `/api/chat` with the
-  registered tools, and loops: while the reply contains `tool_calls`, execute
-  them (via `clai.tools`), append the results, and chat again. When the model
-  replies with a plain message, record and return its content.
+  given `tool-specs`, and loops: while the reply contains `tool_calls`,
+  execute them (via `clai.tools`), append the results, and chat again. When
+  the model replies with a plain message, record and return its content.
+
+  `chat-opts` is a map of extra Ollama request keys (e.g. `:options`,
+  `:think`, `:format`) merged into each `/api/chat` request.
 
   On error (HTTP failure or hitting the round cap) returns a descriptive
   string rather than throwing, so the caller can relay it to the client."
-  [conn client model session-id]
-  (let [max-rounds (configured-max-tool-rounds)]
-    (loop [round 0]
-      (if (>= round max-rounds)
-        (str "Stopped after " max-rounds
-             " tool rounds without a final reply.")
-        (let [resp (try
-                     (ollama/chat client
-                       {:model    model
-                        :messages (session-history session-id)
-                        :tools    (tools/specs)
-                        :stream   false})
-                     (catch Throwable e
-                       {:__error__ (ex-message e)}))]
-          (cond
-            (:__error__ resp)
-            (str "Ollama request failed: " (:__error__ resp))
+  [conn client model tool-specs chat-opts max-rounds session-id]
+  (loop [round 0]
+    (if (>= round max-rounds)
+      (str "Stopped after " max-rounds
+           " tool rounds without a final reply.")
+      (let [resp (try
+                   (ollama/chat client
+                     (merge {:model    model
+                             :messages (session-history session-id)
+                             :tools    tool-specs
+                             :stream   false}
+                            chat-opts))
+                   (catch Throwable e
+                     {:__error__ (ex-message e)}))]
+        (cond
+          (:__error__ resp)
+          (str "Ollama request failed: " (:__error__ resp))
 
-            :else
-            (let [msg (assistant-message resp)]
-              (if (has-tool-calls? msg)
-                (do (run-tool-round conn session-id msg)
-                    (recur (inc round)))
-                (let [content (or (:content msg) "")]
-                  (append-history session-id
-                                  {:role "assistant" :content content})
-                  content)))))))))
+          :else
+          (let [msg (assistant-message resp)]
+            (if (has-tool-calls? msg)
+              (do (run-tool-round conn session-id msg)
+                  (recur (inc round)))
+              (let [content (or (:content msg) "")]
+                (append-history session-id
+                                {:role "assistant" :content content})
+                content))))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Agent handler
@@ -262,100 +300,122 @@
 (defn ollama-agent
   "Build an `AgentHandler` that answers prompts using an Ollama chat model.
 
-  Options:
+  Options (all optional; defaults come from `cfg` then the environment):
 
+    :cfg     the loaded config map (`clai.config/load-config`). Defaults to
+             `(config/load-config)`.
     :client  the `clai.providers.ollama.Client` to use. Defaults to one built
-             from the environment (`OLLAMA_HOST`, `OLLAMA_API_KEY`).
-    :model   the model name to send to `/api/chat`. Defaults to the value of
-             `CLAI_MODEL` or `gemma3`."
+             from `cfg` and the environment (`OLLAMA_HOST`, `OLLAMA_API_KEY`).
+    :model   the model name to send to `/api/chat`. Defaults to `cfg`'s
+             `:model`, then `CLAI_MODEL`, then `gemma3`."
   ([] (ollama-agent nil))
-  ([{:keys [client model]
-     :or {client (make-ollama-client)
-          model  (configured-model)}}]
-   (reify acp/AgentHandler
-     (handle-initialize [_ _conn {:keys [protocolVersion]}]
-       {:protocolVersion (min acp/current-protocol-version
-                              (long (or protocolVersion 2)))
-        :info            {:name    "clai"
-                          :title   "clai agent"
-                          :version "0.1.0-SNAPSHOT"}
-        :capabilities    {}})
+  ([opts]
+   (let [cfg         (:cfg opts (config/load-config))
+         client      (:client opts (make-ollama-client cfg))
+         model       (:model opts (configured-model cfg))
+         tool-specs  (configured-tool-specs cfg)
+         max-rounds  (configured-max-tool-rounds cfg)
+         sys-prompt  (:system-prompt cfg)
+         chat-opts   (into {}
+                            (keep (fn [k]
+                                    (when-some [v (get cfg k)]
+                                      [k v])))
+                            [:options :think :format])]
+     (reify acp/AgentHandler
+       (handle-initialize [_ _conn {:keys [protocolVersion]}]
+         {:protocolVersion (min acp/current-protocol-version
+                                (long (or protocolVersion 2)))
+          :info            {:name    "clai"
+                            :title   "clai agent"
+                            :version "0.1.0-SNAPSHOT"}
+          :capabilities    {}})
 
-     (handle-auth-login [_ _conn _params]
-       (acp/acp-error acp/err-method))
+       (handle-auth-login [_ _conn _params]
+         (acp/acp-error acp/err-method))
 
-     (handle-auth-logout [_ _conn _params]
-       (acp/acp-error acp/err-method))
+       (handle-auth-logout [_ _conn _params]
+         (acp/acp-error acp/err-method))
 
-     (handle-session-new [_ _conn {:keys [cwd]}]
-       (create-session cwd))
+       (handle-session-new [_ _conn {:keys [cwd]}]
+         (let [res (create-session cwd)]
+           (when sys-prompt
+             (append-history (:sessionId res)
+                             {:role "system" :content sys-prompt}))
+           res))
 
-     (handle-session-list [_ _conn _params]
-       {:sessions (for [[id {:keys [cwd]}] @sessions]
-                    {:sessionId id :cwd cwd})})
+       (handle-session-list [_ _conn _params]
+         {:sessions (for [[id {:keys [cwd]}] @sessions]
+                      {:sessionId id :cwd cwd})})
 
-     (handle-session-delete [_ _conn {:keys [sessionId]}]
-       (drop-session sessionId))
+       (handle-session-delete [_ _conn {:keys [sessionId]}]
+         (drop-session sessionId))
 
-     (handle-session-resume [this conn {:keys [sessionId cwd]}]
-       ;; If the session is unknown, create a fresh one so resume degrades
-       ;; to new rather than erroring.
-       (when-not (lookup-session sessionId)
-         (swap! sessions assoc sessionId {:cwd cwd :history []}))
-       {:sessionId sessionId})
+       (handle-session-resume [this conn {:keys [sessionId cwd]}]
+         ;; If the session is unknown, register a fresh one under the
+         ;; requested id (with the configured system prompt, if any) so
+         ;; resume degrades to new rather than erroring.
+         (when-not (lookup-session sessionId)
+           (swap! sessions assoc sessionId
+                  {:cwd     cwd
+                   :history (if sys-prompt
+                              [{:role "system" :content sys-prompt}]
+                              [])}))
+         {:sessionId sessionId})
 
-     (handle-session-close [_ _conn {:keys [sessionId]}]
-       (drop-session sessionId))
+       (handle-session-close [_ _conn {:keys [sessionId]}]
+         (drop-session sessionId))
 
-     (handle-session-set-config-option [_ _conn _params]
-       (acp/acp-error acp/err-method))
+       (handle-session-set-config-option [_ _conn _params]
+         (acp/acp-error acp/err-method))
 
-     (handle-session-prompt [_ conn {:keys [sessionId prompt]}]
-       (let [msg-id (str (UUID/randomUUID))]
-         (if-not (lookup-session sessionId)
-           ;; Unknown session: tell the client and bail.
-           (do
-             (acp/send-session-update conn sessionId
-               {:sessionUpdate "agent_message"
-                :messageId     msg-id
-                :role          "agent"
-                :content       (ollama->acp-content
-                                (str "No session " sessionId))})
-             (acp/send-session-update conn sessionId
-               {:sessionUpdate "state_update"
-                :state         "idle"
-                :stopReason    "error"})
-             {:messageId msg-id})
-           ;; Append the incoming prompt, then drive the Ollama conversation
-           ;; to completion -- executing any tool calls the model makes along
-           ;; the way -- and relay the final reply.
-           (let [incoming (acp-prompt->ollama-messages prompt)
-                 _        (run! #(append-history sessionId %) incoming)
-                 reply    (run-agent-loop conn client model sessionId)]
-             (acp/send-session-update conn sessionId
-               {:sessionUpdate "agent_message"
-                :messageId     msg-id
-                :role          "agent"
-                :content       (ollama->acp-content reply)})
-             (acp/send-session-update conn sessionId
-               {:sessionUpdate "state_update"
-                :state         "idle"
-                :stopReason    "end_turn"})
-             {:messageId msg-id}))))
+       (handle-session-prompt [_ conn {:keys [sessionId prompt]}]
+         (let [msg-id (str (UUID/randomUUID))]
+           (if-not (lookup-session sessionId)
+             ;; Unknown session: tell the client and bail.
+             (do
+               (acp/send-session-update conn sessionId
+                 {:sessionUpdate "agent_message"
+                  :messageId     msg-id
+                  :role          "agent"
+                  :content       (ollama->acp-content
+                                  (str "No session " sessionId))})
+               (acp/send-session-update conn sessionId
+                 {:sessionUpdate "state_update"
+                  :state         "idle"
+                  :stopReason    "error"})
+               {:messageId msg-id})
+             ;; Append the incoming prompt, then drive the Ollama conversation
+             ;; to completion -- executing any tool calls the model makes along
+             ;; the way -- and relay the final reply.
+             (let [incoming (acp-prompt->ollama-messages prompt)
+                   _        (run! #(append-history sessionId %) incoming)
+                   reply    (run-agent-loop conn client model
+                                            tool-specs chat-opts
+                                            max-rounds sessionId)]
+               (acp/send-session-update conn sessionId
+                 {:sessionUpdate "agent_message"
+                  :messageId     msg-id
+                  :role          "agent"
+                  :content       (ollama->acp-content reply)})
+               (acp/send-session-update conn sessionId
+                 {:sessionUpdate "state_update"
+                  :state         "idle"
+                  :stopReason    "end_turn"})
+               {:messageId msg-id}))))
 
-     (on-session-cancel [_ conn {:keys [sessionId]}]
-       ;; No background work to cancel for the synchronous handler; just
-       ;; return to idle so the client can issue the next prompt.
-       (acp/send-session-update conn sessionId
-         {:sessionUpdate "state_update"
-          :state         "idle"
-          :stopReason    "cancelled"})
-       nil)
+       (on-session-cancel [_ conn {:keys [sessionId]}]
+         ;; No background work to cancel for the synchronous handler; just
+         ;; return to idle so the client can issue the next prompt.
+         (acp/send-session-update conn sessionId
+           {:sessionUpdate "state_update"
+            :state         "idle"
+            :stopReason    "cancelled"})
+         nil)
 
-     (on-cancel-request [_ _conn _params] nil)
-     (on-notification [_ _conn _method _params] nil)
-     (on-ext-request [_ _conn _method _params]
-       (acp/acp-error acp/err-method)))))
+       (on-cancel-request [_ _conn _params] nil)
+       (on-notification [_ _conn _method _params] nil)
+       (on-ext-request [_ _conn _method _params]
+         (acp/acp-error acp/err-method))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Entry point
