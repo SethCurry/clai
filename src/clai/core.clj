@@ -1,23 +1,34 @@
 (ns clai.core
   "Main entrypoint for `clai`.
 
-  Wires together the two halves of the project:
+  Wires together the three halves of the project:
 
     * `clai.acp`          -- the agent side of the Agent Client Protocol,
                               spoken over stdio.
     * `clai.providers.ollama` -- an HTTP client for a local or cloud Ollama
                               server, used to generate agent responses.
+    * `clai.tools`        -- a registry of tools the model may call.
 
   `(-main)` starts the ACP server with an `AgentHandler` that, on each
   `session/prompt`, forwards the conversation to Ollama's `/api/chat` and
-  streams the reply back to the client as `session/update` notifications.
+  relays the reply back to the client as `session/update` notifications.
+
+  ## Tool calling
+
+  When the model's reply carries `tool_calls`, the handler executes each
+  call against `clai.tools`, appends `{:role \"tool\" ...}` result messages
+  to the history, and chats again -- looping until the model replies with a
+  plain assistant message (or the round cap in `CLAI_MAX_TOOL_ROUNDS` is hit).
+  This is the standard Ollama tool-calling flow; see `clai.tools` for how to
+  register additional tools.
 
   ## Configuration
 
   The Ollama client is built from the same environment variables as
   `clai.providers.ollama` (`OLLAMA_HOST`, `OLLAMA_API_KEY`). The model used
   for chat defaults to `gemma3` and can be overridden with the `CLAI_MODEL`
-  environment variable.
+  environment variable. The per-prompt tool-round cap defaults to 8 and can
+  be overridden with `CLAI_MAX_TOOL_ROUNDS`.
 
   ## Running
 
@@ -28,7 +39,8 @@
   speaks newline-delimited JSON-RPC 2.0 to it; see `clai.acp` for the wire
   format."
   (:require [clai.acp :as acp]
-            [clai.providers.ollama :as ollama])
+            [clai.providers.ollama :as ollama]
+            [clai.tools :as tools])
   (:import [java.util UUID]))
 
 ;; ---------------------------------------------------------------------------
@@ -54,8 +66,10 @@
 ;; Session state
 ;; ---------------------------------------------------------------------------
 
-;; In-memory session store: `{session-id {:history [message ...]}}`. Each
-;; Ollama message is `{:role \"user\"|\"assistant\" :content \"...\"}`.
+;; In-memory session store: `{session-id {:cwd ... :history [message ...]}}`.
+;; Each Ollama message is `{:role \"user\"|\"assistant\"|\"tool\" :content \"...\"}`;
+;; assistant messages with `:tool_calls` and `tool`-role result messages are
+;; kept verbatim so the conversation history round-trips through `/api/chat`.
 (def ^:private sessions (atom {}))
 
 (defn- create-session
@@ -142,6 +156,106 @@
   [{:type "text" :text text}])
 
 ;; ---------------------------------------------------------------------------
+;; Tool-calling loop
+;; ---------------------------------------------------------------------------
+
+;; Cap on consecutive tool-call rounds per prompt, so a model that keeps
+;; calling tools can't loop forever. Override with `CLAI_MAX_TOOL_ROUNDS`.
+(def ^:private default-max-tool-rounds 8)
+
+(defn- configured-max-tool-rounds
+  "Resolve the tool-round cap, honoring `CLAI_MAX_TOOL_ROUNDS`."
+  []
+  (or (some-> (System/getenv "CLAI_MAX_TOOL_ROUNDS")
+              (Integer/parseInt))
+      default-max-tool-rounds))
+
+(defn- session-tool-ctx
+  "Build the context map handed to tool functions for `session-id`."
+  [session-id]
+  {:cwd (-> (lookup-session session-id) :cwd)})
+
+(defn- assistant-message
+  "Return the assistant `:message` map from an Ollama `/api/chat` response,
+  normalized to at least a map with role `assistant` and empty content."
+  [resp]
+  (-> resp :message (or {:role "assistant" :content ""})))
+
+(defn- has-tool-calls?
+  "True when an Ollama assistant message requests one or more tool calls."
+  [msg]
+  (and (map? msg) (seq (:tool_calls msg))))
+
+(defn- describe-tool-call
+  "Render one Ollama `tool_calls` entry as a short human-readable string."
+  [call]
+  (let [f (or (:function call) call)]
+    (str "calling tool " (or (:name f) "?")
+         " with " (pr-str (:arguments f)))))
+
+(defn- run-tool-round
+  "Execute the tool calls in `msg`, append the assistant message and each
+  `tool`-role result to the session history, and return the updated history.
+
+  Sends a brief `agent_message` update per tool call so the client can see
+  activity. Does not call Ollama; the caller chats again with the new
+  history."
+  [conn session-id msg]
+  (let [tool-calls (:tool_calls msg)]
+    ;; Record the assistant message (with its tool_calls) verbatim so the
+    ;; model sees its own request in the next round.
+    (append-history session-id msg)
+    (let [ctx      (session-tool-ctx session-id)
+          results  (tools/execute-calls tool-calls ctx)]
+      (doseq [call tool-calls]
+        (acp/send-session-update conn session-id
+          {:sessionUpdate "agent_message"
+           :messageId     (str (UUID/randomUUID))
+           :role          "agent"
+           :content       (ollama->acp-content
+                           (describe-tool-call call))}))
+      (run! #(append-history session-id %) results)
+      (session-history session-id))))
+
+(defn- run-agent-loop
+  "Drive the Ollama chat conversation for `session-id` to completion.
+
+  Starts from the current session history, sends it to `/api/chat` with the
+  registered tools, and loops: while the reply contains `tool_calls`, execute
+  them (via `clai.tools`), append the results, and chat again. When the model
+  replies with a plain message, record and return its content.
+
+  On error (HTTP failure or hitting the round cap) returns a descriptive
+  string rather than throwing, so the caller can relay it to the client."
+  [conn client model session-id]
+  (let [max-rounds (configured-max-tool-rounds)]
+    (loop [round 0]
+      (if (>= round max-rounds)
+        (str "Stopped after " max-rounds
+             " tool rounds without a final reply.")
+        (let [resp (try
+                     (ollama/chat client
+                       {:model    model
+                        :messages (session-history session-id)
+                        :tools    (tools/specs)
+                        :stream   false})
+                     (catch Throwable e
+                       {:__error__ (ex-message e)}))]
+          (cond
+            (:__error__ resp)
+            (str "Ollama request failed: " (:__error__ resp))
+
+            :else
+            (let [msg (assistant-message resp)]
+              (if (has-tool-calls? msg)
+                (do (run-tool-round conn session-id msg)
+                    (recur (inc round)))
+                (let [content (or (:content msg) "")]
+                  (append-history session-id
+                                  {:role "assistant" :content content})
+                  content)))))))))
+
+;; ---------------------------------------------------------------------------
 ;; Agent handler
 ;; ---------------------------------------------------------------------------
 
@@ -212,22 +326,12 @@
                 :state         "idle"
                 :stopReason    "error"})
              {:messageId msg-id})
-           ;; Forward the prompt to Ollama and relay the reply.
+           ;; Append the incoming prompt, then drive the Ollama conversation
+           ;; to completion -- executing any tool calls the model makes along
+           ;; the way -- and relay the final reply.
            (let [incoming (acp-prompt->ollama-messages prompt)
                  _        (run! #(append-history sessionId %) incoming)
-                 history  (session-history sessionId)
-                 reply    (try
-                            (-> (ollama/chat client
-                                  {:model     model
-                                   :messages  history
-                                   :stream    false})
-                                :message
-                                :content)
-                            (catch Throwable e
-                              (str "Ollama request failed: "
-                                   (ex-message e))))
-                 _        (append-history sessionId
-                                          {:role "assistant" :content reply})]
+                 reply    (run-agent-loop conn client model sessionId)]
              (acp/send-session-update conn sessionId
                {:sessionUpdate "agent_message"
                 :messageId     msg-id
