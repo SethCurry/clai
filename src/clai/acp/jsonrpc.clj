@@ -1,14 +1,9 @@
 (ns clai.acp.jsonrpc
   (:require [clai.log]
             [cheshire.core :as json]
-            [clojure.java.io :as io]
-            [clojure.string :as str]
             [clai.acp.errors :as errors]
             [taoensso.telemere :as tel])
-  (:import [java.io BufferedReader BufferedWriter InputStream OutputStream
-            Reader Writer]
-           [java.util.concurrent Callable Executors ExecutorService
-            ThreadFactory TimeUnit]
+  (:import [java.io Writer]
            [java.util.concurrent.atomic AtomicLong]))
 
 

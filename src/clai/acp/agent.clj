@@ -110,7 +110,6 @@
 (def throw-acp    errors/throw-acp)
 (def ex->acp-error errors/ex->acp-error)
 
-(def ^:private clean jsonrpc/clean)
 (def write-message     jsonrpc/write-message)
 (def response-envelope jsonrpc/response-envelope)
 (def error-envelope    jsonrpc/error-envelope)
@@ -283,7 +282,7 @@
   "Maps each known request method to the malli schema for its `params`."
   {"initialize"                 schemas/initialize-params
    "session/new"                schemas/session-new-params
-   "session/list"               schemas/session-list-params
+   "session/list"               schemas/ListSessionsRequest
    "session/delete"             schemas/session-id-params
    "session/resume"             schemas/session-resume-params
    "session/close"              schemas/session-id-params
@@ -386,7 +385,7 @@
   :role \"agent\" :content [...]}`)."
   [conn sid update]
   (schemas/validate! schemas/session-id sid "send-session-update sessionId")
-  (schemas/validate! schemas/session-update update "send-session-update update")
+  (schemas/validate! schemas/SessionUpdate update "send-session-update update")
   (tel/log! {:level :debug
              :id    ::session-update
              :data  {:sessionId sid

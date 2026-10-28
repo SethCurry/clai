@@ -61,6 +61,57 @@
     [:content #'Content]
     [:sessionUpdate [:= "agent_thought_chunk"]]])
 
+;; Full (non-chunk) message updates carry an entire message: a `messageId`,
+;; a `role`, and a vector of `Content` parts. The content parts used here
+;; describe each part with a `:type` discriminator and a `:content` string
+;; (e.g. `{:type "text" :content "hello"}`), matching the ACP wire format
+;; for full messages.
+(def MessageTextContent
+  [:map
+    {:closed true}
+    [:_meta {:optional true} #'Meta]
+    [:type [:= "text"]]
+    [:content :string]])
+
+(def MessageContent [:or #'MessageTextContent])
+
+(def UserMessage
+  [:map
+    {:closed true}
+    [:_meta {:optional true} #'Meta]
+    [:sessionUpdate [:= "user_message"]]
+    [:messageId non-empty-string]
+    [:role [:= "user"]]
+    [:content [:vector #'MessageContent]]])
+
+(def AgentMessage
+  [:map
+    {:closed true}
+    [:_meta {:optional true} #'Meta]
+    [:sessionUpdate [:= "agent_message"]]
+    [:messageId non-empty-string]
+    [:role [:= "agent"]]
+    [:content [:vector #'MessageContent]]])
+
+(def AgentThought
+  [:map
+    {:closed true}
+    [:_meta {:optional true} #'Meta]
+    [:sessionUpdate [:= "agent_thought"]]
+    [:messageId non-empty-string]
+    [:role [:= "agent"]]
+    [:content [:vector #'MessageContent]]])
+
+(def SessionState [:enum "active" "idle"])
+
+(def StateUpdate
+  [:map
+    {:closed true}
+    [:_meta {:optional true} #'Meta]
+    [:sessionUpdate [:= "state_update"]]
+    [:state #'SessionState]
+    [:stopReason {:optional true} #'StopReason]])
+
 (def ToolKind [:enum "read"
                      "edit"
                      "delete"
@@ -77,7 +128,7 @@
 (def ToolCallLocation [:map
   {:closed true}
   [:_meta #'Meta]
-  [:line {:optional true} :integer]
+  [:line {:optional true} :int]
   [:path :string]])
 
 (def ToolCallContent
@@ -106,6 +157,7 @@
   [:map
     {:closed true}
     [:_meta #'Meta]
+    [:sessionUpdate [:= "tool_call"]]
     [:content [:vector #'ToolCallContent]]
     [:kind #'ToolKind]
     [:locations [:vector #'ToolCallLocation]]
@@ -121,6 +173,7 @@
   [:map
     {:closed true}
     [:_meta #'Meta]
+    [:sessionUpdate [:= "tool_call_update"]]
     [:content [:maybe [:vector #'ToolCallContent]]]
     [:kind [:maybe #'ToolKind]]
     [:locations [:maybe [:vector #'ToolCallLocation]]]
@@ -131,11 +184,34 @@
     [:toolCallId :string]
     [:status [:maybe #'ToolCallStatus]]])
 
-(def SessionUpdate [:enum #'UserMessageChunk
-                          #'AgentMessageChunk
-                          #'AgentThoughtChunk
-                          #'ToolCall
-                          #'ToolCallUpdate])
+(def SessionUpdate [:or #'UserMessageChunk
+                         #'AgentMessageChunk
+                         #'AgentThoughtChunk
+                         #'UserMessage
+                         #'AgentMessage
+                         #'AgentThought
+                         #'StateUpdate
+                         #'ToolCall
+                         #'ToolCallUpdate])
+
+(def ListSessionsRequest [:map
+    {:closed true}
+    [:_meta #'Meta]
+    [:cursor [:maybe :string]]
+    [:cwd [:maybe :string]]])
+
+(def SessionInfo [:map
+    [:_meta #'Meta]
+    [:additionalDirectories [:vector :string]]
+    [:cwd :string]
+    [:sessionId :string]
+    [:title [:maybe :string]]
+    [:updatedAt [:maybe :string]]])
+
+(def ListSessionsResponse [:map
+    [:_meta #'Meta]
+    [:nextCursor [:maybe :string]]
+    [:sessions [:vector #'SessionInfo]]])
 
 (def json-rpc-request
   "A JSON-RPC 2.0 request object."
@@ -214,18 +290,6 @@
   [:map
    [:sessionId session-id]])
 
-(def session-list-params
-  "Params for `session/list`."
-  [:map
-   [:cwd {:optional true} string?]
-   [:cursor {:optional true} string?]])
-
-(def session-list-response
-  "Result of `session/list`."
-  [:map
-   [:sessions {:optional true} [:sequential [:map]]]
-   [:nextCursor {:optional true} string?]])
-
 (def session-id-params
   "Params for methods that only take a `:sessionId` (delete/close)."
   [:map
@@ -260,17 +324,6 @@
   "Params for the `$/cancel_request` notification."
   [:map
    [:requestId [:or int? string?]]])
-
-(def session-update
-  "One `SessionUpdate` object, discriminated by `:sessionUpdate`."
-  [:map
-   [:sessionUpdate non-empty-string]])
-
-(def session-update-params
-  "Params carried by a `session/update` notification."
-  [:map
-   [:sessionId session-id]
-   [:update session-update]])
 
 (def request-permission-opts
   "Body of `session/request_permission`."

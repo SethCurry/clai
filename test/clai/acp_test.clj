@@ -7,11 +7,12 @@
   stdin, each test runs the agent on a background thread and stops it by
   closing the input pipe (which delivers EOF)."
   (:require [clojure.test :refer :all]
-            [clojure.java.io :as io]
             [cheshire.core :as json]
-            [clai.acp.agent :as acp])
-  (:import [java.io PipedInputStream PipedOutputStream ByteArrayInputStream
-            ByteArrayOutputStream InputStream OutputStream]
+            [clai.acp.agent :as acp]
+            [clai.acp.jsonrpc :as jsonrpc]
+            [clojure.string])
+  (:import [java.io PipedInputStream PipedOutputStream
+            ByteArrayOutputStream OutputStream]
            [java.util UUID]))
 
 ;; ---------------------------------------------------------------------------
@@ -214,7 +215,7 @@
                        {:protocolVersion 2
                         :info {:name "perm" :version "0.1.0"}
                         :capabilities {}})
-                     (handle-session-prompt [this conn _params]
+                     (handle-session-prompt [_ conn _params]
                        ;; Ask the client for permission, await the answer.
                        (let [p (acp/request-permission
                                 conn
@@ -382,8 +383,8 @@
     (is (= "Method not found" (:message e)))))
 
 (deftest clean-strips-nil-top-level-keys
-  (is (= {:a 1 :b false} (#'acp/clean {:a 1 :b false :c nil})))
-  (is (= {:nested {:x nil}} (#'acp/clean {:nested {:x nil} :drop nil}))))
+  (is (= {:a 1 :b false} (#'jsonrpc/clean {:a 1 :b false :c nil})))
+  (is (= {:nested {:x nil}} (#'jsonrpc/clean {:nested {:x nil} :drop nil}))))
 
 (deftest classify-recognizes-each-message-type
   (is (= [:request 7 "foo" {}]

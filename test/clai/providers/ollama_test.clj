@@ -1,7 +1,7 @@
 (ns clai.providers.ollama-test
   (:require [clojure.test :refer :all]
-            [clojure.java.io :as io]
             [cheshire.core :as json]
+            [clojure.string]
             [clj-http.client :as http]
             [clai.providers.ollama :as ollama]
             [clai.test-support :refer [quiet-logs]]))

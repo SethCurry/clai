@@ -47,6 +47,7 @@
             [clai.config :as config]
             [clai.providers.ollama :as ollama]
             [clai.tools :as tools]
+            [clojure.string :as str]
             [taoensso.telemere :as tel])
   (:import [java.util UUID])
   (:gen-class))
@@ -234,42 +235,114 @@
   [msg]
   (and (map? msg) (seq (:tool_calls msg))))
 
-(defn- describe-tool-call
-  "Render one Ollama `tool_calls` entry as a short human-readable string."
+(defn- tool-call-id
+  "Return the Ollama tool call's id, generating one when absent."
+  [call]
+  (or (:id call) (str (UUID/randomUUID))))
+
+(defn- tool-call-name
+  "Extract the function name from an Ollama `tool_calls` entry."
   [call]
   (let [f (or (:function call) call)]
-    (str "calling tool " (or (:name f) "?")
-         " with " (pr-str (:arguments f)))))
+    (:name f)))
+
+(def ^:private tool-name->kind
+  "Maps built-in tool ids to ACP `ToolKind` values. Unknown tools fall
+  back to `other`."
+  {"read_file"      "read"
+   "write_file"     "edit"
+   "list_directory" "search"
+   "run_command"    "execute"
+   "eval_clojure"   "execute"})
+
+(defn- tool-call-kind
+  "Resolve the ACP `ToolKind` for an Ollama tool call."
+  [call]
+  (or (tool-name->kind (tool-call-name call)) "other"))
+
+(defn- tool-call-raw-input
+  "Return the parsed arguments of an Ollama tool call as a map suitable for
+  the ACP `rawInput` field."
+  [call]
+  (let [f    (or (:function call) call)
+        args (tools/parse-arguments (:arguments f))]
+    (or args {})))
+
+(defn- tool-call-title
+  "Render a short human-readable title for an Ollama tool call."
+  [call]
+  (str (or (tool-call-name call) "?")
+       " " (pr-str (:arguments (or (:function call) call)))))
+
+(defn- send-tool-call-started
+  "Emit a `tool_call` SessionUpdate announcing that `call` is starting."
+  [conn session-id call]
+  (let [id (tool-call-id call)]
+    (acp/send-session-update conn session-id
+      {:_meta        nil
+       :sessionUpdate "tool_call"
+       :content       []
+       :kind          (tool-call-kind call)
+       :locations     []
+       :name          (tool-call-name call)
+       :rawInput      (tool-call-raw-input call)
+       :rawOutput     {}
+       :title         (tool-call-title call)
+       :toolCallId    id
+       :status        "in_progress"})
+    id))
+
+(defn- send-tool-call-finished
+  "Emit a `tool_call_update` SessionUpdate with the result of `call`."
+  [conn session-id id result]
+  (let [failed? (str/starts-with? result "Error:")]
+    (acp/send-session-update conn session-id
+      {:_meta        nil
+       :sessionUpdate "tool_call_update"
+       :content       nil
+       :kind          nil
+       :locations     nil
+       :name          nil
+       :rawInput      {}
+       :rawOutput     {:result result}
+       :title         nil
+       :toolCallId    id
+       :status        (if failed? "failed" "completed")})))
 
 (defn- run-tool-round
   "Execute the tool calls in `msg`, append the assistant message and each
   `tool`-role result to the session history, and return the updated history.
 
-  Sends a brief `agent_message` update per tool call so the client can see
-  activity. Does not call Ollama; the caller chats again with the new
-  history."
+  Emits a `tool_call` SessionUpdate as each call starts and a
+  `tool_call_update` SessionUpdate when it finishes, so the client can render
+  structured tool activity instead of plain agent messages. Does not call
+  Ollama; the caller chats again with the new history."
   [conn session-id msg]
   (let [tool-calls (:tool_calls msg)]
     ;; Record the assistant message (with its tool_calls) verbatim so the
     ;; model sees its own request in the next round.
     (append-history session-id msg)
-    (let [ctx      (session-tool-ctx session-id)
-          results  (tools/execute-calls tool-calls ctx)]
+    (let [ctx (session-tool-ctx session-id)]
       (doseq [call tool-calls]
-        (tel/log! {:level :info
-                   :id    ::tool-call
-                   :data  {:sessionId session-id
-                           :tool      (or (-> call :function :name)
-                                          (:name call)
-                                          "?")}}
-                  "Executing tool call")
-        (acp/send-agent-message-chunk conn session-id
-                           (describe-tool-call call)))
-      (run! #(append-history session-id %) results)
+        (let [tool-name (or (tool-call-name call) "?")
+              call-id   (send-tool-call-started conn session-id call)]
+          (tel/log! {:level :info
+                     :id    ::tool-call
+                     :data  {:sessionId session-id
+                             :tool      tool-name}}
+                    "Executing tool call")
+          (let [[id args] (tools/tool-call->id+args call)
+                result    (tools/invoke (or id tool-name) args ctx)]
+            (send-tool-call-finished conn session-id call-id result)
+            (append-history session-id
+                            (cond-> {:role    "tool"
+                                     :content result
+                                     :name    (or id tool-name)}
+                              (some? (:id call)) (assoc :tool_call_id (:id call)))))))
       (tel/log! {:level :debug
                  :id    ::tool-round-complete
                  :data  {:sessionId session-id
-                         :results   (count results)}}
+                         :results   (count tool-calls)}}
                 "Tool round complete")
       (session-history session-id))))
 
@@ -415,7 +488,7 @@
        (handle-session-delete [_ _conn {:keys [sessionId]}]
          (drop-session sessionId))
 
-       (handle-session-resume [this conn {:keys [sessionId cwd]}]
+       (handle-session-resume [_ _ {:keys [sessionId cwd]}]
          ;; If the session is unknown, register a fresh one under the
          ;; requested id (with the configured system prompt, if any) so
          ;; resume degrades to new rather than erroring.

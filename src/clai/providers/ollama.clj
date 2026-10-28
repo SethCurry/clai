@@ -754,6 +754,6 @@
 
 (defn -main
   "Print the Ollama server version as a smoke test of connectivity."
-  [& args]
+  [& _]
   (let [c (make-client)]
     (println "Ollama" (:version (version c)))))

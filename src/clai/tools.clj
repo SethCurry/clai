@@ -95,7 +95,7 @@
 ;; Invocation
 ;; ---------------------------------------------------------------------------
 
-(defn- parse-arguments
+(defn parse-arguments
   "Ollama sends tool call `:arguments` as a JSON *string* (some clients send a
   parsed map). Normalize to a Clojure map either way."
   [arguments]
@@ -177,7 +177,7 @@
                         e)
             (str "Error: " (or (ex-message e) (class e)))))))))
 
-(defn- tool-call->id+args
+(defn tool-call->id+args
   "Extract `[tool-id args]` from one Ollama `tool_calls` entry. Tolerates both
   the nested `{:function {:name ... :arguments ...}}` shape and a flattened
   `{:name ... :arguments ...}` shape."

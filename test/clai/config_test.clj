@@ -1,6 +1,5 @@
 (ns clai.config-test
   (:require [clojure.test :refer :all]
-            [clojure.java.io :as io]
             [clai.config :as config]
             [clai.test-support :refer [quiet-logs]]))
 
