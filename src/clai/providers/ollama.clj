@@ -34,10 +34,177 @@
   (:require [cheshire.core :as json]
             [clj-http.client :as http]
             [clojure.java.io :as io]
-            [clojure.string :as str])
+            [clojure.string :as str]
+            [malli.core :as m]
+            [malli.error :as me])
   (:import [java.net URL]
            [java.util Base64]
            [java.io InputStream BufferedReader]))
+
+;; ---------------------------------------------------------------------------
+;; Schemas
+;; ---------------------------------------------------------------------------
+
+(def non-empty-string
+  "A string of at least one character."
+  [:re #".+"])
+
+(def image-source
+  "Anything `encode-image` accepts: bytes, InputStream, File, URL, or path string."
+  [:or
+   [:maybe bytes?]
+   [:maybe [:fn #(instance? InputStream %)]]
+   [:maybe [:fn #(instance? java.io.File %)]]
+   [:maybe [:fn #(instance? URL %)]]
+   [:maybe string?]])
+
+(def client-opts
+  "Options accepted by `make-client`."
+  [:map
+   [:host {:optional true} string?]
+   [:api-key {:optional true} [:maybe string?]]
+   [:timeout {:optional true} pos-int?]])
+
+(def client-schema
+  "The `Client` record."
+  [:map
+   [:host string?]
+   [:api-key [:maybe string?]]
+   [:timeout pos-int?]])
+
+(def generate-request
+  "Request body for `POST /api/generate`."
+  [:map
+   [:model non-empty-string]
+   [:prompt {:optional true} string?]
+   [:system {:optional true} string?]
+   [:images {:optional true} [:sequential string?]]
+   [:format {:optional true} [:or string? [:map]]]
+   [:options {:optional true} [:map]]
+   [:think {:optional true} boolean?]
+   [:keep_alive {:optional true} [:or string? number?]]
+   [:raw {:optional true} boolean?]
+   [:suffix {:optional true} string?]
+   [:logprobs {:optional true} boolean?]
+   [:top_logprobs {:optional true} pos-int?]
+   [:stream {:optional true} boolean?]])
+
+(def chat-message
+  "A single chat message in `:messages`."
+  [:map
+   [:role non-empty-string]
+   [:content {:optional true} [:or string? [:sequential [:map]]]]
+   [:images {:optional true} [:sequential string?]]
+   [:tool_calls {:optional true} [:sequential [:map]]]])
+
+(def chat-request
+  "Request body for `POST /api/chat`."
+  [:map
+   [:model non-empty-string]
+   [:messages [:sequential chat-message]]
+   [:tools {:optional true} [:sequential [:map]]]
+   [:format {:optional true} [:or string? [:map]]]
+   [:options {:optional true} [:map]]
+   [:think {:optional true} boolean?]
+   [:keep_alive {:optional true} [:or string? number?]]
+   [:logprobs {:optional true} boolean?]
+   [:top_logprobs {:optional true} pos-int?]
+   [:stream {:optional true} boolean?]])
+
+(def embed-request
+  "Request body for `POST /api/embed`."
+  [:map
+   [:model non-empty-string]
+   [:input [:or string? [:sequential string?]]]
+   [:truncate {:optional true} boolean?]
+   [:dimensions {:optional true} pos-int?]
+   [:keep_alive {:optional true} [:or string? number?]]
+   [:options {:optional true} [:map]]])
+
+(def systemone-request
+  "Request body for `POST /v1/systemone`."
+  [:map
+   [:model non-empty-string]
+   [:state string?]
+   [:questions [:sequential [:map]]]
+   [:keep_alive {:optional true} [:or string? number?]]
+   [:images {:optional true} [:sequential string?]]])
+
+(def show-request
+  "Request body for `POST /api/show`."
+  [:map
+   [:model non-empty-string]
+   [:verbose {:optional true} boolean?]])
+
+(def create-model-request
+  "Request body for `POST /api/create`."
+  [:map
+   [:model non-empty-string]
+   [:from {:optional true} string?]
+   [:files {:optional true} [:sequential string?]]
+   [:template {:optional true} string?]
+   [:renderer {:optional true} string?]
+   [:parser {:optional true} string?]
+   [:system {:optional true} string?]
+   [:parameters {:optional true} [:map]]
+   [:messages {:optional true} [:sequential [:map]]]
+   [:license {:optional true} [:or string? [:sequential string?]]]
+   [:quantize {:optional true} string?]
+   [:capabilities {:optional true} [:sequential string?]]
+   [:requires {:optional true} [:sequential string?]]
+   [:stream {:optional true} boolean?]])
+
+(def copy-model-request
+  "Request body for `POST /api/copy`."
+  [:map
+   [:source non-empty-string]
+   [:destination non-empty-string]])
+
+(def pull-push-request
+  "Request body for `POST /api/pull` and `POST /api/push`."
+  [:map
+   [:model non-empty-string]
+   [:insecure {:optional true} boolean?]
+   [:stream {:optional true} boolean?]])
+
+(def delete-model-request
+  "Request body for `DELETE /api/delete`."
+  [:map
+   [:model non-empty-string]])
+
+(def model-entry
+  "An entry in the `:models` vector returned by `list-models`/`list-running-models`."
+  [:map
+   [:name {:optional true} string?]
+   [:model {:optional true} string?]
+   [:size {:optional true} number?]
+   [:digest {:optional true} string?]
+   [:modified_at {:optional true} string?]])
+
+(def list-models-response
+  "Response of `GET /api/tags` and `GET /api/ps`."
+  [:map
+   [:models {:optional true} [:sequential model-entry]]])
+
+(def version-response
+  "Response of `GET /api/version`."
+  [:map [:version string?]])
+
+(def balance-response
+  "Response of `GET /api/balance`."
+  [:map
+   [:included {:optional true} [:map]]
+   [:purchased {:optional true} [:map]]])
+
+(defn- validate!
+  "Validate `value` against `schema`, returning `value` when valid or throwing
+  an `ex-info` with a human-readable malli error explanation otherwise."
+  [schema value fn-name]
+  (if-let [errors (and schema (m/explain schema value))]
+    (throw (ex-info (str "Invalid " fn-name " request: "
+                         (-> errors me/humanize pr-str))
+                    {:fn fn-name :schema schema :value value :errors errors}))
+    value))
 
 ;; ---------------------------------------------------------------------------
 ;; Defaults
@@ -78,7 +245,9 @@
      :or {host     (or (System/getenv "OLLAMA_HOST") default-host)
           api-key  (System/getenv "OLLAMA_API_KEY")
           timeout  default-timeout-ms}}]
-   (map->Client {:host host :api-key api-key :timeout timeout})))
+   (let [client (map->Client {:host host :api-key api-key :timeout timeout})]
+     (validate! client-schema client "make-client")
+     client)))
 
 (defn- resolve-client
   "Accept either a Client or a request map as the first argument. Returns a
@@ -283,6 +452,7 @@
   Pass `:stream false` to receive a single response map."
   ([req] (let [[c r] (resolve-client req nil)] (generate c r)))
   ([client req]
+   (validate! generate-request req "generate")
    (if (streaming? req)
      (perform-stream client :post "/api/generate" req)
      (perform client :post "/api/generate" req))))
@@ -298,6 +468,7 @@
   Pass `:stream false` to receive a single response map."
   ([req] (let [[c r] (resolve-client req nil)] (chat c r)))
   ([client req]
+   (validate! chat-request req "chat")
    (if (streaming? req)
      (perform-stream client :post "/api/chat" req)
      (perform client :post "/api/chat" req))))
@@ -311,6 +482,7 @@
   Always returns a single response map (this endpoint does not stream)."
   ([req] (let [[c r] (resolve-client req nil)] (embed c r)))
   ([client req]
+   (validate! embed-request req "embed")
    (perform client :post "/api/embed" req)))
 
 (defn systemone
@@ -323,6 +495,7 @@
   Always returns a single response map (this endpoint does not stream)."
   ([req] (let [[c r] (resolve-client req nil)] (systemone c r)))
   ([client req]
+   (validate! systemone-request req "systemone")
    (perform client :post "/v1/systemone" req)))
 
 ;; ---------------------------------------------------------------------------
@@ -347,6 +520,7 @@
   Required: `:model`. Option: `:verbose`."
   ([req] (let [[c r] (resolve-client req nil)] (show-model c r)))
   ([client req]
+   (validate! show-request req "show-model")
    (perform client :post "/api/show" req)))
 
 (defn create-model
@@ -360,6 +534,7 @@
   returned. Pass `:stream false` to receive the final status map."
   ([req] (let [[c r] (resolve-client req nil)] (create-model c r)))
   ([client req]
+   (validate! create-model-request req "create-model")
    (if (streaming? req)
      (perform-stream client :post "/api/create" req)
      (perform client :post "/api/create" req))))
@@ -370,6 +545,7 @@
   Required: `:source`, `:destination`."
   ([req] (let [[c r] (resolve-client req nil)] (copy-model c r)))
   ([client req]
+   (validate! copy-model-request req "copy-model")
    (perform client :post "/api/copy" req)))
 
 (defn pull-model
@@ -381,6 +557,7 @@
   returned. Pass `:stream false` to receive the final status map."
   ([req] (let [[c r] (resolve-client req nil)] (pull-model c r)))
   ([client req]
+   (validate! pull-push-request req "pull-model")
    (if (streaming? req)
      (perform-stream client :post "/api/pull" req)
      (perform client :post "/api/pull" req))))
@@ -394,6 +571,7 @@
   returned. Pass `:stream false` to receive the final status map."
   ([req] (let [[c r] (resolve-client req nil)] (push-model c r)))
   ([client req]
+   (validate! pull-push-request req "push-model")
    (if (streaming? req)
      (perform-stream client :post "/api/push" req)
      (perform client :post "/api/push" req))))
@@ -404,6 +582,7 @@
   Required: `:model`."
   ([req] (let [[c r] (resolve-client req nil)] (delete-model c r)))
   ([client req]
+   (validate! delete-model-request req "delete-model")
    (perform client :delete "/api/delete" req)))
 
 ;; ---------------------------------------------------------------------------

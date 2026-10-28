@@ -62,7 +62,9 @@
   "
   (:require [cheshire.core :as json]
             [clojure.java.io :as io]
-            [clojure.string :as str])
+            [clojure.string :as str]
+            [malli.core :as m]
+            [malli.error :as me])
   (:import [java.io BufferedReader BufferedWriter InputStream OutputStream
             Reader Writer]
            [java.util.concurrent Callable Executors ExecutorService
@@ -142,6 +144,192 @@
         (instance? InterruptedException e)
         (assoc :code err-cancelled
                :message (default-error-messages err-cancelled))))))
+
+;; ---------------------------------------------------------------------------
+;; Schemas
+;; ---------------------------------------------------------------------------
+
+(def non-empty-string
+  "A string of at least one character."
+  [:re #".+"])
+
+(def session-id
+  "ACP session identifier (opaque string)."
+  non-empty-string)
+
+(def request-id
+  "A JSON-RPC id: integer, string, or nil (for notifications)."
+  [:or int? string? :nil])
+
+(def json-rpc-request
+  "A JSON-RPC 2.0 request object."
+  [:map
+   [:jsonrpc [:= "2.0"]]
+   [:id request-id]
+   [:method non-empty-string]
+   [:params {:optional true} [:map]]])
+
+(def json-rpc-notification
+  "A JSON-RPC 2.0 notification (no id)."
+  [:map
+   [:jsonrpc [:= "2.0"]]
+   [:method non-empty-string]
+   [:params {:optional true} [:map]]])
+
+(def json-rpc-error-object
+  "The `error` object inside an error response."
+  [:map
+   [:code int?]
+   [:message string?]
+   [:data {:optional true} :any]])
+
+(def json-rpc-response
+  "A JSON-RPC 2.0 response object (success or error)."
+  [:and
+   [:map
+    [:jsonrpc [:= "2.0"]]
+    [:id request-id]]
+   [:or
+    [:map [:result :any]]
+    [:map [:error json-rpc-error-object]]]])
+
+(def implementation-info
+  "The `:info` map advertised by an agent/client."
+  [:map
+   [:name non-empty-string]
+   [:version non-empty-string]
+   [:title {:optional true} string?]])
+
+(def agent-capabilities
+  "The `capabilities` map advertised by an agent."
+  [:map])
+
+(def auth-method
+  "A single entry in `authMethods`."
+  [:map
+   [:methodId non-empty-string]
+   [:title {:optional true} string?]
+   [:description {:optional true} string?]])
+
+(def initialize-params
+  "Params for the `initialize` request."
+  [:map
+   [:protocolVersion pos-int?]
+   [:info {:optional true} implementation-info]
+   [:capabilities {:optional true} [:map]]])
+
+(def initialize-response
+  "Result of the `initialize` request."
+  [:map
+   [:protocolVersion pos-int?]
+   [:info implementation-info]
+   [:capabilities {:optional true} agent-capabilities]
+   [:authMethods {:optional true} [:sequential auth-method]]])
+
+(def session-new-params
+  "Params for `session/new`."
+  [:map
+   [:cwd {:optional true} string?]
+   [:additionalDirectories {:optional true} [:sequential string?]]
+   [:mcpServers {:optional true} [:sequential [:map]]]])
+
+(def session-new-response
+  "Result of `session/new`."
+  [:map
+   [:sessionId session-id]])
+
+(def session-list-params
+  "Params for `session/list`."
+  [:map
+   [:cwd {:optional true} string?]
+   [:cursor {:optional true} string?]])
+
+(def session-list-response
+  "Result of `session/list`."
+  [:map
+   [:sessions {:optional true} [:sequential [:map]]]
+   [:nextCursor {:optional true} string?]])
+
+(def session-id-params
+  "Params for methods that only take a `:sessionId` (delete/close)."
+  [:map
+   [:sessionId session-id]])
+
+(def session-resume-params
+  "Params for `session/resume`."
+  [:map
+   [:sessionId session-id]
+   [:cwd {:optional true} string?]
+   [:additionalDirectories {:optional true} [:sequential string?]]
+   [:mcpServers {:optional true} [:sequential [:map]]]
+   [:replayFrom {:optional true} string?]])
+
+(def session-prompt-params
+  "Params for `session/prompt`."
+  [:map
+   [:sessionId session-id]
+   [:prompt [:or string? [:sequential [:map]]]]])
+
+(def session-prompt-response
+  "Result of `session/prompt`."
+  [:map
+   [:messageId non-empty-string]])
+
+(def session-cancel-params
+  "Params for the `session/cancel` notification."
+  [:map
+   [:sessionId session-id]])
+
+(def cancel-request-params
+  "Params for the `$/cancel_request` notification."
+  [:map
+   [:requestId [:or int? string?]]])
+
+(def session-update
+  "One `SessionUpdate` object, discriminated by `:sessionUpdate`."
+  [:map
+   [:sessionUpdate non-empty-string]])
+
+(def session-update-params
+  "Params carried by a `session/update` notification."
+  [:map
+   [:sessionId session-id]
+   [:update session-update]])
+
+(def request-permission-opts
+  "Body of `session/request_permission`."
+  [:map
+   [:sessionId session-id]
+   [:title string?]
+   [:options [:sequential [:map]]]
+   [:description {:optional true} string?]
+   [:subject {:optional true} [:map]]])
+
+(def create-elicitation-opts
+  "Body of `elicitation/create`."
+  [:map])
+
+(def complete-elicitation-params
+  "Body of `elicitation/complete`."
+  [:map
+   [:elicitationId non-empty-string]])
+
+(def acp-error-schema
+  "An `AcpError` value (code/message/data)."
+  [:map
+   [:code int?]
+   [:message string?]
+   [:data {:optional true} :any]])
+
+(defn validate!
+  "Validate `value` against `schema`, returning `value` when valid or throwing
+  an `ex-info` with a human-readable malli error explanation otherwise."
+  [schema value what]
+  (if-let [errors (and schema (m/explain schema value))]
+    (throw (ex-info (str "Invalid " what ": "
+                         (-> errors me/humanize pr-str))
+                    {:schema schema :value value :errors errors})))
+  value)
 
 ;; ---------------------------------------------------------------------------
 ;; Agent handler protocol
@@ -301,6 +489,16 @@
    "session/close"            #'handle-session-close
    "session/set_config_option" #'handle-session-set-config-option
    "session/prompt"           #'handle-session-prompt})
+
+(def ^:private request-method->params-schema
+  "Maps each known request method to the malli schema for its `params`."
+  {"initialize"                 initialize-params
+   "session/new"                session-new-params
+   "session/list"               session-list-params
+   "session/delete"             session-id-params
+   "session/resume"             session-resume-params
+   "session/close"              session-id-params
+   "session/prompt"             session-prompt-params})
 
 (def ^:private notification-method->handler-fn
   {"session/cancel"     #'on-session-cancel
@@ -484,25 +682,32 @@
   `session-id`. `update` is the full update map including its `:sessionUpdate`
   discriminator (e.g. `{:sessionUpdate \"agent_message\" :messageId ...
   :role \"agent\" :content [...]}`)."
-  [conn session-id update]
+  [conn sid update]
+  (validate! session-id sid "send-session-update sessionId")
+  (validate! session-update update "send-session-update update")
   (send-notification conn "session/update"
-                     {:sessionId session-id :update update}))
+                     {:sessionId sid :update update}))
 
 (defn request-permission
   "Send a `session/request_permission` request and return its promise. Blocks
   the caller only if they `await-request` the result. `opts` is the
   `RequestPermissionRequest` body (`:sessionId`, `:title`, `:options`,
   optional `:description`/`:subject`)."
-  ([conn opts] (send-request conn "session/request_permission" opts)))
+  ([conn opts]
+   (validate! request-permission-opts opts "request-permission")
+   (send-request conn "session/request_permission" opts)))
 
 (defn create-elicitation
   "Send an `elicitation/create` request and return its promise. `opts` is the
   `CreateElicitationRequest` body."
-  ([conn opts] (send-request conn "elicitation/create" opts)))
+  ([conn opts]
+   (validate! create-elicitation-opts opts "create-elicitation")
+   (send-request conn "elicitation/create" opts)))
 
 (defn complete-elicitation
   "Send an `elicitation/complete` notification for `elicitation-id`."
   [conn elicitation-id]
+  (validate! non-empty-string elicitation-id "complete-elicitation elicitationId")
   (send-notification conn "elicitation/complete"
                      {:elicitationId elicitation-id}))
 
@@ -512,10 +717,20 @@
 
 (defn- invoke-handler
   "Call the handler var for `method` with `conn` and `params`, returning an
-  `AcpError` on failure."
+  `AcpError` on failure. When a params schema is registered for `method`, the
+  params are validated first and an `err-params` error is returned on
+  failure."
   [conn handler-fn-var method params]
   (try
+    (when-let [schema (request-method->params-schema method)]
+      (validate! schema params (str "params for " method)))
     (@handler-fn-var (:handler conn) conn params)
+    (catch clojure.lang.ExceptionInfo e
+      (if (-> (ex-data e) :errors)
+        (acp-error err-params
+                   (default-error-messages err-params)
+                   (-> (ex-data e) :errors))
+        (ex->acp-error e)))
     (catch Throwable e
       (ex->acp-error e))))
 
