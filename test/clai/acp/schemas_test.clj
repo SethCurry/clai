@@ -58,7 +58,7 @@
   "A valid TextContent map, with optional overrides."
   ([] (text-content {}))
   ([overrides]
-   (merge {:meta        nil
+   (merge {:_meta        nil
            :annotations nil
            :text        "hello"
            :type        "text"}
@@ -71,11 +71,11 @@
 
 (deftest text-content-accepts-meta-and-annotations-maps
   (is (m/validate schemas/TextContent
-                  (text-content {:meta        {:anything "goes"}
+                  (text-content {:_meta        {:anything "goes"}
                                  :annotations {:audience ["user"]}}))))
 
 (deftest text-content-requires-every-key
-  (doseq [k [:meta :annotations :text :type]]
+  (doseq [k [:_meta :annotations :text :type]]
     (is (not (m/validate schemas/TextContent (dissoc (text-content) k)))
         (str "expected TextContent to require " k))))
 

@@ -48,7 +48,8 @@
             [clai.providers.ollama :as ollama]
             [clai.tools :as tools]
             [clojure.string :as str]
-            [taoensso.telemere :as tel])
+            [taoensso.telemere :as tel]
+            [clai.acp.schemas :as schemas])
   (:import [java.util UUID])
   (:gen-class))
 
@@ -549,8 +550,8 @@
                                   :messageId msg-id
                                   :chars     (count (str reply))}}
                          "Prompt complete")
-               (acp/send-agent-message-chunk conn sessionId
-                  reply)
+               (acp/send-session-update conn sessionId
+                  (schemas/->AgentMessageChunk (schemas/->TextContent reply)))
                {:stopReason "end_turn"}))))
 
        (on-session-cancel [_ conn {:keys [sessionId]}]

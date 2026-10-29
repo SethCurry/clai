@@ -1,65 +1,4 @@
 (ns clai.acp.agent
-  "Agent-side [Agent Client Protocol][acp] (v2) connection over stdio.
-
-  [acp]: https://agentclientprotocol.com/protocol/v2/overview
-
-  This namespace implements the **agent** role of ACP: a program launched as a
-  subprocess by a client, speaking newline-delimited JSON-RPC 2.0 over its
-  stdin/stdout. WebSocket and HTTP transports are out of scope.
-
-  ## Wire format
-
-  Each transport message is a single UTF-8 JSON-RPC object (or a JSON-RPC
-  batch array) terminated by a newline, with no embedded newlines. The agent
-  reads messages from `*in*` and writes to `*out*`; it may log to `*err*`.
-  Nothing that is not a valid ACP message is written to stdout.
-
-  ## Architecture
-
-  The reader thread only frames, parses, and dispatches; it never blocks on
-  agent work. Incoming requests and notifications run on a dedicated thread
-  pool, so an agent handler may itself send requests to the client (e.g.
-  `session/request_permission` or `elicitation/create`) and await their
-  responses without deadlocking the reader. All output is serialized through
-  a single lock so transport message order matches send order.
-
-  ## Implementing an agent
-
-  Provide a `clai.acp.AgentHandler` implementation (e.g. via `reify` or
-  `defrecord`) and pass it to `run`:
-
-      (def my-agent
-        (reify acp/AgentHandler
-          (handle-initialize [_ conn params]
-            {:protocolVersion 2
-             :info {:name \"my-agent\" :version \"0.1.0\"}
-             :capabilities {}})
-          (handle-session-new [_ conn {:keys [cwd]}]
-            {:sessionId (str (java.util.UUID/randomUUID))})
-          (handle-session-prompt [_ conn {:keys [sessionId prompt]}]
-            ;; Echo the user's text back as an agent message, then go idle.
-            (let [msg-id (str (java.util.UUID/randomUUID))]
-              (acp/send-session-update conn sessionId
-                {:sessionUpdate \"agent_message\"
-                 :messageId msg-id
-                 :role \"agent\"
-                 :content prompt})
-              (acp/send-session-update conn sessionId
-                {:sessionUpdate \"state_update\"
-                 :state \"idle\"})
-              {:messageId (str (java.util.UUID/randomUUID))}))))
-
-      (defn -main [& args]
-        (acp/run my-agent))
-
-  `DefaultHandler` provides a baseline `initialize` (negotiating protocol
-  version 2) and returns `method_not_found` (-32601) for every other method,
-  so you can subclass it and override only what you need.
-
-  Keys in request params and response maps are preserved verbatim from the
-  ACP schema (`:protocolVersion`, `:sessionId`, `:sessionUpdate`, ...), the
-  same convention used by the rest of `clai`.
-  "
   (:require [clai.log]
             [cheshire.core :as json]
             [clojure.java.io :as io]
@@ -75,7 +14,7 @@
            [java.util.concurrent.atomic AtomicLong]))
 
 ;; ---------------------------------------------------------------------------
-;; Protocol constants
+;; Constants
 ;; ---------------------------------------------------------------------------
 
 ;; ACP v2 is protocol version 2.
@@ -395,16 +334,15 @@
                      {:sessionId sid :update update}))
 
 (defn send-agent-message-chunk
+  "Send a plain-text `agent_message_chunk` `session/update` for `sid`.
+
+  `content` is the text to display. The chunk is built with
+  `schemas/->AgentMessageChunk` so it is validated before it goes on the
+  wire (chunk updates are closed maps and reject extra keys such as
+  `messageId`, which belong to full `agent_message` updates instead)."
   [conn sid content]
-  (send-session-update conn sid {:sessionUpdate "agent_message_chunk"
-                                 :_meta nil
-                                 :messageId nil
-                                 :content {
-                                   :_meta nil
-                                   :annotations nil
-                                   :type "text"
-                                   :text content
-                                   }}))
+  (send-session-update conn sid
+    (schemas/->AgentMessageChunk (schemas/->TextContent content))))
 (defn request-permission
   "Send a `session/request_permission` request and return its promise. Blocks
   the caller only if they `await-request` the result. `opts` is the

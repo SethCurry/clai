@@ -10,10 +10,14 @@
             [cheshire.core :as json]
             [clai.acp.agent :as acp]
             [clai.acp.jsonrpc :as jsonrpc]
+            [clai.test-support :as test-support :refer [quiet-logs]]
             [clojure.string])
   (:import [java.io PipedInputStream PipedOutputStream
             ByteArrayOutputStream OutputStream]
            [java.util UUID]))
+
+(use-fixtures :once quiet-logs)
+(use-fixtures :each test-support/join-agent-threads)
 
 ;; ---------------------------------------------------------------------------
 ;; Harness
@@ -60,9 +64,10 @@
   "Start an agent with `handler` reading from `in` and writing to `out`.
   Returns the running Thread."
   [handler in out]
-  (doto (Thread. #(acp/run handler {:in in :out out}))
-    (.setDaemon true)
-    (.start)))
+  (test-support/track-thread!
+   (doto (Thread. #(acp/run handler {:in in :out out}))
+     (.setDaemon true)
+     (.start))))
 
 ;; ---------------------------------------------------------------------------
 ;; A tiny echo agent for integration tests
@@ -85,17 +90,20 @@
             text      (->> prompt
                            (filter #(= "text" (:type %)))
                            (mapcat :content)
-                           (apply str))]
+                           (apply str))
+            ;; `MessageTextContent` requires a `_meta` key, so normalize the
+            ;; client prompt parts before echoing them back as a message.
+            content   (mapv #(assoc % :_meta (:_meta %)) prompt)]
         (acp/send-session-update conn sessionId
           {:sessionUpdate "user_message"
            :messageId user-id
            :role "user"
-           :content prompt})
+           :content content})
         (acp/send-session-update conn sessionId
           {:sessionUpdate "agent_message"
            :messageId agent-id
            :role "agent"
-           :content [{:type "text" :content text}]})
+           :content [{:_meta nil :type "text" :content text}]})
         (acp/send-session-update conn sessionId
           {:sessionUpdate "state_update" :state "idle"})
         {:messageId user-id}))
@@ -181,10 +189,15 @@
                             :prompt [{:type "text" :content "hello"}]}})
       (let [msgs (drain-until
                   baos
-                  #(some (fn [m]
-                           (and (= "session/update" (:method m))
-                                (= "idle" (-> m :params :update :state))))
-                         %)
+                  ;; The agent emits the idle `state_update` *before* its
+                  ;; `handle-session-prompt` return value is written back as
+                  ;; the id-3 response, so wait for both before reading.
+                  (fn [ms]
+                    (and (some (fn [m]
+                                 (and (= "session/update" (:method m))
+                                      (= "idle" (-> m :params :update :state))))
+                               ms)
+                         (some #(and (= 3 (:id %)) (:result %)) ms)))
                   2000)
             prompt-resp (some #(and (= 3 (:id %)) (:result %)) msgs)
             updates     (eduction

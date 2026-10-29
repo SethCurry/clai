@@ -6,6 +6,20 @@
             [clojure.core :as c]))
 
 
+(defn validate!
+  "Validate `value` against `schema`, returning `value` when valid or throwing
+  an `ex-info` with a human-readable malli error explanation otherwise."
+  [schema value what]
+  (if-let [errors (and schema (m/explain schema value))]
+    (let [explained (me/humanize errors)]
+      (tel/log! {:level :error
+                 :id    ::validation-failed
+                 :data  {:what what :errors explained}}
+                (str "Invalid " what))
+      (throw (ex-info (str "Invalid " what ": " (pr-str explained))
+                      {:schema schema :value value :errors errors})))
+    value))
+
 ;; ---------------------------------------------------------------------------
 ;; Schemas
 ;; ---------------------------------------------------------------------------
@@ -32,11 +46,25 @@
 (def TextContent
   [:map
     {:closed true}
-    [:meta #'Meta]
+    [:_meta #'Meta]
     [:annotations #'Annotations]
     [:text :string]
     [:type [:= "text"]]
     ])
+
+(defn ->TextContent
+    "Creates a new TextContent object.
+
+    Args:
+    - text (string): The content that should be in this TextContent."
+    [text]
+    (let [data {
+        :_meta nil
+        :annotations nil
+        :text text
+        :type "text"
+        }]
+        (validate! TextContent data "TextContent")))
 
 (def Content [:or #'TextContent])
 
@@ -47,6 +75,14 @@
     [:content #'Content]
     [:sessionUpdate [:= "user_message_chunk"]]])
 
+(defn ->UserMessageChunk [content]
+    (let [data {
+        :_meta nil
+        :content content
+        :sessionUpdate "user_message_chunk"
+        }]
+        (validate! UserMessageChunk data "UserMessageChunk")))
+
 (def AgentMessageChunk
   [:map
     {:closed true}
@@ -54,12 +90,30 @@
     [:content #'Content]
     [:sessionUpdate [:= "agent_message_chunk"]]])
 
+(defn ->AgentMessageChunk [content]
+    (let [data {
+        :_meta nil
+        :content content
+        :sessionUpdate "agent_message_chunk"
+        }]
+        (validate! AgentMessageChunk data "AgentMessageChunk")))
+
 (def AgentThoughtChunk
   [:map
     {:closed true}
     [:_meta #'Meta]
     [:content #'Content]
     [:sessionUpdate [:= "agent_thought_chunk"]]])
+
+
+(defn ->AgentThoughtChunk [content]
+    (let [data {
+        :_meta nil
+        :content content
+        :sessionUpdate "agent_thought_chunk"
+        }]
+        (validate! AgentThoughtChunk data "AgentThoughtChunk")))
+
 
 ;; Full (non-chunk) message updates carry an entire message: a `messageId`,
 ;; a `role`, and a vector of `Content` parts. The content parts used here
@@ -69,9 +123,18 @@
 (def MessageTextContent
   [:map
     {:closed true}
-    [:_meta {:optional true} #'Meta]
+    [:_meta #'Meta]
     [:type [:= "text"]]
     [:content :string]])
+
+(defn ->MessageTextContent
+    [content]
+    (let [data {
+        :_meta nil
+        :type "text"
+        :content content
+        }]
+        (validate! MessageTextContent data "MessageTextContent")))
 
 (def MessageContent [:or #'MessageTextContent])
 
@@ -201,17 +264,48 @@
     [:cwd [:maybe :string]]])
 
 (def SessionInfo [:map
-    [:_meta #'Meta]
-    [:additionalDirectories [:vector :string]]
+    [:_meta {:optional true} #'Meta]
+    [:additionalDirectories {:optional true} [:maybe [:vector :string]]]
     [:cwd :string]
     [:sessionId :string]
-    [:title [:maybe :string]]
-    [:updatedAt [:maybe :string]]])
+    [:title {:optional true} [:maybe :string]]
+    [:updatedAt {:optional true} [:maybe :string]]])
+
+(defn ->SessionInfo
+    "Create and validate a new SessionInfo map.
+
+    Args:
+    - session-id (string): The session ID as a string
+    - cwd (string): The working directory for the session as a string
+    - additionalDirectories (string[]): Extra directories to be included in the session.
+
+    Keyword Args:
+    - title (string): The name of the session
+    - updated-at (string): The time the session was last updated."
+    [session-id cwd additionalDirectories {:keys [title updated-at]}]
+    (let [val {
+        :_meta nil
+        :additionalDirectories additionalDirectories
+        :cwd cwd
+        :sessionId session-id
+        :title title
+        :updatedAt updated-at
+        }]
+        (validate! SessionInfo val "SessionInfo")))
 
 (def ListSessionsResponse [:map
     [:_meta #'Meta]
     [:nextCursor [:maybe :string]]
     [:sessions [:vector #'SessionInfo]]])
+
+(defn ->ListSessionsResponse [{:keys [next-cursor sessions]}]
+    (let [resp {
+        :_meta nil
+        :nextCursor next-cursor
+        :sessions sessions
+        }]
+        (validate! ListSessionsResponse resp "ListSessionsResponse")
+        resp))
 
 (def json-rpc-request
   "A JSON-RPC 2.0 request object."
@@ -349,17 +443,3 @@
    [:code int?]
    [:message string?]
    [:data {:optional true} :any]])
-
-(defn validate!
-  "Validate `value` against `schema`, returning `value` when valid or throwing
-  an `ex-info` with a human-readable malli error explanation otherwise."
-  [schema value what]
-  (if-let [errors (and schema (m/explain schema value))]
-    (let [explained (me/humanize errors)]
-      (tel/log! {:level :error
-                 :id    ::validation-failed
-                 :data  {:what what :errors explained}}
-                (str "Invalid " what))
-      (throw (ex-info (str "Invalid " what ": " (pr-str explained))
-                      {:schema schema :value value :errors errors})))
-    value))
