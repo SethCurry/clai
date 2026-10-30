@@ -7,7 +7,8 @@
                  [clj-http "3.13.0"]
                  [cheshire "5.13.0"]
                  [com.taoensso/telemere "1.2.1"]
-                 [metosin/malli "0.17.0"]]
+                 [metosin/malli "0.17.0"]
+                 [io.scurry/acp "0.1.0-SNAPSHOT"]]
   :main ^:skip-aot clai.core
   :target-path "target/%s"
   :profiles {:uberjar {:aot :all

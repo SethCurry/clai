@@ -42,14 +42,15 @@
   speaks newline-delimited JSON-RPC 2.0 to it; see [[clai.acp.agent]] for the
   wire format."
   (:require [clai.log]
-            [clai.acp.agent :as acp]
-            [clai.acp.errors :as acp-errors]
+            [acp.agent :as acp]
+            [acp.errors :as acp-errors]
             [clai.config :as config]
             [clai.providers.ollama :as ollama]
             [clai.tools :as tools]
             [clojure.string :as str]
             [taoensso.telemere :as tel]
-            [clai.acp.schemas :as schemas])
+            [acp.schema.content :refer [->TextContent]]
+            [acp.schema.core :as schemas])
   (:import [java.util UUID])
   (:gen-class))
 
@@ -452,7 +453,7 @@
                "Configured clai agent")
      (reify acp/AgentHandler
        (handle-initialize [_ _conn {:keys [protocolVersion]}]
-         (let [negotiated (min acp/current-protocol-version
+         (let [negotiated (min acp/protocol-version-2
                                (long (or protocolVersion 2)))]
            (tel/log! {:level :debug
                       :id    ::initialize
@@ -465,10 +466,10 @@
                               :version "0.1.0-SNAPSHOT"}
             :capabilities    {}}))
 
-       (handle-auth-login [_ _conn _params]
+       (handle-authenticate [_ _conn _params]
          (acp-errors/acp-error acp-errors/err-method))
 
-       (handle-auth-logout [_ _conn _params]
+       (handle-logout [_ _conn _params]
          (acp-errors/acp-error acp-errors/err-method))
 
        (handle-session-new [_ _conn {:keys [cwd]}]
@@ -551,7 +552,10 @@
                                   :chars     (count (str reply))}}
                          "Prompt complete")
                (acp/send-session-update conn sessionId
-                  (schemas/->AgentMessageChunk (schemas/->TextContent reply)))
+                  (schemas/->SessionNotification sessionId {
+                    :type "agent_message_chunk"
+                    :content (->TextContent reply)
+                    }))
                {:stopReason "end_turn"}))))
 
        (on-session-cancel [_ conn {:keys [sessionId]}]
