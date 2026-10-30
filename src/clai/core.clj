@@ -13,6 +13,15 @@
   `session/prompt`, forwards the conversation to Ollama's `/api/chat` and
   relays the reply back to the client as `session/update` notifications.
 
+  ## Sessions
+
+  Sessions are persisted as JSON files under `~/.local/clai/sessions/` by
+  [`clai.state`](#clai.state). `session/new` creates and records one;
+  `session/list`, `session/delete`, and `session/resume` operate on the
+  recorded set. The optional ACP `session/load` method restores a previous
+  session and replays its user/assistant history to the client as
+  `user_message_chunk`/`agent_message_chunk` notifications before returning.
+
   ## Tool calling
 
   When the model's reply carries `tool_calls`, the handler executes each
@@ -45,12 +54,11 @@
             [acp.agent :as acp]
             [acp.errors :as acp-errors]
             [clai.config :as config]
+            [clai.state :as state]
             [clai.providers.ollama :as ollama]
             [clai.tools :as tools]
             [clojure.string :as str]
-            [taoensso.telemere :as tel]
-            [acp.schema.content :refer [->TextContent]]
-            [acp.schema.core :as schemas])
+            [taoensso.telemere :as tel])
   (:import [java.util UUID])
   (:gen-class))
 
@@ -88,32 +96,46 @@
 ;; Session state
 ;; ---------------------------------------------------------------------------
 
-;; In-memory session store: `{session-id {:cwd ... :history [message ...]}}`.
-;; Each Ollama message is `{:role \"user\"|\"assistant\"|\"tool\" :content \"...\"}`;
-;; assistant messages with `:tool_calls` and `tool`-role result messages are
-;; kept verbatim so the conversation history round-trips through `/api/chat`.
-(def ^:private sessions (atom {}))
+;; Persisted session store, backed by `clai.state`. Each session is a JSON
+;; file under `~/.local/clai/sessions/`, so it survives process restarts and
+;; can be loaded again later. Each Ollama message is
+;; `{:role "user"|"assistant"|"tool" :content "..."}`; assistant messages
+;; with `:tool_calls` and `tool`-role result messages are kept verbatim so the
+;; conversation history round-trips through `/api/chat`.
 
 (defn- create-session
-  "Register a new session and return its `NewSessionResponse`."
-  [cwd]
-  (let [id (str (UUID/randomUUID))]
-    (swap! sessions assoc id {:cwd cwd :history []})
-    (tel/log! {:level :info
-               :id    ::session-created
-               :data  {:sessionId id :cwd cwd}}
-              "Created session")
-    {:sessionId id}))
+  "Create and persist a new session, returning its `NewSessionResponse`."
+  ([cwd] (create-session cwd nil))
+  ([cwd model]
+   (let [s  (state/create-session {:cwd cwd :model model})
+         id (:sessionId s)]
+     (tel/log! {:level :info
+                :id    ::session-created
+                :data  {:sessionId id :cwd cwd}}
+               "Created session")
+     {:sessionId id})))
 
 (defn- lookup-session
-  "Return the session map for `id`, or nil."
+  "Return the persisted session map for `id`, or nil."
   [id]
-  (get @sessions id))
+  (state/load-session id))
+
+(defn- register-session
+  "Persist a session under an explicit `id`. Used by `session/resume` when a
+  client resumes a session this agent has no record of, so resume degrades to
+  new rather than erroring."
+  [id cwd history]
+  (state/save-session
+   {:sessionId id
+    :cwd       (str (or cwd "."))
+    :params    {}
+    :createdAt (str (java.time.Instant/now))
+    :history   history}))
 
 (defn- drop-session
-  "Remove `id` from the session store."
+  "Remove `id` from the persistent session store."
   [id]
-  (swap! sessions dissoc id)
+  (state/delete-session id)
   (tel/log! {:level :debug
              :id    ::session-dropped
              :data  {:sessionId id}}
@@ -123,7 +145,7 @@
 (defn- append-history
   "Append a `{role content}` message to session `id` and return it."
   [id message]
-  (swap! sessions update-in [id :history] (fnil conj []) message)
+  (state/append-history id message)
   (tel/log! {:level :debug
              :id    ::history-append
              :data  {:sessionId id
@@ -135,7 +157,7 @@
 (defn- session-history
   "Return the Ollama message history for session `id` (empty if unknown)."
   [id]
-  (-> (lookup-session id) :history (or [])))
+  (state/session-history id))
 
 ;; ---------------------------------------------------------------------------
 ;; ACP <-> Ollama message conversion
@@ -164,27 +186,117 @@
     (sequential? content) (->> content (map part->text) (remove nil?) (interpose "\n") (apply str))
     :else                 (str content)))
 
+(defn- role->string
+  "Normalize an ACP `role` (string or keyword) to its Ollama string form,
+  defaulting to `user`."
+  [role]
+  (cond
+    (nil? role)    "user"
+    (string? role) role
+    :else          (name role)))
+
 (defn- acp-message->ollama
-  "Convert one ACP `Message` (`{:role ... :content [...]}`) to an Ollama chat
-  message (`{:role ... :content \"...\"}`)."
+  "Convert one role-tagged ACP `Message` (`{:role ... :content [...]}`) to an
+  Ollama chat message (`{:role ... :content \"...\"}`)."
   [{:keys [role content]}]
-  {:role    (name (or role "user"))
+  {:role    (role->string role)
    :content (content->text content)})
+
+(defn- prompt-entry->ollama
+  "Convert one entry of an ACP `session/prompt` `:prompt` vector to an Ollama
+  chat message.
+
+  Per the ACP schema, `:prompt` is a vector of `ContentBlock`s (for example
+  `{:type \"text\" :text \"...\"}`), all of which come from the user -- the
+  blocks carry the text itself, not a `:content` field. A role-tagged message
+  map is accepted too, for tolerance of simpler clients and the echo example
+  in [[clai.acp.agent]]."
+  [entry]
+  (if (contains? entry :content)
+    (acp-message->ollama entry)
+    {:role "user" :content (content->text [entry])}))
 
 (defn- acp-prompt->ollama-messages
   "Normalize the `:prompt` field of a `session/prompt` request to a vector of
   Ollama messages.
 
-  ACP v2 sends `:prompt` as a vector of `Message` objects. To be tolerant of
-  simpler clients (and the echo example in [[clai.acp.agent]]), a bare string
-  or a single message map is also accepted."
+  ACP v2 sends `:prompt` as a vector of `ContentBlock`s, so the blocks are
+  flattened into a single `user` message whose content is their concatenated
+  text. A vector of role-tagged messages is also handled (one Ollama message
+  per entry), as are a bare string and a single map."
   [prompt]
   (cond
     (nil? prompt)             []
     (string? prompt)          [{:role "user" :content prompt}]
-    (map? prompt)             [(acp-message->ollama prompt)]
-    (sequential? prompt)      (mapv acp-message->ollama prompt)
+    (map? prompt)             [(prompt-entry->ollama prompt)]
+    (sequential? prompt)      (if (every? #(and (map? %) (contains? % :content))
+                                          prompt)
+                                (mapv prompt-entry->ollama prompt)
+                                [{:role "user" :content (content->text prompt)}])
     :else                     [{:role "user" :content (str prompt)}]))
+
+(defn- history-message->update
+  "Convert one persisted history message to the `session/update` the client
+  should see when a session is loaded. System and tool messages are internal
+  and are not replayed; user/assistant messages become message chunks."
+  [{:keys [role content]}]
+  (let [role (cond
+               (nil? role)     nil
+               (string? role)  role
+               (keyword? role) (name role)
+               :else           (str role))
+        text (content->text content)]
+    (case role
+      "user"      {:sessionUpdate "user_message_chunk"
+                    :content       {:type "text" :text text}}
+      "assistant" {:sessionUpdate "agent_message_chunk"
+                    :content       {:type "text" :text text}}
+      "agent"     {:sessionUpdate "agent_message_chunk"
+                    :content       {:type "text" :text text}}
+      nil)))
+
+(defn- replay-session-history
+  "Send the persisted `history` for `session-id` to the client as a sequence
+  of `session/update` notifications."
+  [conn session-id history]
+  (let [updates (into [] (keep history-message->update) history)]
+    (doseq [update updates]
+      (acp/send-session-update conn session-id update))
+    (tel/log! {:level :debug
+               :id    ::history-replayed
+               :data  {:sessionId session-id
+                       :messages  (count updates)}}
+              "Replayed session history")
+    (count updates)))
+
+(defn- handle-session-load
+  "Handle an ACP `session/load` request: restore the persisted session, replay
+  its conversation history to the client, and return a `LoadSessionResponse`.
+
+  Unlike `session/resume`, loading a session that is not recorded is an error;
+  the client needs a real history to restore."
+  [conn {:keys [sessionId cwd]}]
+  (cond
+    (str/blank? (str sessionId))
+    (acp-errors/acp-error acp-errors/err-params "Missing sessionId")
+
+    :else
+    (if-let [session (lookup-session sessionId)]
+      (let [session (if (and (some? cwd) (not= (str cwd) (:cwd session)))
+                      (state/save-session (assoc session :cwd (str cwd)))
+                      session)
+            history (or (:history session) [])]
+        (tel/log! {:level :info
+                   :id    ::session-loaded
+                   :data  {:sessionId sessionId
+                           :cwd       (:cwd session)
+                           :messages  (count history)}}
+                  "Loaded session")
+        (replay-session-history conn sessionId history)
+        {})
+      (acp-errors/acp-error acp-errors/err-not-found
+                            (str "No session " sessionId)
+                            {:sessionId sessionId}))))
 
 ;; ---------------------------------------------------------------------------
 ;; Tool-calling loop
@@ -454,17 +566,25 @@
      (reify acp/AgentHandler
        (handle-initialize [_ _conn {:keys [protocolVersion]}]
          (let [negotiated (min acp/protocol-version-2
-                               (long (or protocolVersion 2)))]
+                               (long (or protocolVersion 2)))
+               capabilities {:loadSession true
+                             :sessionCapabilities {:list   {}
+                                                   :delete {}
+                                                   :resume {}
+                                                   :close  {}}}
+               info         {:name    "clai"
+                             :title   "clai agent"
+                             :version "0.1.0-SNAPSHOT"}]
            (tel/log! {:level :debug
                       :id    ::initialize
                       :data  {:client-protocol protocolVersion
                               :negotiated      negotiated}}
                      "Initialized ACP connection")
-           {:protocolVersion negotiated
-            :info            {:name    "clai"
-                              :title   "clai agent"
-                              :version "0.1.0-SNAPSHOT"}
-            :capabilities    {}}))
+           {:protocolVersion   negotiated
+            :info              info
+            :agentInfo         info
+            :capabilities      capabilities
+            :agentCapabilities capabilities}))
 
        (handle-authenticate [_ _conn _params]
          (acp-errors/acp-error acp-errors/err-method))
@@ -473,19 +593,24 @@
          (acp-errors/acp-error acp-errors/err-method))
 
        (handle-session-new [_ _conn {:keys [cwd]}]
-         (let [res (create-session cwd)]
+         (let [res (create-session cwd model)]
            (when sys-prompt
              (append-history (:sessionId res)
                              {:role "system" :content sys-prompt}))
            res))
 
-       (handle-session-list [_ _conn _params]
-         (tel/log! {:level :debug
-                    :id    ::session-list
-                    :data  {:count (count @sessions)}}
-                   "Listed sessions")
-         {:sessions (for [[id {:keys [cwd]}] @sessions]
-                      {:sessionId id :cwd cwd})})
+       (handle-session-list [_ _conn {:keys [cwd]}]
+         (let [sessions (cond->> (state/list-session-summaries)
+                          (some? cwd) (filter #(= cwd (:cwd %))))]
+           (tel/log! {:level :debug
+                      :id    ::session-list
+                      :data  {:count (count sessions)}}
+                     "Listed sessions")
+           {:sessions (mapv (fn [{:keys [sessionId cwd updatedAt]}]
+                              (cond-> {:sessionId sessionId
+                                       :cwd       (or cwd "")}
+                                (some? updatedAt) (assoc :updatedAt updatedAt)))
+                            sessions)}))
 
        (handle-session-delete [_ _conn {:keys [sessionId]}]
          (drop-session sessionId))
@@ -494,17 +619,19 @@
          ;; If the session is unknown, register a fresh one under the
          ;; requested id (with the configured system prompt, if any) so
          ;; resume degrades to new rather than erroring.
-         (if (lookup-session sessionId)
-           (tel/log! {:level :debug
-                      :id    ::session-resumed
-                      :data  {:sessionId sessionId}}
-                     "Resumed existing session")
+         (if-let [session (lookup-session sessionId)]
            (do
-             (swap! sessions assoc sessionId
-                    {:cwd     cwd
-                     :history (if sys-prompt
-                                [{:role "system" :content sys-prompt}]
-                                [])})
+             (when (and (some? cwd) (not= (str cwd) (:cwd session)))
+               (state/save-session (assoc session :cwd (str cwd))))
+             (tel/log! {:level :debug
+                        :id    ::session-resumed
+                        :data  {:sessionId sessionId}}
+                       "Resumed existing session"))
+           (do
+             (register-session sessionId cwd
+                               (if sys-prompt
+                                 [{:role "system" :content sys-prompt}]
+                                 []))
              (tel/log! {:level :info
                         :id    ::session-registered
                         :data  {:sessionId sessionId :cwd cwd}}
@@ -512,7 +639,13 @@
          {:sessionId sessionId})
 
        (handle-session-close [_ _conn {:keys [sessionId]}]
-         (drop-session sessionId))
+         ;; Closing frees the active session but keeps its persisted history so
+         ;; the client can load it again later; `session/delete` removes it.
+         (tel/log! {:level :debug
+                    :id    ::session-closed
+                    :data  {:sessionId sessionId}}
+                   "Closed session")
+         {})
 
        (handle-session-set-config-option [_ _conn _params]
          (acp-errors/acp-error acp-errors/err-method))
@@ -551,24 +684,16 @@
                                   :messageId msg-id
                                   :chars     (count (str reply))}}
                          "Prompt complete")
-               (acp/send-session-update conn sessionId
-                  (schemas/->SessionNotification sessionId {
-                    :type "agent_message_chunk"
-                    :content (->TextContent reply)
-                    }))
+               (acp/send-agent-message-chunk conn sessionId (str reply))
                {:stopReason "end_turn"}))))
 
-       (on-session-cancel [_ conn {:keys [sessionId]}]
-         ;; No background work to cancel for the synchronous handler; just
-         ;; return to idle so the client can issue the next prompt.
+       (on-session-cancel [_ _conn {:keys [sessionId]}]
+         ;; No background work to cancel for the synchronous handler; the
+         ;; in-flight `session/prompt` already returns on its own.
          (tel/log! {:level :debug
                     :id    ::session-cancel
                     :data  {:sessionId sessionId}}
                    "Session cancelled")
-         (acp/send-session-update conn sessionId
-           {:sessionUpdate "state_update"
-            :state         "idle"
-            :stopReason    "cancelled"})
          nil)
 
        (on-cancel-request [_ _conn params]
@@ -583,12 +708,15 @@
                     :data  {:method method}}
                    "Ignoring extension notification")
          nil)
-       (on-ext-request [_ _conn method _params]
-         (tel/log! {:level :debug
-                    :id    ::extension-request
-                    :data  {:method method}}
-                   "Rejecting extension request")
-         (acp-errors/acp-error acp-errors/err-method))))))
+       (on-ext-request [_ conn method params]
+         (if (= method "session/load")
+           (handle-session-load conn params)
+           (do
+             (tel/log! {:level :debug
+                        :id    ::extension-request
+                        :data  {:method method}}
+                       "Rejecting extension request")
+             (acp-errors/acp-error acp-errors/err-method))))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Entry point
