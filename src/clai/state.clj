@@ -1,7 +1,7 @@
 (ns clai.state
   "Persistent session storage for `clai`.
 
-  Each ACP session is recorded as a JSON file under
+  Each ACP session is recorded as an EDN file under
   `~/.local/clai/sessions/`, so the full state of a session -- its
   parameters (`cwd`, model, etc.) and its message history -- survives across
   process restarts and can be inspected or resumed later.
@@ -9,17 +9,17 @@
   ## File layout
 
       ~/.local/clai/sessions/
-        <sessionId>.json
+        <sessionId>.edn
 
-  Each file is a single JSON object with the shape:
+  Each file is a single EDN map with the shape:
 
-      {\"sessionId\"  \"<uuid>\"
-       \"cwd\"        \"/abs/path\"
-       \"model\"      \"gemma3\"        ; optional
-       \"params\"     { ... }         ; arbitrary extra session parameters
-       \"createdAt\"  \"2024-10-28T...\"
-       \"updatedAt\"  \"2024-10-28T...\"
-       \"history\"    [{\"role\" \"user\" \"content\" \"...\"} ...]}
+      {:sessionId  \"<uuid>\"
+       :cwd        \"/abs/path\"
+       :model      \"gemma3\"        ; optional
+       :params     { ... }         ; arbitrary extra session parameters
+       :createdAt  \"2024-10-28T...\"
+       :updatedAt  \"2024-10-28T...\"
+       :history    [{:role \"user\" :content \"...\"} ...]}
 
   The `history` vector uses the same `{role content}` message maps that the
   Ollama chat API expects.
@@ -31,8 +31,9 @@
   single session are serialized. Different sessions use independent files and
   do not contend."
   (:require [clai.log]
-            [cheshire.core :as json]
+            [clojure.edn :as edn]
             [clojure.java.io :as io]
+            [clojure.pprint :as pprint]
             [clojure.string :as str]
             [taoensso.telemere :as tel])
   (:import [java.time Instant]
@@ -66,9 +67,9 @@
     dir))
 
 (defn- session-file
-  "Return the JSON file path for `session-id`."
+  "Return the EDN file path for `session-id`."
   [session-id]
-  (File. (sessions-dir) (str session-id ".json")))
+  (File. (sessions-dir) (str session-id ".edn")))
 
 ;; ---------------------------------------------------------------------------
 ;; Serialization helpers
@@ -79,27 +80,31 @@
   []
   (str (Instant/now)))
 
-(defn- read-json-file
-  "Parse the contents of `file` as JSON, returning a keyword-keyed map.
-  Returns nil if the file does not exist."
+(defn- read-edn-file
+  "Parse the contents of `file` as EDN, returning its value (normally a
+  keyword-keyed map). Returns nil if the file does not exist or is empty."
   [^File file]
   (when (.exists file)
     (try
-      (with-open [r (io/reader file)]
-        (json/parse-stream r true))
+      (with-open [r (java.io.PushbackReader. (io/reader file))]
+        (edn/read {:eof nil} r))
       (catch Throwable e
         (tel/error! {:id   ::session-read-failed
                      :data {:file (.getAbsolutePath file)}}
                     e)
         (throw e)))))
 
-(defn- write-json-file
-  "Write `data` (a map) to `file` as pretty-printed JSON."
+(defn- write-edn-file
+  "Write `data` (a map) to `file` as pretty-printed EDN."
   [^File file data]
   (ensure-sessions-dir)
   (try
     (with-open [w (io/writer file)]
-      (json/generate-stream data w {:pretty true}))
+      (binding [*out*                 w
+                *print-namespace-maps* false
+                *print-length*         nil
+                *print-level*          nil]
+        (pprint/pprint data)))
     (catch Throwable e
       (tel/error! {:id   ::session-write-failed
                    :data {:file      (.getAbsolutePath file)
@@ -144,7 +149,7 @@
                    :updatedAt  created
                    :history    []}
          file     (session-file id)]
-     (write-json-file file state)
+     (write-edn-file file state)
      (tel/log! {:level :info
                 :id    ::session-created
                 :data  {:sessionId id :cwd (str cwd) :model model}}
@@ -155,7 +160,7 @@
   "Read and return the state map for `session-id`, or nil if no such session
   is recorded."
   [session-id]
-  (let [state (read-json-file (session-file session-id))]
+  (let [state (read-edn-file (session-file session-id))]
     (tel/log! {:level :debug
                :id    ::session-loaded
                :data  {:sessionId session-id :found? (some? state)}}
@@ -168,15 +173,15 @@
   (load-session session-id))
 
 (defn save-session
-  "Persist `state` (a session map) to its JSON file. Refreshes `:updatedAt`.
+  "Persist `state` (a session map) to its EDN file. Refreshes `:updatedAt`.
   Returns the saved state."
   [state]
   (let [state' (assoc state :updatedAt (now-iso))]
-    (write-json-file (session-file (:sessionId state')) state')
+    (write-edn-file (session-file (:sessionId state')) state')
     state'))
 
 (defn delete-session
-  "Delete the JSON file for `session-id`, if present. Returns true if a file
+  "Delete the EDN file for `session-id`, if present. Returns true if a file
   was removed, false otherwise."
   [session-id]
   (let [file     (session-file session-id)
@@ -196,8 +201,8 @@
   (let [sessions (->> (sessions-dir)
                       (file-seq)
                       (filter #(and (.isFile %)
-                                    (str/ends-with? (.getName %) ".json")))
-                      (keep read-json-file)
+                                    (str/ends-with? (.getName %) ".edn")))
+                      (keep read-edn-file)
                       (sort-by :createdAt)
                       (vec))]
     (tel/log! {:level :debug

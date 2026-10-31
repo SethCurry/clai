@@ -40,7 +40,7 @@
             [malli.error :as me]
             [taoensso.telemere :as tel])
   (:import [java.net URL]
-           [java.util Base64]
+           [java.util Base64 UUID]
            [java.io InputStream BufferedReader]))
 
 ;; ---------------------------------------------------------------------------
@@ -757,3 +757,33 @@
   [& _]
   (let [c (make-client)]
     (println "Ollama" (:version (version c)))))
+
+
+(defn assistant-message
+  "Return the assistant `:message` map from an Ollama `/api/chat` response,
+  normalized to at least a map with role `assistant` and empty content."
+  [resp]
+  (-> resp :message (or {:role "assistant" :content ""})))
+
+(defn has-tool-calls?
+  "True when an Ollama assistant message requests one or more tool calls."
+  [msg]
+  (and (map? msg) (seq (:tool_calls msg))))
+
+(defn tool-call-id
+  "Return the Ollama tool call's id, generating one when absent."
+  [call]
+  (or (:id call) (str (UUID/randomUUID))))
+
+(defn tool-call-name
+  "Extract the function name from an Ollama `tool_calls` entry."
+  [call]
+  (let [f (or (:function call) call)]
+    (:name f)))
+
+
+(defn tool-call-title
+  "Render a short human-readable title for an Ollama tool call."
+  [call]
+  (str (or (tool-call-name call) "?")
+       " " (pr-str (:arguments (or (:function call) call)))))

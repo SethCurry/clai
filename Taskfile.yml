@@ -10,6 +10,11 @@ tasks:
         cmds:
             - lein test
     build:
+        sources:
+            - "**/*.clj"
+            - project.clj
+        generates:
+            - "target/**/*"
         cmds:
             - lein uberjar
     run:

@@ -1,61 +1,11 @@
 (ns clai.core
-  "Main entrypoint for `clai`.
-
-  Wires together the three halves of the project:
-
-    * [[clai.acp.agent]]  -- the agent side of the Agent Client Protocol,
-                              spoken over stdio.
-    * `clai.providers.ollama` -- an HTTP client for a local or cloud Ollama
-                              server, used to generate agent responses.
-    * `clai.tools`        -- a registry of tools the model may call.
-
-  `(-main)` starts the ACP server with an `AgentHandler` that, on each
-  `session/prompt`, forwards the conversation to Ollama's `/api/chat` and
-  relays the reply back to the client as `session/update` notifications.
-
-  ## Sessions
-
-  Sessions are persisted as JSON files under `~/.local/clai/sessions/` by
-  [`clai.state`](#clai.state). `session/new` creates and records one;
-  `session/list`, `session/delete`, and `session/resume` operate on the
-  recorded set. The optional ACP `session/load` method restores a previous
-  session and replays its user/assistant history to the client as
-  `user_message_chunk`/`agent_message_chunk` notifications before returning.
-
-  ## Tool calling
-
-  When the model's reply carries `tool_calls`, the handler executes each
-  call against `clai.tools`, appends `{:role \"tool\" ...}` result messages
-  to the history, and chats again -- looping until the model replies with a
-  plain assistant message (or the round cap in `CLAI_MAX_TOOL_ROUNDS` is hit).
-  This is the standard Ollama tool-calling flow; see `clai.tools` for how to
-  register additional tools.
-
-  ## Configuration
-
-  The Ollama client is built from the same environment variables as
-  `clai.providers.ollama` (`OLLAMA_HOST`, `OLLAMA_API_KEY`), unless a config
-  file overrides them (see `clai.config`). The model used
-  for chat defaults to `gemma3` and can be overridden via the config file's
-  `:model` key or the `CLAI_MODEL` environment variable. The per-prompt
-  tool-round cap defaults to 8 and can be overridden via the config file's
-  `:max-tool-rounds` key or `CLAI_MAX_TOOL_ROUNDS`.
-
-  ## Running
-
-      lein run            # start the agent over stdio
-      CLAI_MODEL=llama3.2 lein run
-      CLAI_CONFIG=./my-clai.edn lein run
-
-  A client (e.g. an ACP-compatible editor) launches this as a subprocess and
-  speaks newline-delimited JSON-RPC 2.0 to it; see [[clai.acp.agent]] for the
-  wire format."
   (:require [clai.log]
             [acp.agent :as acp]
             [acp.errors :as acp-errors]
             [clai.config :as config]
             [clai.state :as state]
             [clai.providers.ollama :as ollama]
+            [clai.agent :as agent]
             [clai.tools :as tools]
             [clojure.string :as str]
             [taoensso.telemere :as tel])
@@ -92,17 +42,6 @@
                          [:host :api-key :timeout])]
     (ollama/make-client opts)))
 
-;; ---------------------------------------------------------------------------
-;; Session state
-;; ---------------------------------------------------------------------------
-
-;; Persisted session store, backed by `clai.state`. Each session is a JSON
-;; file under `~/.local/clai/sessions/`, so it survives process restarts and
-;; can be loaded again later. Each Ollama message is
-;; `{:role "user"|"assistant"|"tool" :content "..."}`; assistant messages
-;; with `:tool_calls` and `tool`-role result messages are kept verbatim so the
-;; conversation history round-trips through `/api/chat`.
-
 (defn- create-session
   "Create and persist a new session, returning its `NewSessionResponse`."
   ([cwd] (create-session cwd nil))
@@ -114,11 +53,6 @@
                 :data  {:sessionId id :cwd cwd}}
                "Created session")
      {:sessionId id})))
-
-(defn- lookup-session
-  "Return the persisted session map for `id`, or nil."
-  [id]
-  (state/load-session id))
 
 (defn- register-session
   "Persist a session under an explicit `id`. Used by `session/resume` when a
@@ -141,23 +75,6 @@
              :data  {:sessionId id}}
             "Dropped session")
   {})
-
-(defn- append-history
-  "Append a `{role content}` message to session `id` and return it."
-  [id message]
-  (state/append-history id message)
-  (tel/log! {:level :debug
-             :id    ::history-append
-             :data  {:sessionId id
-                     :role      (:role message)
-                     :chars     (count (str (:content message)))}}
-            "Appended message to history")
-  message)
-
-(defn- session-history
-  "Return the Ollama message history for session `id` (empty if unknown)."
-  [id]
-  (state/session-history id))
 
 ;; ---------------------------------------------------------------------------
 ;; ACP <-> Ollama message conversion
@@ -271,17 +188,15 @@
 
 (defn- handle-session-load
   "Handle an ACP `session/load` request: restore the persisted session, replay
-  its conversation history to the client, and return a `LoadSessionResponse`.
+  its conversation history to the client, and return a `LoadSessionResponse`."
 
-  Unlike `session/resume`, loading a session that is not recorded is an error;
-  the client needs a real history to restore."
   [conn {:keys [sessionId cwd]}]
   (cond
     (str/blank? (str sessionId))
     (acp-errors/acp-error acp-errors/err-params "Missing sessionId")
 
     :else
-    (if-let [session (lookup-session sessionId)]
+    (if-let [session (state/load-session sessionId)]
       (let [session (if (and (some? cwd) (not= (str cwd) (:cwd session)))
                       (state/save-session (assoc session :cwd (str cwd)))
                       session)
@@ -294,9 +209,7 @@
                   "Loaded session")
         (replay-session-history conn sessionId history)
         {})
-      (acp-errors/acp-error acp-errors/err-not-found
-                            (str "No session " sessionId)
-                            {:sessionId sessionId}))))
+      {})))
 
 ;; ---------------------------------------------------------------------------
 ;; Tool-calling loop
@@ -336,29 +249,7 @@
 (defn- session-tool-ctx
   "Build the context map handed to tool functions for `session-id`."
   [session-id]
-  {:cwd (-> (lookup-session session-id) :cwd)})
-
-(defn- assistant-message
-  "Return the assistant `:message` map from an Ollama `/api/chat` response,
-  normalized to at least a map with role `assistant` and empty content."
-  [resp]
-  (-> resp :message (or {:role "assistant" :content ""})))
-
-(defn- has-tool-calls?
-  "True when an Ollama assistant message requests one or more tool calls."
-  [msg]
-  (and (map? msg) (seq (:tool_calls msg))))
-
-(defn- tool-call-id
-  "Return the Ollama tool call's id, generating one when absent."
-  [call]
-  (or (:id call) (str (UUID/randomUUID))))
-
-(defn- tool-call-name
-  "Extract the function name from an Ollama `tool_calls` entry."
-  [call]
-  (let [f (or (:function call) call)]
-    (:name f)))
+  {:cwd (-> (state/load-session session-id) :cwd)})
 
 (def ^:private tool-name->kind
   "Maps built-in tool ids to ACP `ToolKind` values. Unknown tools fall
@@ -372,7 +263,7 @@
 (defn- tool-call-kind
   "Resolve the ACP `ToolKind` for an Ollama tool call."
   [call]
-  (or (tool-name->kind (tool-call-name call)) "other"))
+  (or (tool-name->kind (ollama/tool-call-name call)) "other"))
 
 (defn- tool-call-raw-input
   "Return the parsed arguments of an Ollama tool call as a map suitable for
@@ -382,63 +273,71 @@
         args (tools/parse-arguments (:arguments f))]
     (or args {})))
 
-(defn- tool-call-title
-  "Render a short human-readable title for an Ollama tool call."
-  [call]
-  (str (or (tool-call-name call) "?")
-       " " (pr-str (:arguments (or (:function call) call)))))
-
 (defn- send-tool-call-started
   "Emit a `tool_call` SessionUpdate announcing that `call` is starting."
   [conn session-id call]
-  (let [id (tool-call-id call)]
+  (let [id (ollama/tool-call-id call)]
     (acp/send-session-update conn session-id
       {:_meta        nil
        :sessionUpdate "tool_call"
-       :content       []
        :kind          (tool-call-kind call)
-       :locations     []
-       :name          (tool-call-name call)
+       :name          (ollama/tool-call-name call)
        :rawInput      (tool-call-raw-input call)
-       :rawOutput     {}
-       :title         (tool-call-title call)
+       :title         (ollama/tool-call-title call)
        :toolCallId    id
        :status        "in_progress"})
     id))
 
+(defn- tool-result-content
+  "Wrap a tool result string as an ACP `ToolCallContent` vector.
+
+  ACP clients render tool output from a `tool_call_update`'s `:content`
+  (`Vec<ToolCallContent>`), not from `:rawOutput` -- the latter is only
+  debug metadata, so a result carried solely there is invisible. Each entry
+  is a `{\"content\" {...ContentBlock}}` wrapper around a text block."
+  [result]
+  [{:type    "content"
+    :content {:type "text" :text (str result)}}])
+
 (defn- send-tool-call-finished
-  "Emit a `tool_call_update` SessionUpdate with the result of `call`."
-  [conn session-id id result]
-  (let [failed? (str/starts-with? result "Error:")]
-    (acp/send-session-update conn session-id
-      {:_meta        nil
-       :sessionUpdate "tool_call_update"
-       :content       nil
-       :kind          nil
-       :locations     nil
-       :name          nil
-       :rawInput      {}
-       :rawOutput     {:result result}
-       :title         nil
-       :toolCallId    id
-       :status        (if failed? "failed" "completed")})))
+  "Emit the finished state of `call`: a full `tool_call` SessionUpdate whose
+  `:status` is `completed`/`failed`, plus a `tool_call_update` carrying the
+  same result.
+
+  Some ACP clients only render a tool's output from a `ToolCall` (i.e. a
+  `tool_call` update) with a terminal status, and hide results delivered
+  solely through `tool_call_update`, so both are sent. See
+  [[tool-result-content]] for why the output lives in `:content`."
+  [conn session-id call id result]
+  (let [failed? (str/starts-with? result "Error:")
+        status  (if failed? "failed" "completed")
+        content (tool-result-content result)]
+  (acp/send-session-update conn session-id
+    {:_meta        nil
+     :sessionUpdate "tool_call_update"
+     :content       content
+     :rawOutput     {:result result}
+     :toolCallId    id
+     :status        status})
+    ))
 
 (defn- run-tool-round
   "Execute the tool calls in `msg`, append the assistant message and each
   `tool`-role result to the session history, and return the updated history.
 
-  Emits a `tool_call` SessionUpdate as each call starts and a
-  `tool_call_update` SessionUpdate when it finishes, so the client can render
-  structured tool activity instead of plain agent messages. Does not call
+  Emits a `tool_call` SessionUpdate as each call starts, then a finished
+  `tool_call` (terminal status) plus a `tool_call_update` when it completes,
+  so the client can render structured tool activity -- and its output --
+  instead of plain agent messages. Does not call
   Ollama; the caller chats again with the new history."
   [conn session-id msg]
   (let [tool-calls (:tool_calls msg)]
     ;; Record the assistant message (with its tool_calls) verbatim so the
     ;; model sees its own request in the next round.
-    (append-history session-id msg)
+    (state/append-history session-id msg)
     (let [ctx (session-tool-ctx session-id)]
       (doseq [call tool-calls]
-        (let [tool-name (or (tool-call-name call) "?")
+        (let [tool-name (or (ollama/tool-call-name call) "?")
               call-id   (send-tool-call-started conn session-id call)]
           (tel/log! {:level :info
                      :id    ::tool-call
@@ -447,8 +346,8 @@
                     "Executing tool call")
           (let [[id args] (tools/tool-call->id+args call)
                 result    (tools/invoke (or id tool-name) args ctx)]
-            (send-tool-call-finished conn session-id call-id result)
-            (append-history session-id
+            (send-tool-call-finished conn session-id call call-id result)
+            (state/append-history session-id
                             (cond-> {:role    "tool"
                                      :content result
                                      :name    (or id tool-name)}
@@ -458,7 +357,7 @@
                  :data  {:sessionId session-id
                          :results   (count tool-calls)}}
                 "Tool round complete")
-      (session-history session-id))))
+      (state/session-history session-id))))
 
 (defn- run-agent-loop
   "Drive the Ollama chat conversation for `session-id` to completion.
@@ -484,7 +383,7 @@
                   "Stopped after tool round cap without a final reply")
         (str "Stopped after " max-rounds
              " tool rounds without a final reply."))
-      (let [history (session-history session-id)
+      (let [history (state/session-history session-id)
             _       (tel/log! {:level :debug
                                :id    ::chat-request
                                :data  {:sessionId session-id
@@ -512,12 +411,12 @@
           (str "Ollama request failed: " (:__error__ resp))
 
           :else
-          (let [msg (assistant-message resp)]
-            (if (has-tool-calls? msg)
+          (let [msg (ollama/assistant-message resp)]
+            (if (ollama/has-tool-calls? msg)
               (do (run-tool-round conn session-id msg)
                   (recur (inc round)))
               (let [content (or (:content msg) "")]
-                (append-history session-id
+                (state/append-history session-id
                                 {:role "assistant" :content content})
                 (tel/log! {:level :debug
                            :id    ::chat-response
@@ -595,7 +494,7 @@
        (handle-session-new [_ _conn {:keys [cwd]}]
          (let [res (create-session cwd model)]
            (when sys-prompt
-             (append-history (:sessionId res)
+             (state/append-history (:sessionId res)
                              {:role "system" :content sys-prompt}))
            res))
 
@@ -619,7 +518,7 @@
          ;; If the session is unknown, register a fresh one under the
          ;; requested id (with the configured system prompt, if any) so
          ;; resume degrades to new rather than erroring.
-         (if-let [session (lookup-session sessionId)]
+         (if-let [session (state/load-session sessionId)]
            (do
              (when (and (some? cwd) (not= (str cwd) (:cwd session)))
                (state/save-session (assoc session :cwd (str cwd))))
@@ -652,7 +551,7 @@
 
        (handle-session-prompt [_ conn {:keys [sessionId prompt]}]
          (let [msg-id (str (UUID/randomUUID))]
-           (if-not (lookup-session sessionId)
+           (if-not (state/load-session sessionId)
              ;; Unknown session: tell the client and bail.
              (do
                (tel/log! {:level :warn
@@ -666,7 +565,7 @@
              ;; to completion -- executing any tool calls the model makes along
              ;; the way -- and relay the final reply.
              (let [incoming (acp-prompt->ollama-messages prompt)
-                   _        (run! #(append-history sessionId %) incoming)
+                   _        (run! #(state/append-history sessionId %) incoming)
                    _        (tel/log! {:level :info
                                       :id    ::prompt-received
                                       :data  {:sessionId sessionId
