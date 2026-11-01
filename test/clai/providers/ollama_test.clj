@@ -4,6 +4,7 @@
             [clojure.string]
             [clj-http.client :as http]
             [clai.providers.ollama :as ollama]
+            [clai.providers.ollama.http :as ollama-http]
             [clai.test-support :refer [quiet-logs]]))
 
 ;; ---------------------------------------------------------------------------
@@ -69,45 +70,45 @@
 
 (deftest api-url-joins-host-and-path
   (is (= "http://ollama.test:11434/api/chat"
-         (#'ollama/api-url sample-client "/api/chat")))
+         (#'ollama-http/api-url sample-client "/api/chat")))
   (is (= "http://ollama.test:11434/api/chat"
-         (#'ollama/api-url sample-client "api/chat")))
+         (#'ollama-http/api-url sample-client "api/chat")))
   ;; trailing slash on host is handled
   (is (= "http://ollama.test:11434/api/chat"
-         (#'ollama/api-url (ollama/make-client {:host "http://ollama.test:11434/"})
-                           "/api/chat"))))
+         (#'ollama-http/api-url (ollama/make-client {:host "http://ollama.test:11434/"})
+                                "/api/chat"))))
 
 (deftest auth-headers-add-bearer-when-key-present
   (is (= "Bearer secret-key"
-         (get (#'ollama/auth-headers sample-client nil) "Authorization"))))
+         (get (#'ollama-http/auth-headers sample-client nil) "Authorization"))))
 
 (deftest auth-headers-omit-bearer-when-no-key
-  (is (nil? (get (#'ollama/auth-headers (ollama/make-client) nil)
+  (is (nil? (get (#'ollama-http/auth-headers (ollama/make-client) nil)
                  "Authorization"))))
 
 (deftest auth-headers-merges-extra
   (is (= "application/octet-stream"
-         (get (#'ollama/auth-headers (ollama/make-client)
-                                     {"Content-Type" "application/octet-stream"})
+         (get (#'ollama-http/auth-headers (ollama/make-client)
+                                          {"Content-Type" "application/octet-stream"})
               "Content-Type"))))
 
 (deftest request-body-encodes-json
   (is (= "{\"model\":\"gemma4\"}"
-         (String. ^bytes (#'ollama/request-body {:model "gemma4"}) "UTF-8"))))
+         (String. ^bytes (#'ollama-http/request-body {:model "gemma4"}) "UTF-8"))))
 
 (deftest request-body-nil-for-nil
-  (is (nil? (#'ollama/request-body nil))))
+  (is (nil? (#'ollama-http/request-body nil))))
 
 ;; ---------------------------------------------------------------------------
 ;; Streaming decision
 ;; ---------------------------------------------------------------------------
 
 (deftest streaming-defaults-true
-  (is (true? (#'ollama/streaming? {})))
-  (is (true? (#'ollama/streaming? {:stream true}))))
+  (is (true? (#'ollama-http/streaming? {})))
+  (is (true? (#'ollama-http/streaming? {:stream true}))))
 
 (deftest streaming-disabled-by-explicit-false
-  (is (false? (#'ollama/streaming? {:stream false}))))
+  (is (false? (#'ollama-http/streaming? {:stream false}))))
 
 ;; ---------------------------------------------------------------------------
 ;; NDJSON parsing
@@ -117,13 +118,13 @@
   (let [events [{:status "pulling" :completed 1}
                 {:status "pulling" :completed 2}
                 {:status "success"}]
-        result (doall (#'ollama/ndjson-seq (ndjson-stream events)))]
+        result (doall (#'ollama-http/ndjson-seq (ndjson-stream events)))]
     (is (= events result))))
 
 (deftest ndjson-seq-skips-blank-lines
   (let [stream (java.io.ByteArrayInputStream.
                 (.getBytes "{\"a\":1}\n\n{\"b\":2}\n" "UTF-8"))
-        result (doall (#'ollama/ndjson-seq stream))]
+        result (doall (#'ollama-http/ndjson-seq stream))]
     (is (= [{:a 1} {:b 2}] result))))
 
 ;; ---------------------------------------------------------------------------
@@ -136,13 +137,13 @@
                                             "UTF-8")})
   (is (thrown-with-msg?
        clojure.lang.ExceptionInfo #"model not found"
-       (#'ollama/throw-api-error :post "http://x/api/chat" 404
-                                 (.getBytes "{\"error\":\"model not found\"}"
-                                            "UTF-8")))))
+       (#'ollama-http/throw-api-error :post "http://x/api/chat" 404
+                                      (.getBytes "{\"error\":\"model not found\"}"
+                                                 "UTF-8")))))
 
 (deftest throw-api-error-includes-status-in-ex-data
-  (let [e (try (#'ollama/throw-api-error :get "http://x/api/tags" 500
-                                         (.getBytes "{\"error\":\"boom\"}" "UTF-8"))
+  (let [e (try (#'ollama-http/throw-api-error :get "http://x/api/tags" 500
+                                               (.getBytes "{\"error\":\"boom\"}" "UTF-8"))
                (catch clojure.lang.ExceptionInfo e e))]
     (is (= 500 (:status (ex-data e))))
     (is (= :get (:method (ex-data e))))))
