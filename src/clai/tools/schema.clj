@@ -48,9 +48,18 @@
   [:map])
 
 (def tool-ctx
-  "Session context handed to a tool function. Carries at least `:cwd`."
+  "Session context handed to a tool function. Carries at least `:cwd`; the
+  agent loop also supplies the live session's client, model, tool registry,
+  and limits so tools such as `spawn_agent` can start their own conversations."
   [:map
-   [:cwd {:optional true} [:maybe :string]]])
+   [:cwd {:optional true} [:maybe :string]]
+   [:session-id {:optional true} [:maybe :string]]
+   [:client {:optional true} :any]
+   [:model {:optional true} [:maybe :string]]
+   [:tool-registry {:optional true} :any]
+   [:chat-opts {:optional true} [:map]]
+   [:max-rounds {:optional true} [:maybe pos-int?]]
+   [:agent-depth {:optional true} [:maybe :int]]])
 
 (def tool-result
   "The string result of a tool function (fed back to the model as the content

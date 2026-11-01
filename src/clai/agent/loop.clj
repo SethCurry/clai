@@ -19,9 +19,19 @@
 ;; ---------------------------------------------------------------------------
 
 (defn- session-tool-ctx
-  "Build the context map handed to tool functions for `session-id`."
-  [session-id]
-  {:cwd (-> (state/load-session session-id) :cwd)})
+  "Build the context map handed to tool functions for `session-id`. Besides
+  the `:cwd`, it carries the loop's live client, model, registry, and limits so
+  tools like `spawn_agent` can run their own conversations."
+  [session-id {:keys [client model tool-registry chat-opts max-rounds
+                      agent-depth]}]
+  {:cwd           (-> (state/load-session session-id) :cwd)
+   :session-id    session-id
+   :client        client
+   :model         model
+   :tool-registry tool-registry
+   :chat-opts     chat-opts
+   :max-rounds    max-rounds
+   :agent-depth   (long (or agent-depth 0))})
 
 ;; ---------------------------------------------------------------------------
 ;; ACP tool-call updates
@@ -34,7 +44,8 @@
    "write_file"     "edit"
    "list_directory" "search"
    "run_command"    "execute"
-   "eval_clojure"   "execute"})
+   "eval_clojure"   "execute"
+   "spawn_agent"    "execute"})
 
 (defn- tool-call-kind
   "Resolve the ACP `ToolKind` for an Ollama tool call."
@@ -107,12 +118,12 @@
   `tool_call_update` when it completes, so the client can render structured
   tool activity -- and its output -- instead of plain agent messages. Does
   not call Ollama; the caller chats again with the new history."
-  [conn session-id msg tool-registry]
+  [conn session-id msg {:keys [tool-registry] :as opts}]
   (let [tool-calls (:tool_calls msg)]
     ;; Record the assistant message (with its tool_calls) verbatim so the
     ;; model sees its own request in the next round.
     (state/append-history session-id msg)
-    (let [ctx (session-tool-ctx session-id)]
+    (let [ctx (session-tool-ctx session-id opts)]
       (doseq [call tool-calls]
         (let [tool-name (or (ollama/tool-call-name call) "?")
               call-id   (send-tool-call-started conn session-id call)]
@@ -163,7 +174,7 @@
   On error (HTTP failure or hitting the round cap) returns a descriptive
   string rather than throwing, so the caller can relay it to the client."
   [conn session-id {:keys [client model tool-registry tool-specs chat-opts
-                           max-rounds]}]
+                           max-rounds] :as opts}]
   (let [tool-specs (or tool-specs (tools/specs tool-registry))]
     (loop [round 0]
       (if (>= round max-rounds)
@@ -205,7 +216,7 @@
             :else
             (let [msg (ollama/assistant-message resp)]
               (if (ollama/has-tool-calls? msg)
-                (do (run-tool-round conn session-id msg tool-registry)
+                (do (run-tool-round conn session-id msg opts)
                     (recur (inc round)))
                 (let [content (or (:content msg) "")]
                   (state/append-history session-id

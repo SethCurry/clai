@@ -34,4 +34,5 @@
                   "write_file"
                   "list_directory"
                   "run_command"
-                  "eval_clojure"]}
+                  "eval_clojure"
+                  "spawn_agent"]}
