@@ -77,6 +77,58 @@
                {:role "user" :content "second"}]
               (:messages (second @requests))))))))
 
+(deftest session-prompt-uses-the-agents-own-tool-registry
+  (let [requests (atom [])
+        updates  (atom [])
+        calls    (atom 0)
+        echo     {:id   "echo"
+                  :fn   (fn [{:keys [text]} _ctx] (str "echo:" text))
+                  :spec {:type "function"
+                         :function {:name "echo"
+                                    :parameters {:type "object"}}}}
+        other    {:id   "other"
+                  :fn   (fn [_args _ctx] "other")
+                  :spec {:type "function"
+                         :function {:name "other"
+                                    :parameters {:type "object"}}}}]
+    (with-redefs [ollama/chat
+                  (fn [_client req]
+                    (swap! requests conj req)
+                    (if (= 1 (swap! calls inc))
+                      {:message {:role "assistant"
+                                 :content ""
+                                 :tool_calls
+                                 [{:id "call-1"
+                                   :function {:name "echo"
+                                              :arguments "{\"text\":\"hi\"}"}}]}}
+                      {:message {:role "assistant" :content "done"}}))
+                  acp/send-session-update
+                  (fn [_conn sid update]
+                    (schemas/->SessionUpdate update)
+                    (swap! updates conj [sid update]))]
+      (let [handler (agent/ollama-agent {:cfg           {:tools ["echo"]}
+                                         :client        test-client
+                                         :model         "stub-model"
+                                         :tool-registry [echo other]})
+            {:keys [sessionId]} (acp/handle-session-new handler nil {:cwd "/tmp"})
+            resp (acp/handle-session-prompt
+                  handler nil
+                  {:sessionId sessionId
+                   :prompt    [{:type "text" :text "ping"}]})]
+        (is (= {:stopReason "end_turn"} resp))
+        (is (= 2 (count @requests)))
+        (is (= ["echo"]
+               (mapv #(get-in % [:function :name])
+                     (:tools (first @requests))))
+            "config :tools must narrow the agent's own registry")
+        (is (= "echo:hi"
+               (->> (:messages (second @requests))
+                    (filter #(= "tool" (:role %)))
+                    first
+                    :content))
+            "the tool call must execute against the same per-agent registry")
+        (is (= "done" (get-in (last @updates) [1 :content :text])))))))
+
 (deftest session-cancel-does-not-throw
   (run-with-stubbed-ollama
    "pong"

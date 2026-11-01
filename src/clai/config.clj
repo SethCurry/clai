@@ -19,9 +19,9 @@
                         :timeout  600000}    ; ms
        :tools          [\"read_file\" \"write_file\" ...]}
 
-  `:tools` is a vector of built-in tool ids (see `clai.tools/built-in-tools`)
-  to enable. When omitted, every built-in tool is enabled; when present but
-  empty, no tools are offered to the model.
+  `:tools` is a vector of tool ids (see `clai.tools/built-in-tools`) to
+  enable. When omitted, every tool in the agent's registry is enabled; when
+  present but empty, no tools are offered to the model.
 
   ## File discovery
 
@@ -265,21 +265,32 @@
                   [k v])))
         [:options :think :format]))
 
-(defn tool-specs
-  "Resolve the vector of Ollama tool definitions to offer the model. When
-  `cfg` has a `:tools` key, only the listed built-in tool ids are enabled (in
-  the given order; unknown ids are skipped). When `:tools` is absent, every
-  registered tool is offered."
-  {:malli/schema [:-> #'config [:vector #'tools/tool-spec]]}
+(defn tool-ids
+  "Return the tool ids selected by `cfg`, or nil when every tool in the
+  agent's registry should be enabled."
+  {:malli/schema [:-> #'config [:maybe [:sequential :string]]]}
   [cfg]
-  (if (contains? cfg :tools)
-    (let [requested (:tools cfg)
-          known     (set (keys (tools/registered-tools)))
-          unknown   (remove known requested)]
-      (when (seq unknown)
-        (tel/log! {:level :warn
-                   :id    ::unknown-configured-tools
-                   :data  {:tools (vec unknown)}}
-                  "Ignoring unknown tool ids from config"))
-      (tools/specs-for requested))
-    (tools/specs)))
+  (when (contains? cfg :tools)
+    (:tools cfg)))
+
+(defn tool-specs
+  "Resolve the vector of Ollama tool definitions to offer the model from
+  `tool-registry`. When `cfg` has a `:tools` key, only the listed ids are
+  enabled (in the given order; unknown ids are skipped). When `:tools` is
+  absent, every tool in `tool-registry` is offered.
+
+  The one-argument arity uses a fresh built-in registry and is retained for
+  callers that have not yet built their own per-agent registry; agents should
+  pass the registry they own via the two-argument arity."
+  {:malli/schema [:function
+                  [:=> [:cat #'config] [:vector #'tools/tool-spec]]
+                  [:=> [:cat #'config #'tools/tool-registry]
+                   [:vector #'tools/tool-spec]]]}
+  ([cfg]
+   (tool-specs cfg (tools/built-in-registry)))
+  ([cfg tool-registry]
+   (let [ids      (tool-ids cfg)
+         selected (tools/select-tools tool-registry ids)]
+     (if (nil? ids)
+       (tools/specs selected)
+       (tools/specs-for selected ids)))))

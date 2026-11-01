@@ -3,7 +3,8 @@
 
   Built-ins are grouped by category in `clai.tools.builtin.files`,
   `clai.tools.builtin.shell`, and `clai.tools.builtin.eval`; this namespace
-  collects them and installs them into the global registry at load time."
+  collects them. They are not installed into any global state -- each agent
+  builds its own registry from `built-in-tools` (or a configured subset)."
   (:require [clai.tools.builtin.eval :as builtin-eval]
             [clai.tools.builtin.files :as builtin-files]
             [clai.tools.builtin.shell :as builtin-shell]
@@ -21,11 +22,10 @@
                 (builtin-shell/tools)
                 (builtin-eval/tools))))
 
-(defn install-built-ins!
-  "Register every built-in tool in the global registry, replacing any
-  existing tools with the same ids."
+(defn built-in-registry
+  "Return a fresh registry containing the default built-in tools. Each agent
+  owns the returned value, so registering or removing tools for one agent does
+  not affect any other."
+  {:malli/schema [:-> #'schema/tool-registry]}
   []
-  (run! registry/register-tool! (built-in-tools)))
-
-;; Populate the registry with the built-ins at load time.
-(install-built-ins!)
+  (registry/make-registry (built-in-tools)))

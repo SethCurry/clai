@@ -1,5 +1,6 @@
 (ns clai.tools.schema
-  "Malli schemas shared by the `clai` tool registry and its built-in tools.
+  "Malli schemas shared by the `clai` tool registries and their built-in
+  tools.
 
   A tool is a map with three keys:
 
@@ -57,14 +58,15 @@
   :string)
 
 (def tool
-  "A tool map as stored in the registry: `{:id ... :fn ... :spec ...}`."
+  "A tool map as stored in a registry: `{:id ... :fn ... :spec ...}`."
   [:map
    [:id tool-id]
    [:fn [:=> [:cat tool-args tool-ctx] [:maybe :any]]]
    [:spec tool-spec]])
 
 (def tool-registry
-  "The global registry, as returned by `registered-tools`."
+  "A per-agent tool registry: a map of tool id to tool, as returned by
+  `make-registry` and `built-in-registry`."
   [:map-of tool-id tool])
 
 (def tool-call

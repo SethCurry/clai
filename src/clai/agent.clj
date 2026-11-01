@@ -3,7 +3,8 @@
 
   `ollama-agent` builds an `acp/AgentHandler` that answers `session/prompt`
   requests with a `clai.providers.ollama` chat model, persists sessions via
-  `clai.state`, and executes model tool calls via `clai.tools`.
+  `clai.state`, and executes model tool calls via its own per-agent tool
+  registry from `clai.tools`.
 
   Supporting pieces live in sibling namespaces:
 
@@ -19,6 +20,7 @@
             [clai.config :as config]
             [clai.log]
             [clai.state :as state]
+            [clai.tools :as tools]
             [clojure.string :as str]
             [taoensso.telemere :as tel])
   (:import [java.util UUID]))
@@ -52,6 +54,34 @@
       {})))
 
 ;; ---------------------------------------------------------------------------
+;; Agent tools
+;; ---------------------------------------------------------------------------
+
+(defn- resolve-tool-registry
+  "Build this agent's private tool registry from `opts` and `cfg`.
+
+  `opts` may carry a tool registry or collection of tool maps as
+  `:tool-registry` (or the `:tools` alias). A collection of ids is resolved
+  against the built-in tools, which is also the default when neither option is
+  supplied. When `cfg` contains a `:tools` vector, the registry is narrowed to
+  those ids."
+  [cfg opts]
+  (let [provided (or (:tool-registry opts) (:tools opts))
+        base     (cond
+                   (nil? provided)
+                   (tools/built-in-registry)
+
+                   (and (sequential? provided)
+                        (not-every? map? provided))
+                   (tools/select-tools (tools/built-in-registry) provided)
+
+                   :else
+                   (tools/make-registry provided))]
+    (if (contains? cfg :tools)
+      (tools/select-tools base (:tools cfg))
+      base)))
+
+;; ---------------------------------------------------------------------------
 ;; Agent handler
 ;; ---------------------------------------------------------------------------
 
@@ -60,21 +90,29 @@
 
   Options (all optional; defaults come from `cfg` then the environment):
 
-    :cfg     the loaded config map (`clai.config/load-config`). Defaults to
-             `(config/load-config)`.
-    :client  the `clai.providers.ollama.Client` to use. Defaults to one built
-             from `cfg` and the environment (`OLLAMA_HOST`, `OLLAMA_API_KEY`).
-    :model   the model name to send to `/api/chat`. Defaults to `cfg`'s
-             `:model`, then `CLAI_MODEL`, then `gemma3`."
+    :cfg            the loaded config map (`clai.config/load-config`).
+                    Defaults to `(config/load-config)`.
+    :client         the `clai.providers.ollama.Client` to use. Defaults to one
+                    built from `cfg` and the environment (`OLLAMA_HOST`,
+                    `OLLAMA_API_KEY`).
+    :model          the model name to send to `/api/chat`. Defaults to `cfg`'s
+                    `:model`, then `CLAI_MODEL`, then `gemma3`.
+    :tool-registry  the agent's tool registry (`{id tool}`), or a collection of
+                    tool maps. A collection of built-in ids (e.g.
+                    `[\"read_file\"]`) selects from the built-ins. Defaults to a
+                    fresh built-in registry, so each agent owns its tools. The
+                    `:tools` key is accepted as an alias. `cfg`'s `:tools`
+                    vector further selects ids."
   ([] (ollama-agent nil))
   ([opts]
-   (let [cfg         (:cfg opts (config/load-config))
-         client      (:client opts (config/make-ollama-client cfg))
-         model       (:model opts (config/resolve-model cfg))
-         tool-specs  (config/tool-specs cfg)
-         max-rounds  (config/resolve-max-tool-rounds cfg)
-         sys-prompt  (:system-prompt cfg)
-         chat-opts   (config/chat-options cfg)]
+   (let [cfg           (:cfg opts (config/load-config))
+         client        (:client opts (config/make-ollama-client cfg))
+         model         (:model opts (config/resolve-model cfg))
+         tool-registry (resolve-tool-registry cfg opts)
+         tool-specs    (tools/specs tool-registry)
+         max-rounds    (config/resolve-max-tool-rounds cfg)
+         sys-prompt    (:system-prompt cfg)
+         chat-opts     (config/chat-options cfg)]
      (tel/log! {:level :info
                 :id    ::agent-configured
                 :data  {:model          model
@@ -197,11 +235,12 @@
                                      "Received prompt")
                    reply    (agent-loop/run-agent-loop
                              conn sessionId
-                             {:client     client
-                              :model      model
-                              :tool-specs tool-specs
-                              :chat-opts  chat-opts
-                              :max-rounds max-rounds})]
+                             {:client        client
+                              :model         model
+                              :tool-registry tool-registry
+                              :tool-specs    tool-specs
+                              :chat-opts     chat-opts
+                              :max-rounds    max-rounds})]
                (tel/log! {:level :info
                           :id    ::prompt-complete
                           :data  {:sessionId sessionId

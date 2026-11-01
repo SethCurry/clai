@@ -4,10 +4,9 @@
   Ollama's `/api/chat` response message carries a `:tool_calls` vector when
   the model decides to call a tool. The agent executes each call, appends a
   `{:role \"tool\" ...}` message with the result, and chats again. This
-  namespace turns those raw calls into registry lookups and tool-role
-  messages."
+  namespace turns those raw calls into lookups in the agent's own tool
+  registry and tool-role messages."
   (:require [cheshire.core :as json]
-            [clai.tools.registry :as registry]
             [clai.tools.schema :as schema]
             [clojure.string :as str]
             [taoensso.telemere :as tel]))
@@ -55,16 +54,18 @@
           [(if (string? k) (keyword k) k) v])))
 
 (defn invoke
-  "Run the registered tool `id` with parsed `args` and session context `ctx`.
+  "Run the tool `id` from `tool-registry` with parsed `args` and session
+  context `ctx`.
 
   `args` keys are keywordized first, so both `{:path \"x\"}` and
   `{\"path\" \"x\"}` work. Returns a string result. If the tool is unknown or
   throws, an error string is returned instead of propagating, so the agent
   loop can feed the failure back to the model."
-  {:malli/schema [:-> #'schema/tool-id [:maybe #'schema/tool-args]
+  {:malli/schema [:-> #'schema/tool-registry #'schema/tool-id
+                  [:maybe #'schema/tool-args]
                   [:maybe #'schema/tool-ctx] #'schema/tool-result]}
-  [id args ctx]
-  (let [tool (get (registry/registered-tools) id)]
+  [tool-registry id args ctx]
+  (let [tool (get tool-registry id)]
     (cond
       (nil? tool)
       (do
@@ -114,16 +115,17 @@
     [name args]))
 
 (defn execute-calls
-  "Execute a vector of Ollama `tool_calls` against the registry, returning a
-  vector of `{:role \"tool\" :content ... :name ...}` messages (one per call)
-  ready to append to chat history.
+  "Execute a vector of Ollama `tool_calls` against `tool-registry`, returning
+  a vector of `{:role \"tool\" :content ... :name ...}` messages (one per
+  call) ready to append to chat history.
 
   `ctx` is passed to each tool function; it should carry at least `:cwd` for
   the filesystem/shell tools."
-  {:malli/schema [:-> [:sequential #'schema/tool-call]
+  {:malli/schema [:-> #'schema/tool-registry
+                  [:sequential #'schema/tool-call]
                   [:maybe #'schema/tool-ctx]
                   [:vector #'schema/tool-call-message]]}
-  [tool-calls ctx]
+  [tool-registry tool-calls ctx]
   (tel/log! {:level :debug
              :id    ::execute-tool-calls
              :data  {:count (count tool-calls)
@@ -133,7 +135,7 @@
   (vec
    (for [call tool-calls]
      (let [[id args] (tool-call->id+args call)
-           result    (invoke id args ctx)]
+           result    (invoke tool-registry id args ctx)]
        (cond-> {:role    "tool"
                 :content result
                 :name    (or id "unknown")}
