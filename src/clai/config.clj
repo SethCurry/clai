@@ -3,8 +3,8 @@
 
   The config file is plain EDN (https://github.com/edn-format/edn) and may
   contain any subset of the recognized keys; anything omitted falls back to
-  the usual environment variables / defaults documented in `clai.core` and
-  `clai.providers.ollama`.
+  the usual environment variables / defaults documented in this namespace
+  and `clai.providers.ollama`.
 
   ## Recognized keys
 
@@ -34,10 +34,46 @@
   If none of these exist, an empty map is returned and `clai` behaves exactly
   as it did before config-file support (env vars + defaults)."
   (:require [clai.log]
+            [clai.providers.ollama :as ollama]
+            [clai.tools :as tools]
             [clojure.edn :as edn]
             [clojure.java.io :as io]
             [taoensso.telemere :as tel])
   (:import [java.io File]))
+
+;; ---------------------------------------------------------------------------
+;; Schemas
+;; ---------------------------------------------------------------------------
+
+(def non-empty-string
+  "A string of at least one character."
+  [:re #".+"])
+
+(def config-file
+  "A `java.io.File` naming a config file."
+  [:fn #(instance? File %)])
+
+(def ollama-config
+  "The `:ollama` sub-map of a config file, forwarded to
+  `clai.providers.ollama/make-client`."
+  [:map
+   [:host {:optional true} :string]
+   [:api-key {:optional true} [:maybe :string]]
+   [:timeout {:optional true} pos-int?]])
+
+(def config
+  "An agent config map as returned by `load-config`. Every key is optional
+  (omitted keys fall back to environment variables and defaults), and unknown
+  keys are allowed."
+  [:map
+   [:model {:optional true} non-empty-string]
+   [:system-prompt {:optional true} :string]
+   [:max-tool-rounds {:optional true} pos-int?]
+   [:think {:optional true} boolean?]
+   [:options {:optional true} [:map]]
+   [:format {:optional true} [:or :string [:map]]]
+   [:ollama {:optional true} ollama-config]
+   [:tools {:optional true} [:sequential :string]]])
 
 ;; ---------------------------------------------------------------------------
 ;; Candidate file locations
@@ -106,12 +142,14 @@
   "Return the ordered list of candidate config file paths (as absolute
   strings), for diagnostics. Skips the `CLAI_CONFIG` entry when that env var
   is unset."
+  {:malli/schema [:-> [:sequential :string]]}
   []
   (map #(.getAbsolutePath ^File %) (candidate-files)))
 
 (defn config-path
   "Return the absolute path of the config file that *would* be loaded (the
   first existing candidate), or nil when no candidate file is present."
+  {:malli/schema [:-> [:maybe :string]]}
   []
   (some-> ^File (first-existing (candidate-files))
           (.getAbsolutePath)))
@@ -123,6 +161,9 @@
   namespace docs) and parses it. Pass an explicit `path` to read a specific
   file instead. Returns an empty map when no file is found so callers can
   treat the result as a sparse overlay on top of the built-in defaults."
+  {:malli/schema [:function
+                  [:=> [:cat] #'config]
+                  [:=> [:cat [:or #'config-file :string]] #'config]]}
   ([]
    (if-let [^File f (first-existing (candidate-files))]
      (load-config f)
@@ -168,3 +209,77 @@
                                 :type (str (class parsed))}}
                        "Config file did not contain a map; using defaults")
              {})))))))
+
+;; ---------------------------------------------------------------------------
+;; Runtime settings
+;; ---------------------------------------------------------------------------
+
+(def ^:private default-model
+  "Model used for chat when neither `cfg` nor `CLAI_MODEL` names one."
+  "gemma3")
+
+(def ^:private default-max-tool-rounds 8)
+
+(defn resolve-model
+  "Resolve the model to chat with. Precedence: `cfg`'s `:model`, then the
+  `CLAI_MODEL` environment variable, then the built-in default."
+  {:malli/schema [:-> #'config [:maybe :string]]}
+  [cfg]
+  (or (:model cfg)
+      (System/getenv "CLAI_MODEL")
+      default-model))
+
+(defn resolve-max-tool-rounds
+  "Resolve the cap on consecutive tool-call rounds per prompt. Precedence:
+  `cfg`'s `:max-tool-rounds`, then `CLAI_MAX_TOOL_ROUNDS`, then the default."
+  {:malli/schema [:-> #'config pos-int?]}
+  [cfg]
+  (or (some-> cfg :max-tool-rounds)
+      (some-> (System/getenv "CLAI_MAX_TOOL_ROUNDS")
+              (Integer/parseInt))
+      default-max-tool-rounds))
+
+(defn make-ollama-client
+  "Build the Ollama client described by `cfg`. The `:ollama` sub-map (with
+  `:host`, `:api-key`, `:timeout`) is forwarded to `ollama/make-client`, and
+  any key not supplied there falls back to the environment (`OLLAMA_HOST`,
+  `OLLAMA_API_KEY`) and defaults."
+  {:malli/schema [:-> #'config #'ollama/client-schema]}
+  [cfg]
+  (let [ollama-cfg (:ollama cfg)
+        opts       (into {}
+                         (keep (fn [k]
+                                 (when-some [v (get ollama-cfg k)]
+                                   [k v])))
+                         [:host :api-key :timeout])]
+    (ollama/make-client opts)))
+
+(defn chat-options
+  "Return the Ollama `/api/chat` request options carried by `cfg` (only the
+  keys that are present)."
+  {:malli/schema [:-> #'config [:map]]}
+  [cfg]
+  (into {}
+        (keep (fn [k]
+                (when-some [v (get cfg k)]
+                  [k v])))
+        [:options :think :format]))
+
+(defn tool-specs
+  "Resolve the vector of Ollama tool definitions to offer the model. When
+  `cfg` has a `:tools` key, only the listed built-in tool ids are enabled (in
+  the given order; unknown ids are skipped). When `:tools` is absent, every
+  registered tool is offered."
+  {:malli/schema [:-> #'config [:vector #'tools/tool-spec]]}
+  [cfg]
+  (if (contains? cfg :tools)
+    (let [requested (:tools cfg)
+          known     (set (keys (tools/registered-tools)))
+          unknown   (remove known requested)]
+      (when (seq unknown)
+        (tel/log! {:level :warn
+                   :id    ::unknown-configured-tools
+                   :data  {:tools (vec unknown)}}
+                  "Ignoring unknown tool ids from config"))
+      (tools/specs-for requested))
+    (tools/specs)))

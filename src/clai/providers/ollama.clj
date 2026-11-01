@@ -198,6 +198,53 @@
    [:included {:optional true} [:map]]
    [:purchased {:optional true} [:map]]])
 
+(def cloud-usage-query
+  "Query parameters accepted by `cloud-usage`."
+  [:map
+   [:range {:optional true} [:enum "24h" "7d" "30d"]]
+   [:scope {:optional true} [:enum "self" "team"]]
+   [:group_by {:optional true} [:enum "model"]]])
+
+(def cloud-usage-response
+  "Response of `GET /api/usage` (cloud only)."
+  [:map])
+
+(def digest
+  "A blob digest, e.g. `sha256:abc123...`."
+  [:re #"sha256:[0-9a-fA-F]+"])
+
+(def blob-content
+  "Anything `create-blob` accepts: bytes, InputStream, File, or path string."
+  [:or
+   [:fn bytes?]
+   [:fn #(instance? InputStream %)]
+   [:fn #(instance? java.io.File %)]
+   string?])
+
+(def stream-response
+  "A lazy sequence of parsed NDJSON event maps. Validated structurally (as a
+  sequence) so that validation does not consume the stream."
+  [:fn sequential?])
+
+(def chat-response
+  "The parts of an Ollama `/api/chat` response this namespace inspects."
+  [:map
+   [:message {:optional true} [:map]]])
+
+(def assistant-message-schema
+  "The normalized assistant message returned by `assistant-message`."
+  [:map
+   [:role string?]
+   [:content {:optional true} [:or string? [:sequential [:map]]]]
+   [:images {:optional true} [:sequential string?]]
+   [:tool_calls {:optional true} [:sequential [:map]]]])
+
+(def tool-call
+  "One entry of an Ollama `tool_calls` vector. Both the nested
+  `{:function {:name ... :arguments ...}}` and flattened `{:name ...}` shapes
+  are accepted, so this schema is intentionally open."
+  [:map])
+
 (defn- validate!
   "Validate `value` against `schema`, returning `value` when valid or throwing
   an `ex-info` with a human-readable malli error explanation otherwise."
@@ -247,6 +294,9 @@
 
   Returns a `clai.providers.ollama.Client` record. With no arguments the
   default local client is returned."
+  {:malli/schema [:function
+                  [:=> [:cat] #'client-schema]
+                  [:=> [:cat [:maybe #'client-opts]] #'client-schema]]}
   ([] (make-client nil))
   ([{:keys [host api-key timeout]
      :or {host     (or (System/getenv "OLLAMA_HOST") default-host)
@@ -455,6 +505,7 @@
     * a URL string/`java.net.URL` (the contents are fetched and encoded)
 
   Returns a base64 string ready to send to Ollama."
+  {:malli/schema [:-> #'image-source string?]}
   [src]
   (cond
     (bytes? src)
@@ -487,6 +538,11 @@
 
   Streaming is the default: a lazy sequence of event maps is returned.
   Pass `:stream false` to receive a single response map."
+  {:malli/schema [:function
+                  [:=> [:cat #'generate-request]
+                   [:or [:map] #'stream-response]]
+                  [:=> [:cat #'client-schema #'generate-request]
+                   [:or [:map] #'stream-response]]]}
   ([req] (let [[c r] (resolve-client req nil)] (generate c r)))
   ([client req]
    (validate! generate-request req "generate")
@@ -503,6 +559,11 @@
 
   Streaming is the default: a lazy sequence of event maps is returned.
   Pass `:stream false` to receive a single response map."
+  {:malli/schema [:function
+                  [:=> [:cat #'chat-request]
+                   [:or [:map] #'stream-response]]
+                  [:=> [:cat #'client-schema #'chat-request]
+                   [:or [:map] #'stream-response]]]}
   ([req] (let [[c r] (resolve-client req nil)] (chat c r)))
   ([client req]
    (validate! chat-request req "chat")
@@ -517,6 +578,9 @@
   `:truncate`, `:dimensions`, `:keep_alive`, `:options`.
 
   Always returns a single response map (this endpoint does not stream)."
+  {:malli/schema [:function
+                  [:=> [:cat #'embed-request] [:maybe [:map]]]
+                  [:=> [:cat #'client-schema #'embed-request] [:maybe [:map]]]]}
   ([req] (let [[c r] (resolve-client req nil)] (embed c r)))
   ([client req]
    (validate! embed-request req "embed")
@@ -530,6 +594,10 @@
   `:images`.
 
   Always returns a single response map (this endpoint does not stream)."
+  {:malli/schema [:function
+                  [:=> [:cat #'systemone-request] [:maybe [:map]]]
+                  [:=> [:cat #'client-schema #'systemone-request]
+                   [:maybe [:map]]]]}
   ([req] (let [[c r] (resolve-client req nil)] (systemone c r)))
   ([client req]
    (validate! systemone-request req "systemone")
@@ -542,12 +610,20 @@
 (defn list-models
   "Fetch the list of locally available models. Calls `GET /api/tags`.
   Returns a map with a `:models` vector."
+  {:malli/schema [:function
+                  [:=> [:cat] [:maybe #'list-models-response]]
+                  [:=> [:cat #'client-schema]
+                   [:maybe #'list-models-response]]]}
   ([ ] (list-models *client*))
   ([client] (perform client :get "/api/tags" nil)))
 
 (defn list-running-models
   "Fetch the list of models currently loaded into memory. Calls `GET /api/ps`.
   Returns a map with a `:models` vector."
+  {:malli/schema [:function
+                  [:=> [:cat] [:maybe #'list-models-response]]
+                  [:=> [:cat #'client-schema]
+                   [:maybe #'list-models-response]]]}
   ([ ] (list-running-models *client*))
   ([client] (perform client :get "/api/ps" nil)))
 
@@ -555,6 +631,10 @@
   "Show details for a model. Calls `POST /api/show`.
 
   Required: `:model`. Option: `:verbose`."
+  {:malli/schema [:function
+                  [:=> [:cat #'show-request] [:maybe [:map]]]
+                  [:=> [:cat #'client-schema #'show-request]
+                   [:maybe [:map]]]]}
   ([req] (let [[c r] (resolve-client req nil)] (show-model c r)))
   ([client req]
    (validate! show-request req "show-model")
@@ -569,6 +649,11 @@
 
   Streaming is the default: a lazy sequence of status-event maps is
   returned. Pass `:stream false` to receive the final status map."
+  {:malli/schema [:function
+                  [:=> [:cat #'create-model-request]
+                   [:or [:map] #'stream-response]]
+                  [:=> [:cat #'client-schema #'create-model-request]
+                   [:or [:map] #'stream-response]]]}
   ([req] (let [[c r] (resolve-client req nil)] (create-model c r)))
   ([client req]
    (validate! create-model-request req "create-model")
@@ -580,6 +665,10 @@
   "Copy a model to a new name. Calls `POST /api/copy`.
 
   Required: `:source`, `:destination`."
+  {:malli/schema [:function
+                  [:=> [:cat #'copy-model-request] [:maybe [:map]]]
+                  [:=> [:cat #'client-schema #'copy-model-request]
+                   [:maybe [:map]]]]}
   ([req] (let [[c r] (resolve-client req nil)] (copy-model c r)))
   ([client req]
    (validate! copy-model-request req "copy-model")
@@ -592,6 +681,11 @@
 
   Streaming is the default: a lazy sequence of progress-event maps is
   returned. Pass `:stream false` to receive the final status map."
+  {:malli/schema [:function
+                  [:=> [:cat #'pull-push-request]
+                   [:or [:map] #'stream-response]]
+                  [:=> [:cat #'client-schema #'pull-push-request]
+                   [:or [:map] #'stream-response]]]}
   ([req] (let [[c r] (resolve-client req nil)] (pull-model c r)))
   ([client req]
    (validate! pull-push-request req "pull-model")
@@ -606,6 +700,11 @@
 
   Streaming is the default: a lazy sequence of progress-event maps is
   returned. Pass `:stream false` to receive the final status map."
+  {:malli/schema [:function
+                  [:=> [:cat #'pull-push-request]
+                   [:or [:map] #'stream-response]]
+                  [:=> [:cat #'client-schema #'pull-push-request]
+                   [:or [:map] #'stream-response]]]}
   ([req] (let [[c r] (resolve-client req nil)] (push-model c r)))
   ([client req]
    (validate! pull-push-request req "push-model")
@@ -617,6 +716,10 @@
   "Delete a model. Calls `DELETE /api/delete`.
 
   Required: `:model`."
+  {:malli/schema [:function
+                  [:=> [:cat #'delete-model-request] [:maybe [:map]]]
+                  [:=> [:cat #'client-schema #'delete-model-request]
+                   [:maybe [:map]]]]}
   ([req] (let [[c r] (resolve-client req nil)] (delete-model c r)))
   ([client req]
    (validate! delete-model-request req "delete-model")
@@ -630,6 +733,9 @@
   "Check whether a blob (model weights file) is already present. Calls
   `HEAD /api/blobs/{digest}`. Returns `true` when the blob exists (HTTP 200)
   and `false` otherwise (HTTP 404). Other errors are raised."
+  {:malli/schema [:function
+                  [:=> [:cat #'digest] boolean?]
+                  [:=> [:cat #'client-schema #'digest] boolean?]]}
   ([digest] (blob-exists? *client* digest))
   ([client digest]
    (let [url   (api-url client (str "/api/blobs/" digest))
@@ -654,6 +760,10 @@
   `content` may be a byte array, `java.io.File`, path string, or
   `java.io.InputStream`. Returns `true` when the blob was created (HTTP 201)
   and `true` as well when it already existed (HTTP 200)."
+  {:malli/schema [:function
+                  [:=> [:cat #'digest #'blob-content] boolean?]
+                  [:=> [:cat #'client-schema #'digest #'blob-content]
+                   boolean?]]}
   ([digest content] (create-blob *client* digest content))
   ([client digest content]
    (let [url   (api-url client (str "/api/blobs/" digest))
@@ -698,6 +808,10 @@
 (defn version
   "Retrieve the Ollama server version. Calls `GET /api/version`.
   Returns a map such as `{:version \"0.12.6\"}`."
+  {:malli/schema [:function
+                  [:=> [:cat] [:maybe #'version-response]]
+                  [:=> [:cat #'client-schema]
+                   [:maybe #'version-response]]]}
   ([ ] (version *client*))
   ([client] (perform client :get "/api/version" nil)))
 
@@ -706,6 +820,11 @@
 
   Query options: `:range` (`24h`, `7d`, `30d`), `:scope` (`self`, `team`),
   `:group_by` (`model`). These are sent as query parameters."
+  {:malli/schema [:function
+                  [:=> [:cat #'cloud-usage-query]
+                   [:maybe #'cloud-usage-response]]
+                  [:=> [:cat #'client-schema #'cloud-usage-query]
+                   [:maybe #'cloud-usage-response]]]}
   ([opts] (let [[c r] (resolve-client opts nil)] (cloud-usage c r)))
   ([client opts]
    (let [url   (api-url client "/api/usage")
@@ -729,6 +848,10 @@
 (defn balance
   "Check remaining usage credits. Calls `GET /api/balance` (cloud only).
   Returns a map with `:included` and `:purchased` balances."
+  {:malli/schema [:function
+                  [:=> [:cat] [:maybe #'balance-response]]
+                  [:=> [:cat #'client-schema]
+                   [:maybe #'balance-response]]]}
   ([ ] (balance *client*))
   ([client] (perform client :get "/api/balance" nil)))
 
@@ -754,6 +877,7 @@
 
 (defn -main
   "Print the Ollama server version as a smoke test of connectivity."
+  {:malli/schema [:=> [:cat [:* string?]] :nil]}
   [& _]
   (let [c (make-client)]
     (println "Ollama" (:version (version c)))))
@@ -762,21 +886,26 @@
 (defn assistant-message
   "Return the assistant `:message` map from an Ollama `/api/chat` response,
   normalized to at least a map with role `assistant` and empty content."
+  {:malli/schema [:-> [:maybe #'chat-response]
+                   #'assistant-message-schema]}
   [resp]
   (-> resp :message (or {:role "assistant" :content ""})))
 
 (defn has-tool-calls?
   "True when an Ollama assistant message requests one or more tool calls."
+  {:malli/schema [:-> [:maybe [:map]] boolean?]}
   [msg]
-  (and (map? msg) (seq (:tool_calls msg))))
+  (boolean (and (map? msg) (seq (:tool_calls msg)))))
 
 (defn tool-call-id
   "Return the Ollama tool call's id, generating one when absent."
+  {:malli/schema [:-> #'tool-call non-empty-string]}
   [call]
   (or (:id call) (str (UUID/randomUUID))))
 
 (defn tool-call-name
   "Extract the function name from an Ollama `tool_calls` entry."
+  {:malli/schema [:-> #'tool-call [:maybe string?]]}
   [call]
   (let [f (or (:function call) call)]
     (:name f)))
@@ -784,6 +913,7 @@
 
 (defn tool-call-title
   "Render a short human-readable title for an Ollama tool call."
+  {:malli/schema [:-> #'tool-call string?]}
   [call]
   (str (or (tool-call-name call) "?")
        " " (pr-str (:arguments (or (:function call) call)))))

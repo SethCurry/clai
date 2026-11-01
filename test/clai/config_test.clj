@@ -104,3 +104,34 @@
       (is (sequential? cs))
       (is (every? string? cs))
       (is (some #(= "/tmp/clai-candidate.edn" %) cs)))))
+
+;; ---------------------------------------------------------------------------
+;; Runtime settings
+;; ---------------------------------------------------------------------------
+
+(deftest resolve-model-prefers-config
+  (is (= "from-cfg" (config/resolve-model {:model "from-cfg"})))
+  (is (string? (config/resolve-model {}))))
+
+(deftest resolve-max-tool-rounds-prefers-config
+  (is (= 3 (config/resolve-max-tool-rounds {:max-tool-rounds 3})))
+  (is (pos-int? (config/resolve-max-tool-rounds {}))))
+
+(deftest make-ollama-client-uses-config
+  (let [client (config/make-ollama-client
+                {:ollama {:host "http://example:1234" :timeout 42}})]
+    (is (= "http://example:1234" (:host client)))
+    (is (= 42 (:timeout client)))))
+
+(deftest chat-options-picks-chat-keys
+  (is (= {:options {:temperature 0.1} :think true :format "json"}
+         (config/chat-options {:model "x"
+                               :options {:temperature 0.1}
+                               :think true
+                               :format "json"})))
+  (is (= {} (config/chat-options {}))))
+
+(deftest tool-specs-honors-config-tools
+  (let [ids (set (map #(get-in % [:function :name])
+                      (config/tool-specs {:tools ["read_file" "run_command"]})))]
+    (is (= #{"read_file" "run_command"} ids))))

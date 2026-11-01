@@ -1,53 +1,18 @@
-(ns clai.core-test
-  "Tests for the ACP <-> Ollama glue in `clai.core`, in particular that a
+(ns clai.agent-test
+  "Tests for the ACP agent handler in `clai.agent`, in particular that a
   `session/prompt` actually reaches the model and that the reply validates as
   an ACP `session/update`."
   (:require [acp.agent :as acp]
             [acp.schema.core :as schemas]
-            [clai.core :as core]
+            [clai.agent :as agent]
             [clai.providers.ollama :as ollama]
             [clai.test-support :refer [quiet-logs]]
-            [clai.tools :as tools]
-            [clojure.string :as str]
             [clojure.test :refer :all]))
 
 (use-fixtures :once quiet-logs)
 
-(def ^:private prompt->messages
-  "The (private) ACP prompt normalizer."
-  #'core/acp-prompt->ollama-messages)
-
 (def ^:private test-client
   (ollama/make-client {:host "http://localhost:11434" :timeout 1000}))
-
-;; ---------------------------------------------------------------------------
-;; Prompt normalization
-;; ---------------------------------------------------------------------------
-
-(deftest content-block-prompt-becomes-user-message
-  ;; ACP sends `:prompt` as a vector of ContentBlocks; their text must survive
-  ;; the conversion (regression: it used to be dropped, sending an empty
-  ;; user message and prompting the model to report "no request").
-  (is (= [{:role "user" :content "hello"}]
-         (prompt->messages [{:type "text" :text "hello"}])))
-  (is (= [{:role "user" :content "hello\nworld"}]
-         (prompt->messages [{:type "text" :text "hello"}
-                            {:type "text" :text "world"}])))
-  (is (= [{:role "user" :content "look"}]
-         (prompt->messages [{:type "text" :text "look"}
-                            {:type "image" :data "..."}]))))
-
-(deftest tolerant-prompt-shapes
-  (is (= [] (prompt->messages nil)))
-  (is (= [{:role "user" :content "hi"}] (prompt->messages "hi")))
-  (is (= [{:role "user" :content "hi"}]
-         (prompt->messages {:type "text" :text "hi"})))
-  ;; role-tagged messages keep their role
-  (is (= [{:role "user" :content "hi"}]
-         (prompt->messages [{:role "user"
-                             :content [{:type "text" :text "hi"}]}])))
-  (is (= [{:role "assistant" :content "yo"}]
-         (prompt->messages [{:role "assistant" :content "yo"}]))))
 
 ;; ---------------------------------------------------------------------------
 ;; session/prompt end to end (Ollama stubbed)
@@ -55,7 +20,7 @@
 
 (defn- run-with-stubbed-ollama
   "Run `f` with `/api/chat` and the ACP senders stubbed. `f` receives the
-  agent plus atoms collecting the chat request bodies (`requests`) and the
+  handler plus atoms collecting the chat request bodies (`requests`) and the
   `[sessionId update]` pairs sent to the client (`updates`)."
   [reply f]
   (let [requests (atom [])
@@ -70,18 +35,18 @@
                     ;; malformed update fails the test.
                     (schemas/->SessionUpdate update)
                     (swap! updates conj [sid update]))]
-      (let [agent (core/ollama-agent {:cfg    {}
-                                      :client test-client
-                                      :model  "stub-model"})]
-        (f agent requests updates)))))
+      (let [handler (agent/ollama-agent {:cfg    {}
+                                         :client test-client
+                                         :model  "stub-model"})]
+        (f handler requests updates)))))
 
 (deftest session-prompt-sends-user-text-to-ollama
   (run-with-stubbed-ollama
    "pong"
-   (fn [agent requests updates]
-     (let [{:keys [sessionId]} (acp/handle-session-new agent nil {:cwd "/tmp"})
+   (fn [handler requests updates]
+     (let [{:keys [sessionId]} (acp/handle-session-new handler nil {:cwd "/tmp"})
            resp                (acp/handle-session-prompt
-                                agent nil
+                                handler nil
                                 {:sessionId sessionId
                                  :prompt    [{:type "text" :text "ping"}]})]
        (is (= {:stopReason "end_turn"} resp))
@@ -99,12 +64,12 @@
 (deftest session-prompt-accumulates-history
   (run-with-stubbed-ollama
    "pong"
-   (fn [agent requests _updates]
-     (let [{:keys [sessionId]} (acp/handle-session-new agent nil {:cwd "/tmp"})]
-       (acp/handle-session-prompt agent nil
+   (fn [handler requests _updates]
+     (let [{:keys [sessionId]} (acp/handle-session-new handler nil {:cwd "/tmp"})]
+       (acp/handle-session-prompt handler nil
                                   {:sessionId sessionId
                                    :prompt    [{:type "text" :text "first"}]})
-       (acp/handle-session-prompt agent nil
+       (acp/handle-session-prompt handler nil
                                   {:sessionId sessionId
                                    :prompt    [{:type "text" :text "second"}]})
        (is (= [{:role "user" :content "first"}
@@ -115,16 +80,16 @@
 (deftest session-cancel-does-not-throw
   (run-with-stubbed-ollama
    "pong"
-   (fn [agent _requests _updates]
-     (let [{:keys [sessionId]} (acp/handle-session-new agent nil {:cwd "/tmp"})]
-       (is (nil? (acp/on-session-cancel agent nil {:sessionId sessionId})))))))
+   (fn [handler _requests _updates]
+     (let [{:keys [sessionId]} (acp/handle-session-new handler nil {:cwd "/tmp"})]
+       (is (nil? (acp/on-session-cancel handler nil {:sessionId sessionId})))))))
 
 (deftest prompt-for-unknown-session-relays-message
   (run-with-stubbed-ollama
    "pong"
-   (fn [agent requests updates]
+   (fn [handler requests updates]
      (let [resp (acp/handle-session-prompt
-                 agent nil
+                 handler nil
                  {:sessionId "missing"
                   :prompt    [{:type "text" :text "ping"}]})]
        (is (= {:stopReason "end_turn"} resp))

@@ -31,7 +31,9 @@
             [taoensso.telemere :as tel]))
 
 (defn- env-log-level
-  "Return `CLAI_LOG_LEVEL` as a keyword, or nil when unset/blank."
+  "Return `CLAI_LOG_LEVEL` as a keyword, or nil when unset/blank. The value
+  is not validated here; `init!` ignores levels Telemere rejects."
+  {:malli/schema [:-> [:maybe :keyword]]}
   []
   (some-> (System/getenv "CLAI_LOG_LEVEL")
           (str/trim)

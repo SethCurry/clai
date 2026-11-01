@@ -41,13 +41,64 @@
            [java.io File]))
 
 ;; ---------------------------------------------------------------------------
+;; Schemas
+;; ---------------------------------------------------------------------------
+
+(def non-empty-string
+  "A string of at least one character."
+  [:re #".+"])
+
+(def session-file-schema
+  "A `java.io.File` holding a session's EDN state."
+  [:fn #(instance? File %)])
+
+(def message
+  "A chat message as stored in a session's `:history`, shaped like an Ollama
+  chat message."
+  [:map
+   [:role non-empty-string]
+   [:content {:optional true} [:or :string [:sequential [:map]]]]
+   [:images {:optional true} [:sequential :string]]
+   [:tool_calls {:optional true} [:sequential [:map]]]])
+
+(def session
+  "A session state map, as returned by `create-session`, `load-session`, and
+  `list-sessions`, and persisted as EDN under the sessions directory."
+  [:map
+   [:sessionId non-empty-string]
+   [:cwd :string]
+   [:model {:optional true} [:maybe :string]]
+   [:params {:optional true} [:map]]
+   [:createdAt :string]
+   [:updatedAt {:optional true} [:maybe :string]]
+   [:history {:optional true} [:vector message]]])
+
+(def session-summary
+  "A session state map without `:history`, as returned by
+  `list-session-summaries`."
+  [:map
+   [:sessionId non-empty-string]
+   [:cwd :string]
+   [:model {:optional true} [:maybe :string]]
+   [:params {:optional true} [:map]]
+   [:createdAt :string]
+   [:updatedAt {:optional true} [:maybe :string]]])
+
+(def create-session-opts
+  "Options accepted by `create-session`."
+  [:map
+   [:cwd {:optional true} [:or #'session-file-schema :string]]
+   [:model {:optional true} [:maybe :string]]
+   [:params {:optional true} [:map]]])
+
+;; ---------------------------------------------------------------------------
 ;; Filesystem layout
 ;; ---------------------------------------------------------------------------
 
 (defn sessions-dir
   "Return the `~/.local/clai/sessions` directory as a `java.io.File`,
   resolving `~` against the user's home directory."
-  {:malli/schema [:-> :string]}
+  {:malli/schema [:-> #'session-file-schema]}
   []
   (let [home (or (System/getenv "HOME")
                  (System/getProperty "user.home"))
@@ -57,7 +108,7 @@
 (defn ensure-sessions-dir
   "Create the sessions directory (and parents) if it does not already exist.
   Idempotent."
-  {:malli/schema [:-> :string]}
+  {:malli/schema [:-> #'session-file-schema]}
   []
   (let [dir (sessions-dir)]
     (when-not (.exists dir)
@@ -121,7 +172,7 @@
 
 (defn new-session-id
   "Generate a fresh random session id (a UUID string)."
-  {:malli/schema [:-> :string]}
+  {:malli/schema [:-> #'non-empty-string]}
   []
   (str (UUID/randomUUID)))
 
@@ -138,6 +189,9 @@
   The returned map includes `:sessionId`, `:cwd`, `:params`, `:createdAt`,
   `:updatedAt`, and an empty `:history`. The same map shape is returned by
   `load-session` and `list-sessions`."
+  {:malli/schema [:function
+                  [:=> [:cat] #'session]
+                  [:=> [:cat [:maybe #'create-session-opts]] #'session]]}
   ([]
    (create-session nil))
   ([{:keys [cwd model params]
@@ -163,6 +217,7 @@
 (defn load-session
   "Read and return the state map for `session-id`, or nil if no such session
   is recorded."
+  {:malli/schema [:-> #'non-empty-string [:maybe #'session]]}
   [session-id]
   (let [state (read-edn-file (session-file session-id))]
     (tel/log! {:level :debug
@@ -172,13 +227,15 @@
     state))
 
 (defn lookup-session
-  "Alias for `load-session`, mirroring the naming used in `clai.core`."
+  "Alias for `load-session`, for callers that prefer the `lookup` verb."
+  {:malli/schema [:-> #'non-empty-string [:maybe #'session]]}
   [session-id]
   (load-session session-id))
 
 (defn save-session
   "Persist `state` (a session map) to its EDN file. Refreshes `:updatedAt`.
   Returns the saved state."
+  {:malli/schema [:-> #'session #'session]}
   [state]
   (let [state' (assoc state :updatedAt (now-iso))]
     (write-edn-file (session-file (:sessionId state')) state')
@@ -187,6 +244,7 @@
 (defn delete-session
   "Delete the EDN file for `session-id`, if present. Returns true if a file
   was removed, false otherwise."
+  {:malli/schema [:-> #'non-empty-string boolean?]}
   [session-id]
   (let [file     (session-file session-id)
         deleted? (if (.exists file) (.delete file) false)]
@@ -196,10 +254,29 @@
               "Deleted session file")
     deleted?))
 
+(defn register-session
+  "Persist a session under an explicit `id`, rather than generating one.
+  Used when a client resumes a session this agent has no record of, so resume
+  degrades to new rather than erroring. Returns the saved state."
+  {:malli/schema [:-> #'non-empty-string [:maybe :string]
+                  [:maybe [:vector #'message]] #'session]}
+  [id cwd history]
+  (let [saved (save-session {:sessionId id
+                             :cwd       (str (or cwd "."))
+                             :params    {}
+                             :createdAt (now-iso)
+                             :history   (or history [])})]
+    (tel/log! {:level :info
+               :id    ::session-registered
+               :data  {:sessionId id :cwd (:cwd saved)}}
+              "Registered session under an explicit id")
+    saved))
+
 (defn list-sessions
   "Return a vector of all recorded session state maps, sorted by `:createdAt`
   ascending. Each entry is the full state map (including `:history`); use
   `list-session-summaries` for lightweight metadata only."
+  {:malli/schema [:-> [:vector #'session]]}
   []
   (ensure-sessions-dir)
   (let [sessions (->> (sessions-dir)
@@ -218,6 +295,7 @@
 (defn list-session-summaries
   "Like `list-sessions` but returns only metadata (no `:history`), suitable
   for displaying in a session picker or for ACP `session/list` responses."
+  {:malli/schema [:-> [:vector #'session-summary]]}
   []
   (->> (list-sessions)
        (map #(dissoc % :history))
@@ -225,6 +303,7 @@
 
 (defn session-exists?
   "Return true if a session file for `session-id` is recorded."
+  {:malli/schema [:-> #'non-empty-string boolean?]}
   [session-id]
   (some? (load-session session-id)))
 
@@ -246,6 +325,7 @@
 
   If the session is unknown, it is treated as a no-op and the message is
   returned unchanged (callers should `create-session` first)."
+  {:malli/schema [:-> #'non-empty-string #'message [:maybe #'message]]}
   [session-id message]
   (locking session-id
     (if-let [state (load-session session-id)]
@@ -262,12 +342,14 @@
 (defn session-history
   "Return the message history vector for `session-id`, or an empty vector if
   the session is unknown."
+  {:malli/schema [:-> #'non-empty-string [:vector #'message]]}
   [session-id]
   (or (-> (load-session session-id) :history) []))
 
 (defn set-param
   "Associate `key` with `value` in the session's `:params` map and persist.
   Returns the updated full state map, or nil if the session is unknown."
+  {:malli/schema [:-> #'non-empty-string :any [:maybe #'session]]}
   [session-id key value]
   (locking session-id
     (if-let [state (load-session session-id)]
@@ -284,6 +366,7 @@
 (defn set-params
   "Merge `m` into the session's `:params` map and persist. Returns the
   updated full state map, or nil if the session is unknown."
+  {:malli/schema [:-> #'non-empty-string [:map] [:maybe #'session]]}
   [session-id m]
   (locking session-id
     (if-let [state (load-session session-id)]
@@ -300,6 +383,7 @@
 (defn set-model
   "Record the model name used by `session-id` and persist. Returns the
   updated full state map, or nil if the session is unknown."
+  {:malli/schema [:-> #'non-empty-string [:maybe :string] [:maybe #'session]]}
   [session-id model]
   (locking session-id
     (if-let [state (load-session session-id)]
@@ -314,6 +398,7 @@
 (defn clear-history
   "Empty the message history for `session-id` and persist. Returns the
   updated full state map, or nil if the session is unknown."
+  {:malli/schema [:-> #'non-empty-string [:maybe #'session]]}
   [session-id]
   (locking session-id
     (if-let [state (load-session session-id)]
