@@ -92,6 +92,7 @@
 (defn specs
   "Return a vector of all registered tool definitions, suitable for passing
   as the `:tools` field of an Ollama `/api/chat` request."
+  {:malli/schema [:-> [:vector #'ToolSpecS]]}
   []
   (mapv :spec (vals @registry)))
 
@@ -492,5 +493,3 @@
   (run! register-tool! (built-in-tools)))
 
 (install-built-ins!)
-(mi/collect!)
-(mc/emit!)

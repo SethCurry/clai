@@ -1,15 +1,14 @@
 (ns user
   (:require [malli.clj-kondo :as mc]
-    [malli.instrument :as mi]))
+    [malli.instrument :as mi]
+    [malli.dev :as dev]
+    [clai.core :as core]))
 
 (defn my-fn [] (print "Hello, world!"))
 
-(def clai-ns [
-  'clai.core
-  ])
-
 (defn regen-kondo []
-  (doseq [x clai-ns]
-    (-> (mc/collect x)
-      (mc/linter-config)
-    (mc/save! :clj {}))))
+    (mi/collect! 'clai.core)
+    (mc/emit!))
+
+(defn start []
+    (dev/start!))

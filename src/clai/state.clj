@@ -57,6 +57,7 @@
 (defn ensure-sessions-dir
   "Create the sessions directory (and parents) if it does not already exist.
   Idempotent."
+  {:malli/schema [:-> :string]}
   []
   (let [dir (sessions-dir)]
     (when-not (.exists dir)
@@ -78,6 +79,7 @@
 
 (defn- now-iso
   "Current UTC time as an ISO-8601 string."
+  {:malli/schema [:-> :string]}
   []
   (str (Instant/now)))
 
@@ -119,6 +121,7 @@
 
 (defn new-session-id
   "Generate a fresh random session id (a UUID string)."
+  {:malli/schema [:-> :string]}
   []
   (str (UUID/randomUUID)))
 

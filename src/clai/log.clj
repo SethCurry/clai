@@ -42,6 +42,7 @@
 (defn init!
   "Install the stderr console handler and apply `CLAI_LOG_LEVEL`, if set.
   Idempotent; called automatically when this namespace loads."
+  {:malli/schema [:-> :nil]}
   []
   ;; Telemere's default console handler writes non-error signals to *out*.
   ;; Stdout is reserved for ACP JSON-RPC traffic, so replace it with a handler
