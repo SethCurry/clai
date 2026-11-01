@@ -6,8 +6,10 @@
             [clai.state :as state]
             [clai.providers.ollama :as ollama]
             [clai.agent :as agent]
+            [acp.agent.helpers :as helpers]
             [clai.tools :as tools]
             [clojure.string :as str]
+            [malli.instrument :as mi]
             [taoensso.telemere :as tel])
   (:import [java.util UUID])
   (:gen-class))
@@ -617,6 +619,7 @@
                        "Rejecting extension request")
              (acp-errors/acp-error acp-errors/err-method))))))))
 
+     (mi/collect!)
 ;; ---------------------------------------------------------------------------
 ;; Entry point
 ;; ---------------------------------------------------------------------------

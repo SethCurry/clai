@@ -47,6 +47,7 @@
 (defn sessions-dir
   "Return the `~/.local/clai/sessions` directory as a `java.io.File`,
   resolving `~` against the user's home directory."
+  {:malli/schema [:-> :string]}
   []
   (let [home (or (System/getenv "HOME")
                  (System/getProperty "user.home"))

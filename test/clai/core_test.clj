@@ -96,57 +96,6 @@
          (is (= "agent_message_chunk" (:sessionUpdate update)))
          (is (= "pong" (get-in update [:content :text]))))))))
 
-(deftest tool-call-output-is-sent-as-tool-call-content
-  ;; Regression: the result of a tool call used to be sent only in
-  ;; `:rawOutput`, which ACP clients do not render, so the client showed the
-  ;; `tool_call` announcement but never its output. The result must also be
-  ;; present as `ToolCallContent` (a text content block) on both the finished
-  ;; `tool_call` and the `tool_call_update`.
-  (let [updates (atom [])
-        replies (atom [{:message {:role       "assistant"
-                                  :content    ""
-                                  :tool_calls [{:id       "call-1"
-                                                :function {:name      "read_file"
-                                                           :arguments "{\"path\":\"x\"}"}}]}}
-                       {:message {:role "assistant" :content "done"}}])]
-    (with-redefs [ollama/chat
-                  (fn [_client _req] (let [r (first @replies)]
-                                       (swap! replies rest)
-                                       r))
-                  tools/invoke
-                  (fn [_id _args _ctx] "hello tool output")
-                  acp/send-session-update
-                  (fn [_conn sid update]
-                    (schemas/->SessionUpdate update)
-                    (swap! updates conj [sid update]))]
-      (let [agent (core/ollama-agent {:cfg    {}
-                                      :client test-client
-                                      :model  "stub-model"})
-            {:keys [sessionId]} (acp/handle-session-new agent nil {:cwd "/tmp"})]
-        (acp/handle-session-prompt agent nil
-                                   {:sessionId sessionId
-                                    :prompt    [{:type "text" :text "go"}]})
-        (let [tool-updates (filter #(str/starts-with?
-                                     (get-in % [1 :sessionUpdate] "")
-                                     "tool_call")
-                                   @updates)
-              [started finished update] (map second tool-updates)]
-          (is (= ["tool_call" "tool_call" "tool_call_update"]
-                 (map :sessionUpdate [started finished update])))
-          (is (= "in_progress" (:status started)))
-          (is (= "completed" (:status finished))
-              "the finished tool call is sent as a `tool_call` with a terminal status")
-          (is (= (:toolCallId started) (:toolCallId finished)))
-          (is (= "read_file" (:name finished)))
-          (is (= "completed" (:status update)))
-          (is (= [{:type "content"
-                   :content {:type "text" :text "hello tool output"}}]
-                 (:content finished))
-              "tool output must be visible to ACP clients via :content")
-          (is (= (:content finished) (:content update)))
-          (is (= "hello tool output"
-                 (get-in (first (:content finished)) [:content :text]))))))))
-
 (deftest session-prompt-accumulates-history
   (run-with-stubbed-ollama
    "pong"

@@ -11,5 +11,6 @@
                  [io.scurry/acp "0.1.0-SNAPSHOT"]]
   :main ^:skip-aot clai.core
   :target-path "target/%s"
+  :repl-options {:init-ns user}
   :profiles {:uberjar {:aot :all
                        :jvm-opts ["-Dclojure.compiler.direct-linking=true"]}})

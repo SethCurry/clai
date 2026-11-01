@@ -33,7 +33,9 @@
             [cheshire.core :as json]
             [clojure.java.io :as io]
             [clojure.string :as str]
-            [taoensso.telemere :as tel])
+            [taoensso.telemere :as tel]
+            [malli.instrument :as mi]
+            [malli.clj-kondo :as mc])
   (:import [java.io File]
            [java.util.concurrent TimeUnit]))
 
@@ -44,6 +46,13 @@
 ;; `{id {:id :fn :spec}}`. The default registry is populated with
 ;; `built-in-tools` below; callers may add or replace entries.
 (def ^:private registry (atom {}))
+
+(def ToolSpecS [:map])
+
+(def ToolS [:map
+  [:id :string]
+  [:spec #'ToolSpecS]
+  [:handler [:-> [:map] :string :string]]])
 
 (defn register-tool!
   "Register `tool` (a map with `:id`, `:fn`, `:spec`) in the global registry,
@@ -58,6 +67,7 @@
 
 (defn unregister-tool!
   "Remove the tool with `id` from the registry, if present. Returns nil."
+  {:malli/schema [:-> :string :nil]}
   [id]
   (let [removed? (contains? @registry id)]
     (swap! registry dissoc id)
@@ -75,6 +85,7 @@
 
 (defn spec
   "Return the Ollama tool definition for the registered tool `id`, or nil."
+  {:malli/schema [:-> :string #'ToolSpecS]}
   [id]
   (-> (get @registry id) :spec))
 
@@ -481,3 +492,5 @@
   (run! register-tool! (built-in-tools)))
 
 (install-built-ins!)
+(mi/collect!)
+(mc/emit!)
