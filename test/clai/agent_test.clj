@@ -3,9 +3,11 @@
   `session/prompt` actually reaches the model and that the reply validates as
   an ACP `session/update`."
   (:require [acp.agent :as acp]
+            [acp.agent.helpers :as helpers]
             [acp.schema.core :as schemas]
             [clai.agent :as agent]
             [clai.providers.ollama :as ollama]
+            [clai.state :as state]
             [clai.test-support :refer [quiet-logs instrument]]
             [clojure.test :refer :all]))
 
@@ -22,18 +24,27 @@
 (defn- run-with-stubbed-ollama
   "Run `f` with `/api/chat` and the ACP senders stubbed. `f` receives the
   handler plus atoms collecting the chat request bodies (`requests`) and the
-  `[sessionId update]` pairs sent to the client (`updates`)."
+  `[sessionId update]` pairs sent to the client (`updates`).
+
+  `reply` is either the assistant message text or a full message map (for
+  example to include a `:thinking` field)."
   [reply f]
   (let [requests (atom [])
         updates  (atom [])]
     (with-redefs [ollama/chat
                   (fn [_client req]
                     (swap! requests conj req)
-                    {:message {:role "assistant" :content reply}})
+                    {:message (if (map? reply)
+                                (merge {:role "assistant"} reply)
+                                {:role "assistant" :content reply})})
                   acp/send-session-update
                   (fn [_conn sid update]
                     ;; Validate exactly as the real sender would, so a
                     ;; malformed update fails the test.
+                    (schemas/->SessionUpdate update)
+                    (swap! updates conj [sid update]))
+                  helpers/send-session-update
+                  (fn [_conn sid update]
                     (schemas/->SessionUpdate update)
                     (swap! updates conj [sid update]))]
       (let [handler (agent/ollama-agent {:cfg    {}
@@ -62,6 +73,27 @@
          (is (= "agent_message_chunk" (:sessionUpdate update)))
          (is (= "pong" (get-in update [:content :text]))))))))
 
+(deftest session-prompt-relays-model-thinking
+  (run-with-stubbed-ollama
+   {:content "pong" :thinking "let me think about this"}
+   (fn [handler _requests updates]
+     (let [{:keys [sessionId]} (acp/handle-session-new handler nil {:cwd "/tmp"})
+           resp                (acp/handle-session-prompt
+                                handler nil
+                                {:sessionId sessionId
+                                 :prompt    [{:type "text" :text "ping"}]})]
+       (is (= {:stopReason "end_turn"} resp))
+       (is (= ["agent_thought_chunk" "agent_message_chunk"]
+              (mapv (comp :sessionUpdate second) @updates))
+           "thinking must be sent as a thought chunk before the final reply")
+       (is (= "let me think about this"
+              (get-in (first @updates) [1 :content :text])))
+       (is (= "pong"
+              (get-in (second @updates) [1 :content :text])))
+       (is (= "let me think about this"
+              (:thinking (last (:history (state/load-session sessionId)))))
+           "thinking is persisted so session/load can replay it")))))
+
 (deftest session-prompt-accumulates-history
   (run-with-stubbed-ollama
    "pong"
@@ -82,16 +114,16 @@
   (let [requests (atom [])
         updates  (atom [])
         calls    (atom 0)
-        echo     {:id   "echo"
-                  :fn   (fn [{:keys [text]} _ctx] (str "echo:" text))
-                  :spec {:type "function"
-                         :function {:name "echo"
-                                    :parameters {:type "object"}}}}
-        other    {:id   "other"
-                  :fn   (fn [_args _ctx] "other")
-                  :spec {:type "function"
-                         :function {:name "other"
-                                    :parameters {:type "object"}}}}]
+        echo     {:id      "echo"
+                  :handler (fn [{:keys [text]} _ctx] (str "echo:" text))
+                  :spec    {:type "function"
+                            :function {:name "echo"
+                                       :parameters {:type "object"}}}}
+        other    {:id      "other"
+                  :handler (fn [_args _ctx] "other")
+                  :spec    {:type "function"
+                            :function {:name "other"
+                                       :parameters {:type "object"}}}}]
     (with-redefs [ollama/chat
                   (fn [_client req]
                     (swap! requests conj req)
@@ -104,6 +136,10 @@
                                               :arguments "{\"text\":\"hi\"}"}}]}}
                       {:message {:role "assistant" :content "done"}}))
                   acp/send-session-update
+                  (fn [_conn sid update]
+                    (schemas/->SessionUpdate update)
+                    (swap! updates conj [sid update]))
+                  helpers/send-session-update
                   (fn [_conn sid update]
                     (schemas/->SessionUpdate update)
                     (swap! updates conj [sid update]))]

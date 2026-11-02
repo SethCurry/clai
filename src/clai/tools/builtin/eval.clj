@@ -111,4 +111,4 @@
 (defn tools
   "Return the built-in Clojure evaluation tool maps."
   []
-  [{:id "eval_clojure" :fn eval-clojure-fn :spec eval-clojure-spec}])
+  [{:id "eval_clojure" :handler eval-clojure-fn :spec eval-clojure-spec}])

@@ -4,14 +4,14 @@
 
   A tool is a map with three keys:
 
-    :id    the tool name (matches the Ollama `function.name`).
-    :fn    a Clojure function `(args ctx) -> string`, where `args` is the
-           parsed JSON arguments map and `ctx` carries session context
-           (`:cwd`, ...). Returning a string keeps the tool-result message
-           simple; non-string return values are pr-str'd.
-    :spec  the Ollama tool definition map:
-           `{:type \"function\" :function {:name ... :description ...
-            :parameters {:type \"object\" :properties {...} :required [...]}}}`")
+    :id      the tool name (matches the Ollama `function.name`).
+    :handler a Clojure function `(args ctx) -> string`, where `args` is the
+             parsed JSON arguments map and `ctx` carries session context
+             (`:cwd`, ...). Returning a string keeps the tool-result message
+             simple; non-string return values are pr-str'd.
+    :spec    the Ollama tool definition map:
+             `{:type \"function\" :function {:name ... :description ...
+              :parameters {:type \"object\" :properties {...} :required [...]}}}`")
 
 ;; ---------------------------------------------------------------------------
 ;; Schemas
@@ -67,10 +67,10 @@
   :string)
 
 (def tool
-  "A tool map as stored in a registry: `{:id ... :fn ... :spec ...}`."
+  "A tool map as stored in a registry: `{:id ... :handler ... :spec ...}`."
   [:map
    [:id tool-id]
-   [:fn [:=> [:cat tool-args tool-ctx] [:maybe :any]]]
+   [:handler [:=> [:cat tool-args tool-ctx] [:maybe :any]]]
    [:spec tool-spec]])
 
 (def tool-registry

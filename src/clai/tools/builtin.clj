@@ -14,7 +14,7 @@
             [clai.tools.schema :as schema]))
 
 (defn built-in-tools
-  "Return a vector of the default tool maps (`:id`, `:fn`, `:spec`) an agent
+  "Return a vector of the default tool maps (`:id`, `:handler`, `:spec`) an agent
   can use to read/write files, run shell commands within its session cwd,
   evaluate Clojure code in the running process, and delegate work to a
   sub-agent with its own tools and system prompt."

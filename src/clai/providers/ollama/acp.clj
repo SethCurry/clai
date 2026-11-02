@@ -8,6 +8,7 @@
   a session."
   (:require [acp.agent :as acp]
             [clai.log]
+            [clojure.string :as str]
             [taoensso.telemere :as tel]))
 
 ;; ---------------------------------------------------------------------------
@@ -90,31 +91,35 @@
 ;; Ollama history -> ACP session updates
 ;; ---------------------------------------------------------------------------
 
-(defn- history-message->update
-  "Convert one persisted history message to the `session/update` the client
+(defn- history-message->updates
+  "Convert one persisted history message to the `session/update`s the client
   should see when a session is loaded. System and tool messages are internal
-  and are not replayed; user/assistant messages become message chunks."
-  [{:keys [role content]}]
+  and are not replayed; user messages become user chunks, and assistant
+  messages become an `agent_thought_chunk` (when the stored message carries
+  reasoning in `:thinking`) followed by an `agent_message_chunk`."
+  [{:keys [role content thinking]}]
   (let [role (cond
                (nil? role)     nil
                (string? role)  role
                (keyword? role) (name role)
                :else           (str role))
-        text (content->text content)]
+        text (content->text content)
+        thought (when-not (str/blank? (str thinking))
+                  {:sessionUpdate "agent_thought_chunk"
+                   :content       {:type "text" :text (str thinking)}})
+        message {:sessionUpdate "agent_message_chunk"
+                 :content       {:type "text" :text text}}]
     (case role
-      "user"      {:sessionUpdate "user_message_chunk"
-                    :content       {:type "text" :text text}}
-      "assistant" {:sessionUpdate "agent_message_chunk"
-                    :content       {:type "text" :text text}}
-      "agent"     {:sessionUpdate "agent_message_chunk"
-                    :content       {:type "text" :text text}}
-      nil)))
+      "user"                [{:sessionUpdate "user_message_chunk"
+                              :content       {:type "text" :text text}}]
+      ("assistant" "agent") (if thought [thought message] [message])
+      [])))
 
 (defn replay-session-history
   "Send the persisted `history` for `session-id` to the client as a sequence
   of `session/update` notifications. Returns the number of updates sent."
   [conn session-id history]
-  (let [updates (into [] (keep history-message->update) history)]
+  (let [updates (into [] (mapcat history-message->updates) history)]
     (doseq [update updates]
       (acp/send-session-update conn session-id update))
     (tel/log! {:level :debug

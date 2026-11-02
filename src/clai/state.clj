@@ -58,6 +58,7 @@
   [:map
    [:role non-empty-string]
    [:content {:optional true} [:or :string [:sequential [:map]]]]
+   [:thinking {:optional true} [:maybe :string]]
    [:images {:optional true} [:sequential :string]]
    [:tool_calls {:optional true} [:sequential [:map]]]])
 

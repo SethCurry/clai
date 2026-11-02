@@ -13,7 +13,7 @@
 ;; ---------------------------------------------------------------------------
 
 (defn make-registry
-  "Build a tool registry from `tools`, a collection of `{:id :fn :spec}` maps.
+  "Build a tool registry from `tools`, a collection of `{:id :handler :spec}` maps.
   A map `{id tool}` is accepted and returned as-is. Later duplicate ids win."
   {:malli/schema [:-> [:or [:sequential #'schema/tool] #'schema/tool-registry]
                   #'schema/tool-registry]}

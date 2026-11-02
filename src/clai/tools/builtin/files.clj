@@ -104,6 +104,6 @@
 (defn tools
   "Return the built-in filesystem tool maps."
   []
-  [{:id "read_file"      :fn read-file-fn      :spec file-read-spec}
-   {:id "write_file"     :fn write-file-fn     :spec file-write-spec}
-   {:id "list_directory" :fn list-directory-fn :spec list-directory-spec}])
+  [{:id "read_file"      :handler read-file-fn      :spec file-read-spec}
+   {:id "write_file"     :handler write-file-fn     :spec file-write-spec}
+   {:id "list_directory" :handler list-directory-fn :spec list-directory-spec}])

@@ -12,11 +12,11 @@
 (defn- tool
   "Build a minimal tool named `id` whose implementation calls `f`."
   [id f]
-  {:id   id
-   :fn   f
-   :spec {:type "function"
-          :function {:name id
-                     :parameters {:type "object"}}}})
+  {:id      id
+   :handler f
+   :spec    {:type "function"
+             :function {:name id
+                        :parameters {:type "object"}}}})
 
 (defn- echo-tool
   []

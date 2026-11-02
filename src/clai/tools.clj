@@ -35,14 +35,14 @@
 
   A tool is a map with three keys:
 
-    :id    the tool name (matches the Ollama `function.name`).
-    :fn    a Clojure function `(args ctx) -> string`, where `args` is the
-           parsed JSON arguments map and `ctx` carries session context
-           (`:cwd`, ...). Returning a string keeps the tool-result message
-           simple; non-string return values are pr-str'd.
-    :spec  the Ollama tool definition map:
-           `{:type \"function\" :function {:name ... :description ...
-            :parameters {:type \"object\" :properties {...} :required [...]}}}`
+    :id      the tool name (matches the Ollama `function.name`).
+    :handler a Clojure function `(args ctx) -> string`, where `args` is the
+             parsed JSON arguments map and `ctx` carries session context
+             (`:cwd`, ...). Returning a string keeps the tool-result message
+             simple; non-string return values are pr-str'd.
+    :spec    the Ollama tool definition map:
+             `{:type \"function\" :function {:name ... :description ...
+              :parameters {:type \"object\" :properties {...} :required [...]}}}`
 
   Tool execution never throws out to the caller: if a tool function raises,
   the exception message is returned as the tool result so the model can react."

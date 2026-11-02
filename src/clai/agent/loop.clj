@@ -5,13 +5,15 @@
   the model requests through the agent's tool registry, records the results in
   the session history, and repeats until the model produces a final text reply
   (or the configured round cap is reached). Tool activity is streamed to the
-  ACP client as `tool_call` / `tool_call_update` session updates."
-  (:require [acp.agent :as acp]
-            [clai.log]
+  ACP client as `tool_call` / `tool_call_update` session updates, and model
+  reasoning returned by Ollama in an assistant message's `:thinking` field is
+  streamed as `agent_thought_chunk` updates."
+  (:require [clai.log]
             [clai.providers.ollama :as ollama]
             [clai.state :as state]
             [clai.tools :as tools]
             [clojure.string :as str]
+            [acp.agent.helpers :as helpers]
             [taoensso.telemere :as tel]))
 
 ;; ---------------------------------------------------------------------------
@@ -49,14 +51,10 @@
   "Emit a `tool_call` SessionUpdate announcing that `call` is starting."
   [conn session-id call]
   (let [id (ollama/tool-call-id call)]
-    (acp/send-session-update conn session-id
-      {:_meta        nil
-       :sessionUpdate "tool_call"
-       :name (ollama/tool-call-name call)
-       :title          (ollama/tool-call-title call)
-       :rawInput (tool-call-raw-input call)
-       :toolCallId    id
-       :status        "in_progress"})
+    (helpers/send-tool-call-started conn session-id id
+      :raw-input (tool-call-raw-input call)
+      :name      (ollama/tool-call-name call)
+      :title     (ollama/tool-call-title call))
     id))
 
 (defn- tool-result-content
@@ -81,15 +79,29 @@
   (let [failed? (str/starts-with? result "Error:")
         status  (if failed? "failed" "completed")
         content (tool-result-content result)]
-    (acp/send-session-update conn session-id
+    (helpers/send-session-update conn session-id
       {:_meta        nil
        :sessionUpdate "tool_call_update"
        :content       content
-       :toolCallId    id})
-    (acp/send-session-update conn session-id
-      {:sessionUpdate "tool_call_update"
-       :toolCallId id
-       :status status})))
+       :toolCallId    id
+       :status        status})))
+
+;; ---------------------------------------------------------------------------
+;; ACP thought updates
+;; ---------------------------------------------------------------------------
+
+(defn- send-thought
+  "Relay the model's reasoning text in `msg` to the client.
+
+  Ollama returns chain-of-thought for thinking models in the assistant
+  message's `:thinking` field. ACP clients render that as an
+  `agent_thought_chunk`, distinct from the final `agent_message_chunk`, so it
+  is sent through `acp.agent.helpers/send-thought-text`. Messages without
+  (non-blank) thinking are ignored."
+  [conn session-id msg]
+  (let [thinking (:thinking msg)]
+    (when-not (str/blank? (str thinking))
+      (helpers/send-thought-text conn session-id (str thinking)))))
 
 ;; ---------------------------------------------------------------------------
 ;; Tool rounds
@@ -201,12 +213,16 @@
 
             :else
             (let [msg (ollama/assistant-message resp)]
+              (send-thought conn session-id msg)
               (if (ollama/has-tool-calls? msg)
                 (do (run-tool-round conn session-id msg opts)
                     (recur (inc round)))
-                (let [content (or (:content msg) "")]
+                (let [content  (or (:content msg) "")
+                      thinking (:thinking msg)]
                   (state/append-history session-id
-                                  {:role "assistant" :content content})
+                                  (cond-> {:role "assistant" :content content}
+                                    (not (str/blank? (str thinking)))
+                                    (assoc :thinking (str thinking))))
                   (tel/log! {:level :debug
                              :id    ::chat-response
                              :data  {:sessionId session-id

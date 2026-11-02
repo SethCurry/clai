@@ -85,7 +85,7 @@
                            :cwd      (:cwd ctx)}}
                   "Invoking tool")
         (try
-          (let [result (coerce-result ((:fn tool) args' ctx))
+          (let [result (coerce-result ((:handler tool) args' ctx))
                 msecs  (quot (- (System/nanoTime) start) 1000000)]
             (tel/log! {:level :debug
                        :id    ::tool-complete

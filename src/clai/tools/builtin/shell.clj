@@ -74,4 +74,4 @@
 (defn tools
   "Return the built-in shell tool maps."
   []
-  [{:id "run_command" :fn run-command-fn :spec run-command-spec}])
+  [{:id "run_command" :handler run-command-fn :spec run-command-spec}])

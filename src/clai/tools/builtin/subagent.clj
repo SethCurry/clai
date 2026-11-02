@@ -287,4 +287,4 @@
 (defn tools
   "Return the built-in sub-agent tool maps."
   []
-  [{:id tool-id :fn spawn-agent-fn :spec spawn-agent-spec}])
+  [{:id tool-id :handler spawn-agent-fn :spec spawn-agent-spec}])

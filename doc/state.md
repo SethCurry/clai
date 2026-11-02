@@ -96,6 +96,7 @@ History entries are Ollama chat messages, defined by the schema
 |---------------|-------------------------------|----------|---------|
 | `:role`       | non-empty string              | required | `"system"`, `"user"`, `"assistant"`, or `"tool"`. |
 | `:content`    | string or sequential of maps  | optional | Message text. Strings are what the agent writes; the looser type exists because the history is also accepted straight from clients. |
+| `:thinking`   | string or `nil`               | optional | Chain-of-thought returned by a thinking model. Persisted on the final assistant message so `session/load` can replay it as an `agent_thought_chunk`; also part of Ollama's chat-message format. |
 | `:images`     | sequential of strings         | optional | Base64 images (Ollama convention). Not written by the agent today. |
 | `:tool_calls` | sequential of maps            | optional | Tool calls requested by an `assistant` message, in Ollama's `{:id ... :function {:name ... :arguments {...}}}` shape. |
 | `:name`       | string                        | optional | Tool name, on `"tool"` messages written by the agent loop. |
@@ -118,7 +119,8 @@ What the agent actually writes, in order:
 4. `{:role "tool" :content "<result>" :name "read_file" :tool_call_id "..."}`
    — one per executed tool call.
 5. `{:role "assistant" :content "<final reply>"}` — once the model stops
-   calling tools.
+   calling tools. When the model returned reasoning, the message also carries
+   `:thinking "<chain of thought>"`.
 
 ## Serialization details
 
@@ -220,7 +222,7 @@ Note the asymmetry: an unknown session is a *silent* no-op for
 |----------|----------------|
 | `session/new` | `create-session` with the client's `cwd` and the configured model; appends the system prompt when one is configured |
 | `session/prompt` | Refuses unknown sessions; otherwise appends the user message(s), then each assistant/tool message the loop produces |
-| `session/load` | `load-session`, persists a changed `cwd` if the client supplies one, then replays `:history` to the client as `session/update` chunks (`user` → `user_message_chunk`, `assistant`/`agent` → `agent_message_chunk`; `system` and `tool` messages are internal and not replayed) |
+| `session/load` | `load-session`, persists a changed `cwd` if the client supplies one, then replays `:history` to the client as `session/update` chunks (`user` → `user_message_chunk`, `assistant`/`agent` → `agent_message_chunk`, preceded by `agent_thought_chunk` when the message has `:thinking`; `system` and `tool` messages are internal and not replayed) |
 | `session/list` | `list-session-summaries`, optionally filtered by exact `:cwd` match |
 | `session/resume` | `load-session`, or `register-session` under the requested id when unknown, so resume degrades to "new" instead of erroring |
 | `session/delete` | `delete-session` |

@@ -9,11 +9,11 @@
 (defn- tool
   "Build a minimal tool named `id` whose implementation returns `result`."
   [id result]
-  {:id   id
-   :fn   (fn [_args _ctx] result)
-   :spec {:type "function"
-          :function {:name id
-                     :parameters {:type "object"}}}})
+  {:id      id
+   :handler (fn [_args _ctx] result)
+   :spec    {:type "function"
+             :function {:name id
+                        :parameters {:type "object"}}}})
 
 (deftest make-registry-builds-by-id
   (let [registry (tools/make-registry [(tool "a" "A") (tool "b" "B")])]
