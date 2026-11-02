@@ -9,7 +9,9 @@
             [clai.providers.ollama :as ollama]
             [clai.state :as state]
             [clai.test-support :refer [quiet-logs instrument]]
-            [clojure.test :refer :all]))
+            [clojure.string :as str]
+            [clojure.test :refer :all])
+  (:import [java.io File]))
 
 (use-fixtures :once quiet-logs)
 (use-fixtures :once instrument)
@@ -165,6 +167,102 @@
                     :content))
             "the tool call must execute against the same per-agent registry")
         (is (= "done" (get-in (last @updates) [1 :content :text])))))))
+
+(deftest tool-output-is-streamed-as-tool-call-updates
+  (let [requests (atom [])
+        updates  (atom [])
+        calls    (atom 0)
+        chatter  {:id      "chatter"
+                  :handler (fn [_args ctx]
+                             ;; A long-running tool reports its output as it goes.
+                             (when-let [on-output (:on-output ctx)]
+                               (on-output "first")
+                               (on-output "first second"))
+                             "first second")
+                  :spec    {:type "function"
+                            :function {:name "chatter"
+                                       :parameters {:type "object"}}}}]
+    (with-redefs [ollama/chat
+                  (fn [_client req]
+                    (swap! requests conj req)
+                    (if (= 1 (swap! calls inc))
+                      {:message {:role "assistant"
+                                 :content ""
+                                 :tool_calls
+                                 [{:id "call-1"
+                                   :function {:name "chatter"
+                                              :arguments "{}"}}]}}
+                      {:message {:role "assistant" :content "done"}}))
+                  acp/send-session-update
+                  (fn [_conn sid update]
+                    (schemas/->SessionUpdate update)
+                    (swap! updates conj [sid update]))
+                  helpers/send-session-update
+                  (fn [_conn sid update]
+                    (schemas/->SessionUpdate update)
+                    (swap! updates conj [sid update]))]
+      (let [handler (agent/ollama-agent {:cfg           {}
+                                         :client        test-client
+                                         :model         "stub-model"
+                                         :tool-registry [chatter]})
+            {:keys [sessionId]} (acp/handle-session-new handler nil {:cwd "/tmp"})]
+        ;; A live connection is what makes streaming possible: without one
+        ;; there is nobody to send `tool_call_update`s to.
+        (is (= {:stopReason "end_turn"}
+               (acp/handle-session-prompt
+                handler {}
+                {:sessionId sessionId
+                 :prompt    [{:type "text" :text "ping"}]})))
+        (let [tool-updates (->> @updates
+                               (map second)
+                               (filter #(str/starts-with? (:sessionUpdate %) "tool_call")))]
+          (is (= ["tool_call" "tool_call_update" "tool_call_update"
+                  "tool_call_update"]
+                 (mapv :sessionUpdate tool-updates))
+              "the tool call is opened, streamed twice, and closed")
+          (is (= ["first" "first second"]
+                 (mapv #(get-in % [:content 0 :content :text])
+                       (take 2 (rest tool-updates))))
+              "each chunk carries the output produced so far")
+          (is (every? nil? (mapv :status (take 2 (rest tool-updates))))
+              "streamed output does not close the call")
+          (is (= "completed" (:status (last tool-updates))))
+          (is (= "first second"
+                 (get-in (last tool-updates) [:content 0 :content :text]))))
+        (is (= "first second"
+               (->> (:messages (second @requests))
+                    (filter #(= "tool" (:role %)))
+                    first
+                    :content))
+            "the model still sees the complete result")))))
+
+(deftest session-prompt-reads-local-resource-links
+  ;; `handle-session-prompt` passes the session cwd to the prompt converter so
+  ;; resource links (here a cwd-relative path) reach the model as text.
+  (let [dir (doto (File/createTempFile "clai-agent-resource" ".d")
+              (.delete)
+              (.mkdir))
+        f   (File. dir "notes.txt")]
+    (try
+      (spit f "resource body")
+      (run-with-stubbed-ollama
+       "done"
+       (fn [handler requests _updates]
+         (let [{:keys [sessionId]} (acp/handle-session-new
+                                    handler nil {:cwd (.getPath dir)})]
+           (acp/handle-session-prompt
+            handler nil
+            {:sessionId sessionId
+             :prompt    [{:type "resource_link"
+                          :name "notes.txt"
+                          :uri  (.getName f)}]})
+           (let [content (-> @requests first :messages first :content)]
+             (is (str/includes? content "notes.txt"))
+             (is (str/includes? content "resource body")
+                 "the referenced file's contents must be sent to Ollama")))))
+      (finally
+        (.delete f)
+        (.delete dir)))))
 
 (deftest session-cancel-does-not-throw
   (run-with-stubbed-ollama

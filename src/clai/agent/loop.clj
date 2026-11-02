@@ -87,6 +87,26 @@
        :status        status})))
 
 ;; ---------------------------------------------------------------------------
+;; ACP tool output
+;; ---------------------------------------------------------------------------
+
+(defn- send-tool-call-output
+  "Emit a `tool_call_update` carrying the output a running tool has produced
+  so far, so long-running work (a chatty `run_command`, say) is visible while
+  it happens instead of only once it finishes.
+
+  ACP treats a `tool_call_update`'s `:content` as a *replacement* for what
+  the client already holds, so each update carries the whole output collected
+  to date rather than just the newest chunk. No `:status` is sent: the call is
+  still in progress until [[send-tool-call-finished]] closes it."
+  [conn session-id id output]
+  (helpers/send-session-update conn session-id
+    {:_meta        nil
+     :sessionUpdate "tool_call_update"
+     :content       (tool-result-content output)
+     :toolCallId    id}))
+
+;; ---------------------------------------------------------------------------
 ;; ACP thought updates
 ;; ---------------------------------------------------------------------------
 
@@ -107,6 +127,21 @@
 ;; Tool rounds
 ;; ---------------------------------------------------------------------------
 
+(defn- call-tool-ctx
+  "Build the context for one tool call: the session context plus an
+  `:on-output` callback that relays a tool's incremental output to the client
+  as `tool_call_update`s.
+
+  Tools that ignore `:on-output` -- every built-in but `run_command` -- are
+  unaffected; the callback stays out of the context when there is no client
+  to stream to (a sub-agent's child tools, or a bare `invoke`)."
+  [conn session-id call-id ctx]
+  (if (and conn call-id)
+    (assoc ctx :on-output
+           (fn [output]
+             (send-tool-call-output conn session-id call-id output)))
+    ctx))
+
 (defn- run-tool-round
   "Execute the tool calls in `msg` against `tool-registry`, append the assistant
   message and each `tool`-role result to the session history, and return the
@@ -114,8 +149,11 @@
 
   Emits a `tool_call` SessionUpdate as each call starts, then a finished
   `tool_call_update` when it completes, so the client can render structured
-  tool activity -- and its output -- instead of plain agent messages. Does
-  not call Ollama; the caller chats again with the new history."
+  tool activity -- and its output -- instead of plain agent messages. Tools
+  that produce output incrementally (e.g. `run_command`) push it out through
+  the context's `:on-output` callback as they go, which [[call-tool-ctx]]
+  turns into further `tool_call_update`s. Does not call Ollama; the caller
+  chats again with the new history."
   [conn session-id msg {:keys [tool-registry] :as opts}]
   (let [tool-calls (:tool_calls msg)]
     ;; Record the assistant message (with its tool_calls) verbatim so the
@@ -131,7 +169,8 @@
                              :tool      tool-name}}
                     "Executing tool call")
           (let [[id args] (tools/tool-call->id+args call)
-                result    (tools/invoke tool-registry (or id tool-name) args ctx)]
+                result    (tools/invoke tool-registry (or id tool-name) args
+                                       (call-tool-ctx conn session-id call-id ctx))]
             (send-tool-call-finished conn session-id call call-id result)
             (state/append-history session-id
                             (cond-> {:role    "tool"

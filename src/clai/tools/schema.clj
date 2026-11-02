@@ -50,7 +50,12 @@
 (def tool-ctx
   "Session context handed to a tool function. Carries at least `:cwd`; the
   agent loop also supplies the live session's client, model, tool registry,
-  and limits so tools such as `spawn_agent` can start their own conversations."
+  and limits so tools such as `spawn_agent` can start their own conversations.
+
+  `:on-output` is an optional `(fn [output] ...)` a long-running tool may call
+  with the output it has produced so far; the agent loop relays each call to
+  the client as a `tool_call_update`. It is absent when nothing is listening
+  (a sub-agent's child tools), so tools must treat it as optional."
   [:map
    [:cwd {:optional true} [:maybe :string]]
    [:session-id {:optional true} [:maybe :string]]
@@ -59,7 +64,8 @@
    [:tool-registry {:optional true} :any]
    [:chat-opts {:optional true} [:map]]
    [:max-rounds {:optional true} [:maybe pos-int?]]
-   [:agent-depth {:optional true} [:maybe :int]]])
+   [:agent-depth {:optional true} [:maybe :int]]
+   [:on-output {:optional true} [:maybe fn?]]])
 
 (def tool-result
   "The string result of a tool function (fed back to the model as the content

@@ -3,7 +3,9 @@
   (:require [acp.agent :as acp]
             [clai.providers.ollama.acp :as ollama-acp]
             [clai.test-support :refer [quiet-logs]]
-            [clojure.test :refer :all]))
+            [clojure.string :as str]
+            [clojure.test :refer :all])
+  (:import [java.io File]))
 
 (use-fixtures :once quiet-logs)
 
@@ -39,6 +41,76 @@
                              :content [{:type "text" :text "hi"}]}])))
   (is (= [{:role "assistant" :content "yo"}]
          (prompt->messages [{:role "assistant" :content "yo"}]))))
+
+;; ---------------------------------------------------------------------------
+;; Resource blocks
+;; ---------------------------------------------------------------------------
+
+(defn- temp-text-file
+  "Create a temporary file containing `content`. Caller must delete it."
+  [content]
+  (let [f (File/createTempFile "clai-resource" ".txt")]
+    (spit f content)
+    f))
+
+(deftest resource-link-blocks-are-converted-not-dropped
+  (let [f (temp-text-file "the file body")]
+    (try
+      (let [[msg] (prompt->messages
+                   [{:type "text" :text "please read"}
+                    {:type "resource_link"
+                     :name "notes.txt"
+                     :uri (str (.toURI f))
+                     :mimeType "text/plain"
+                     :description "my notes"}])]
+        (is (= "user" (:role msg)))
+        (is (str/includes? (:content msg) "please read"))
+        (is (str/includes? (:content msg) "notes.txt"))
+        (is (str/includes? (:content msg) "the file body"))
+        (is (str/includes? (:content msg) "my notes")))
+      (finally (.delete f)))))
+
+(deftest resource-link-with-unreadable-target-still-describes-it
+  (let [[msg] (prompt->messages
+               [{:type "resource_link"
+                 :name "missing.txt"
+                 :uri "file:///definitely/not/here/missing.txt"}])
+        content (:content msg)]
+    (is (str/includes? content "missing.txt"))
+    (is (str/includes? content "file:///definitely/not/here/missing.txt"))
+    (is (str/includes? content "unavailable"))))
+
+(deftest resource-link-uses-cwd-for-relative-paths
+  (let [f (temp-text-file "relative body")]
+    (try
+      (let [name (.getName f)
+            [msg] (prompt->messages
+                   [{:type "resource_link" :name name :uri name}]
+                   {:cwd (.getPath (.getParentFile f))})]
+        (is (str/includes? (:content msg) "relative body")))
+      (finally (.delete f)))))
+
+(deftest embedded-text-resource-is-inlined
+  (let [[msg] (prompt->messages
+               [{:type "resource"
+                 :resource {:uri "file:///tmp/inline.txt"
+                            :mimeType "text/plain"
+                            :text "inline contents"}}])]
+    (is (str/includes? (:content msg) "inline contents"))))
+
+(deftest resource-block-in-role-tagged-message
+  (let [[msg] (prompt->messages
+               [{:role "user"
+                 :content [{:type "resource"
+                            :resource {:uri "file:///tmp/inline.txt"
+                                       :text "role tagged"}}]}])]
+    (is (= "user" (:role msg)))
+    (is (str/includes? (:content msg) "role tagged"))))
+
+(deftest existing-text-and-image-behaviour-is-preserved
+  (is (= [{:role "user" :content "look"}]
+         (prompt->messages [{:type "text" :text "look"}
+                            {:type "image" :data "..."}]))))
 
 ;; ---------------------------------------------------------------------------
 ;; History replay

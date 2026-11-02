@@ -8,6 +8,7 @@
   a session."
   (:require [acp.agent :as acp]
             [clai.log]
+            [clai.resources :as resources]
             [clojure.string :as str]
             [taoensso.telemere :as tel]))
 
@@ -16,27 +17,47 @@
 ;; ---------------------------------------------------------------------------
 
 (defn- part->text
-  "Extract a plain-text string from a single ACP content part. Non-text
-  parts (images, etc.) are dropped, since Ollama chat wants text here."
-  [part]
+  "Extract a plain-text string from a single ACP content part.
+
+  Text parts contribute their `:text`. Resource parts are rendered by
+  `clai.resources` so links to files (and embedded resources) reach the model
+  as text instead of being silently dropped. Other parts (images, audio,
+  etc.) are dropped, since Ollama chat wants text here.
+
+  `opts` is threaded through to the resource renderers and may contain a
+  `:cwd` for resolving relative resource paths."
+  [part opts]
   (cond
-    (string? part)            part
+    (string? part) part
+
     (map? part)
-    (cond
-      (= (:type part) "text") (:text part)
-      (some? (:text part))    (:text part)     ; tolerant of variants
-      :else                   nil)
+    (let [t (cond
+              (keyword? (:type part)) (name (:type part))
+              (string? (:type part))  (:type part)
+              :else                   nil)]
+      (cond
+        (= t "text")          (:text part)
+        (= t "resource_link") (resources/resource-link->text part opts)
+        (= t "resource")      (resources/embedded-resource->text part opts)
+        (some? (:text part))  (:text part)     ; tolerant of variants
+        :else                 nil))
+
     :else nil))
 
 (defn- content->text
   "Flatten an ACP `content` field (a string or a sequence of parts) to a
   single string, dropping nils and joining with newlines."
-  [content]
-  (cond
-    (nil? content)        ""
-    (string? content)     content
-    (sequential? content) (->> content (map part->text) (remove nil?) (interpose "\n") (apply str))
-    :else                 (str content)))
+  ([content] (content->text content nil))
+  ([content opts]
+   (cond
+     (nil? content)        ""
+     (string? content)     content
+     (sequential? content) (->> content
+                                (map #(part->text % opts))
+                                (remove nil?)
+                                (interpose "\n")
+                                (apply str))
+     :else                 (str content))))
 
 (defn- role->string
   "Normalize an ACP `role` (string or keyword) to its Ollama string form,
@@ -50,9 +71,9 @@
 (defn- acp-message->ollama
   "Convert one role-tagged ACP `Message` (`{:role ... :content [...]}`) to an
   Ollama chat message (`{:role ... :content \"...\"}`)."
-  [{:keys [role content]}]
-  {:role    (role->string role)
-   :content (content->text content)})
+  [message opts]
+  {:role    (role->string (:role message))
+   :content (content->text (:content message) opts)})
 
 (defn- prompt-entry->ollama
   "Convert one entry of an ACP `session/prompt` `:prompt` vector to an Ollama
@@ -63,10 +84,10 @@
   blocks carry the text itself, not a `:content` field. A role-tagged message
   map is accepted too, for tolerance of simpler clients and the echo example
   in `acp.agent`."
-  [entry]
+  [entry opts]
   (if (contains? entry :content)
-    (acp-message->ollama entry)
-    {:role "user" :content (content->text [entry])}))
+    (acp-message->ollama entry opts)
+    {:role "user" :content (content->text [entry] opts)}))
 
 (defn acp-prompt->ollama-messages
   "Normalize the `:prompt` field of a `session/prompt` request to a vector of
@@ -75,17 +96,23 @@
   ACP v2 sends `:prompt` as a vector of `ContentBlock`s, so the blocks are
   flattened into a single `user` message whose content is their concatenated
   text. A vector of role-tagged messages is also handled (one Ollama message
-  per entry), as are a bare string and a single map."
-  [prompt]
-  (cond
-    (nil? prompt)             []
-    (string? prompt)          [{:role "user" :content prompt}]
-    (map? prompt)             [(prompt-entry->ollama prompt)]
-    (sequential? prompt)      (if (every? #(and (map? %) (contains? % :content))
-                                          prompt)
-                                (mapv prompt-entry->ollama prompt)
-                                [{:role "user" :content (content->text prompt)}])
-    :else                     [{:role "user" :content (str prompt)}]))
+  per entry), as are a bare string and a single map.
+
+  Resource blocks (`resource_link` and `resource`) are rendered as text rather
+  than dropped; see `clai.resources`. The optional `opts` map is threaded to
+  those renderers and may contain a `:cwd` for resolving relative resource
+  paths."
+  ([prompt] (acp-prompt->ollama-messages prompt nil))
+  ([prompt opts]
+   (cond
+     (nil? prompt)         []
+     (string? prompt)      [{:role "user" :content prompt}]
+     (map? prompt)         [(prompt-entry->ollama prompt opts)]
+     (sequential? prompt)  (if (every? #(and (map? %) (contains? % :content))
+                                       prompt)
+                             (mapv #(prompt-entry->ollama % opts) prompt)
+                             [{:role "user" :content (content->text prompt opts)}])
+     :else                 [{:role "user" :content (str prompt)}])))
 
 ;; ---------------------------------------------------------------------------
 ;; Ollama history -> ACP session updates

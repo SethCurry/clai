@@ -211,20 +211,13 @@
 
        (handle-session-prompt [_ conn {:keys [sessionId prompt]}]
          (let [msg-id (str (UUID/randomUUID))]
-           (if-not (state/load-session sessionId)
-             ;; Unknown session: tell the client and bail.
-             (do
-               (tel/log! {:level :warn
-                          :id    ::unknown-session-prompt
-                          :data  {:sessionId sessionId}}
-                         "Received prompt for unknown session")
-               (acp/send-agent-message-chunk conn sessionId
-                                  (str "No session " sessionId))
-               {:stopReason "end_turn"})
+           (if-let [session (state/load-session sessionId)]
              ;; Append the incoming prompt, then drive the Ollama conversation
              ;; to completion -- executing any tool calls the model makes along
-             ;; the way -- and relay the final reply.
-             (let [incoming (ollama-acp/acp-prompt->ollama-messages prompt)
+             ;; the way -- and relay the final reply. Passing `:cwd` lets the
+             ;; prompt converter read local resource links relative to it.
+             (let [incoming (ollama-acp/acp-prompt->ollama-messages
+                              prompt {:cwd (:cwd session)})
                    _        (run! #(state/append-history sessionId %) incoming)
                    _        (tel/log! {:level :info
                                       :id    ::prompt-received
@@ -249,6 +242,15 @@
                                   :chars     (count (str reply))}}
                          "Prompt complete")
                (acp/send-agent-message-chunk conn sessionId (str reply))
+               {:stopReason "end_turn"})
+             ;; Unknown session: tell the client and bail.
+             (do
+               (tel/log! {:level :warn
+                          :id    ::unknown-session-prompt
+                          :data  {:sessionId sessionId}}
+                         "Received prompt for unknown session")
+               (acp/send-agent-message-chunk conn sessionId
+                                  (str "No session " sessionId))
                {:stopReason "end_turn"}))))
 
        (on-session-cancel [_ _conn {:keys [sessionId]}]
