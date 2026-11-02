@@ -29,9 +29,11 @@
   `[sessionId update]` pairs sent to the client (`updates`).
 
   `reply` is either the assistant message text or a full message map (for
-  example to include a `:thinking` field)."
-  [reply f]
-  (let [requests (atom [])
+  example to include a `:thinking` field). `agent-opts` is merged into the
+  options passed to `agent/ollama-agent`, so tests can supply a `:cfg`."
+  ([reply f] (run-with-stubbed-ollama reply {} f))
+  ([reply agent-opts f]
+   (let [requests (atom [])
         updates  (atom [])]
     (with-redefs [ollama/chat
                   (fn [_client req]
@@ -49,10 +51,12 @@
                   (fn [_conn sid update]
                     (schemas/->SessionUpdate update)
                     (swap! updates conj [sid update]))]
-      (let [handler (agent/ollama-agent {:cfg    {}
-                                         :client test-client
-                                         :model  "stub-model"})]
-        (f handler requests updates)))))
+      (let [handler (agent/ollama-agent
+                     (merge {:cfg    {}
+                             :client test-client
+                             :model  "stub-model"}
+                            agent-opts))]
+        (f handler requests updates))))))
 
 (deftest session-prompt-sends-user-text-to-ollama
   (run-with-stubbed-ollama
@@ -74,6 +78,82 @@
          (is (= sessionId sid))
          (is (= "agent_message_chunk" (:sessionUpdate update)))
          (is (= "pong" (get-in update [:content :text]))))))))
+
+(defn- temp-dir
+  "Create an empty temporary directory for a test."
+  []
+  (doto (.toFile (java.nio.file.Files/createTempDirectory
+                  "clai-agent-test"
+                  (make-array java.nio.file.attribute.FileAttribute 0)))
+    (.deleteOnExit)))
+
+(deftest session-new-appends-agents-md-to-system-prompt
+  (let [dir    (temp-dir)
+        agents (File. dir "AGENTS.md")]
+    (try
+      (spit agents "Project rules.")
+      (run-with-stubbed-ollama
+       "pong"
+       {:cfg {:system-prompt "base prompt"}}
+       (fn [handler requests _updates]
+         (let [{:keys [sessionId]} (acp/handle-session-new
+                                    handler nil {:cwd (.getPath dir)})]
+           (is (= [{:role "system" :content "base prompt\n\nProject rules."}]
+                  (take 1 (:history (state/load-session sessionId))))
+               "AGENTS.md is appended to the configured system prompt")
+           (acp/handle-session-prompt
+            handler nil
+            {:sessionId sessionId
+             :prompt    [{:type "text" :text "ping"}]})
+           (is (= "base prompt\n\nProject rules."
+                  (-> @requests first :messages first :content))
+               "the model receives AGENTS.md before the first user turn"))))
+      (finally
+        (.delete agents)
+        (.delete dir)))))
+
+(deftest session-new-uses-agents-md-without-configured-system-prompt
+  (let [dir    (temp-dir)
+        agents (File. dir "AGENTS.md")]
+    (try
+      (spit agents "Only project rules.")
+      (run-with-stubbed-ollama
+       "pong"
+       (fn [handler requests _updates]
+         (let [{:keys [sessionId]} (acp/handle-session-new
+                                    handler nil {:cwd (.getPath dir)})]
+           (is (= [{:role "system" :content "Only project rules."}]
+                  (take 1 (:history (state/load-session sessionId)))))
+           (acp/handle-session-prompt
+            handler nil
+            {:sessionId sessionId
+             :prompt    [{:type "text" :text "ping"}]})
+           (is (= "Only project rules."
+                  (-> @requests first :messages first :content))))))
+      (finally
+        (.delete agents)
+        (.delete dir)))))
+
+(deftest session-new-ignores-blank-agents-md
+  (let [dir    (temp-dir)
+        agents (File. dir "AGENTS.md")]
+    (try
+      (spit agents "   \n\t")
+      (run-with-stubbed-ollama
+       "pong"
+       (fn [handler _requests _updates]
+         (let [{:keys [sessionId]} (acp/handle-session-new
+                                    handler nil {:cwd (.getPath dir)})]
+           (acp/handle-session-prompt
+            handler nil
+            {:sessionId sessionId
+             :prompt    [{:type "text" :text "ping"}]})
+           (is (= [{:role "user" :content "ping"}]
+                  (take 1 (:history (state/load-session sessionId))))
+               "a blank AGENTS.md adds no system message"))))
+      (finally
+        (.delete agents)
+        (.delete dir)))))
 
 (deftest session-prompt-relays-model-thinking
   (run-with-stubbed-ollama

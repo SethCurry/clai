@@ -10,7 +10,8 @@
 ;; built-in defaults, so you only need to set what you want to change.
 
 {:model          "gemma3"
- ;; Optional system prompt prepended to every session's history.
+ ;; Optional system prompt prepended to every session's history. The contents
+ ;; of an AGENTS.md in a new session's working directory are appended to it.
  :system-prompt  "You are a concise, helpful coding agent."
 
  ;; Max consecutive tool-call rounds before the agent gives up.

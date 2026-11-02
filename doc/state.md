@@ -110,8 +110,10 @@ the model must not see should be added here (that is what `:params` is for).
 
 What the agent actually writes, in order:
 
-1. `{:role "system" :content <system-prompt>}` — only when the config has a
-   `:system-prompt`, and only at session creation.
+1. `{:role "system" :content <system-prompt>}` — only at session creation,
+   and only when the config has a `:system-prompt` or the session's `cwd`
+   contains an `AGENTS.md` (whose contents are appended to the configured
+   system prompt, or used as the system prompt when none is configured).
 2. `{:role "user" :content "..."}` — one per incoming ACP prompt, after ACP
    content blocks are flattened to text by `clai.providers.ollama.acp`.
 3. `{:role "assistant" :content "" :tool_calls [...]}` — the model's own tool
@@ -220,7 +222,7 @@ Note the asymmetry: an unknown session is a *silent* no-op for
 
 | ACP call | Storage effect |
 |----------|----------------|
-| `session/new` | `create-session` with the client's `cwd` and the configured model; appends the system prompt when one is configured |
+| `session/new` | `create-session` with the client's `cwd` and the configured model; appends a system message combining the configured system prompt with the `cwd`'s `AGENTS.md` (when either exists) |
 | `session/prompt` | Refuses unknown sessions; otherwise appends the user message(s), then each assistant/tool message the loop produces |
 | `session/load` | `load-session`, persists a changed `cwd` if the client supplies one, then replays `:history` to the client as `session/update` chunks (`user` → `user_message_chunk`, `assistant`/`agent` → `agent_message_chunk`, preceded by `agent_thought_chunk` when the message has `:thinking`; `system` and `tool` messages are internal and not replayed) |
 | `session/list` | `list-session-summaries`, optionally filtered by exact `:cwd` match |

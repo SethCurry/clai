@@ -21,6 +21,7 @@
             [clai.log]
             [clai.state :as state]
             [clai.tools :as tools]
+            [clojure.java.io :as io]
             [clojure.string :as str]
             [malli.instrument :as mi]
             [taoensso.telemere :as tel])
@@ -53,6 +54,55 @@
         (ollama-acp/replay-session-history conn sessionId history)
         {})
       {})))
+
+;; ---------------------------------------------------------------------------
+;; Project instructions
+;; ---------------------------------------------------------------------------
+
+(def ^:private agents-md-filename
+  "The project-instructions file read from a session's working directory."
+  "AGENTS.md")
+
+(defn- read-agents-md
+  "Read `<cwd>/AGENTS.md`, returning its contents as a string.
+
+  Returns nil when `cwd` is blank, the file is absent, unreadable, or blank,
+  so a missing project-instructions file is simply a no-op. Read failures are
+  logged and treated like a missing file rather than failing session setup."
+  [cwd]
+  (when-not (str/blank? (str cwd))
+    (let [f (io/file (str cwd) agents-md-filename)]
+      (try
+        (when (and (.isFile f) (.canRead f))
+          (let [contents (slurp f :encoding "UTF-8")]
+            (when-not (str/blank? contents)
+              contents)))
+        (catch Throwable e
+          (tel/log! {:level :warn
+                     :id    ::agents-md-read-failed
+                     :data  {:path (.getAbsolutePath f)
+                             :error (ex-message e)}}
+                    "Failed to read AGENTS.md; continuing without it")
+          nil)))))
+
+(defn- system-prompt-for
+  "Build a session's system prompt from the configured `sys-prompt` and the
+  `AGENTS.md` in `cwd`.
+
+  Project instructions are appended to the configured system prompt (with a
+  blank line between them); when no system prompt is configured, they become
+  the system prompt. Returns nil when neither is available."
+  [sys-prompt cwd]
+  (let [agents-md (read-agents-md cwd)]
+    (cond
+      (and (some? sys-prompt) (some? agents-md))
+      (str sys-prompt "\n\n" agents-md)
+
+      (some? sys-prompt)
+      sys-prompt
+
+      :else
+      agents-md)))
 
 ;; ---------------------------------------------------------------------------
 ;; Agent tools
@@ -103,7 +153,10 @@
                     `[\"read_file\"]`) selects from the built-ins. Defaults to a
                     fresh built-in registry, so each agent owns its tools. The
                     `:tools` key is accepted as an alias. `cfg`'s `:tools`
-                    vector further selects ids."
+                    vector further selects ids.
+
+  A new session's system prompt is the configured `:system-prompt` followed by
+  the contents of an `AGENTS.md` in the session's `cwd`, if one exists."
   ([] (ollama-agent nil))
   ([opts]
    (let [cfg           (:cfg opts (config/load-config))
@@ -152,10 +205,11 @@
          (acp-errors/acp-error acp-errors/err-method))
 
        (handle-session-new [_ _conn {:keys [cwd]}]
-         (let [session (state/create-session {:cwd cwd :model model})]
-           (when sys-prompt
+         (let [session (state/create-session {:cwd cwd :model model})
+               prompt  (system-prompt-for sys-prompt (:cwd session))]
+           (when (some? prompt)
              (state/append-history (:sessionId session)
-                             {:role "system" :content sys-prompt}))
+                             {:role "system" :content prompt}))
            {:sessionId (:sessionId session)}))
 
        (handle-session-list [_ _conn {:keys [cwd]}]
@@ -181,8 +235,8 @@
 
        (handle-session-resume [_ _ {:keys [sessionId cwd]}]
          ;; If the session is unknown, register a fresh one under the
-         ;; requested id (with the configured system prompt, if any) so
-         ;; resume degrades to new rather than erroring.
+         ;; requested id (with the configured system prompt plus any
+         ;; AGENTS.md in cwd) so resume degrades to new rather than erroring.
          (if-let [session (state/load-session sessionId)]
            (do
              (when (and (some? cwd) (not= (str cwd) (:cwd session)))
@@ -191,10 +245,11 @@
                         :id    ::session-resumed
                         :data  {:sessionId sessionId}}
                        "Resumed existing session"))
-           (state/register-session sessionId cwd
-                                   (if sys-prompt
-                                     [{:role "system" :content sys-prompt}]
-                                     [])))
+           (let [prompt (system-prompt-for sys-prompt (str (or cwd ".")))]
+             (state/register-session sessionId cwd
+                                     (if (some? prompt)
+                                       [{:role "system" :content prompt}]
+                                       []))))
          {:sessionId sessionId})
 
        (handle-session-close [_ _conn {:keys [sessionId]}]
