@@ -37,21 +37,6 @@
 ;; ACP tool-call updates
 ;; ---------------------------------------------------------------------------
 
-(def ^:private tool-name->kind
-  "Maps built-in tool ids to ACP `ToolKind` values. Unknown tools fall
-  back to `other`."
-  {"read_file"      "read"
-   "write_file"     "edit"
-   "list_directory" "search"
-   "run_command"    "execute"
-   "eval_clojure"   "execute"
-   "spawn_agent"    "execute"})
-
-(defn- tool-call-kind
-  "Resolve the ACP `ToolKind` for an Ollama tool call."
-  [call]
-  (or (tool-name->kind (ollama/tool-call-name call)) "other"))
-
 (defn- tool-call-raw-input
   "Return the parsed arguments of an Ollama tool call as a map suitable for
   the ACP `rawInput` field."
