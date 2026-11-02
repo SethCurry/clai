@@ -1,7 +1,8 @@
 (ns clai.test-support
   "Shared helpers for the test suite."
   (:require [clai.log]
-            [taoensso.telemere :as tel]))
+            [taoensso.telemere :as tel]
+            [malli.instrument :as mi]))
 
 (def ^:private agent-threads
   "Threads started by `track-thread!`, awaiting `join-agent-threads!`."
@@ -46,3 +47,8 @@
       (f)
       (finally
         (tel/set-min-level! (or previous :info))))))
+
+(defn instrument [f]
+    (mi/instrument!)
+    (f)
+    (mi/unstrument!))

@@ -38,6 +38,7 @@
             [clai.tools :as tools]
             [clojure.edn :as edn]
             [clojure.java.io :as io]
+            [malli.instrument :as mi]
             [taoensso.telemere :as tel])
   (:import [java.io File]))
 

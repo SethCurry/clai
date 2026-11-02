@@ -112,7 +112,7 @@ What the agent actually writes, in order:
 1. `{:role "system" :content <system-prompt>}` — only when the config has a
    `:system-prompt`, and only at session creation.
 2. `{:role "user" :content "..."}` — one per incoming ACP prompt, after ACP
-   content blocks are flattened to text by `clai.agent.messages`.
+   content blocks are flattened to text by `clai.providers.ollama.acp`.
 3. `{:role "assistant" :content "" :tool_calls [...]}` — the model's own tool
    request, stored verbatim so the next round can see it.
 4. `{:role "tool" :content "<result>" :name "read_file" :tool_call_id "..."}`

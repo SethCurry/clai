@@ -1,6 +1,6 @@
-(ns clai.agent.messages-test
-  "Tests for ACP -> Ollama prompt normalization in `clai.agent.messages`."
-  (:require [clai.agent.messages :as messages]
+(ns clai.providers.ollama.acp-test
+  "Tests for ACP -> Ollama prompt normalization in `clai.providers.ollama.acp`."
+  (:require [clai.providers.ollama.acp :as ollama-acp]
             [clai.test-support :refer [quiet-logs]]
             [clojure.test :refer :all]))
 
@@ -8,7 +8,7 @@
 
 (def ^:private prompt->messages
   "The ACP prompt normalizer."
-  #'messages/acp-prompt->ollama-messages)
+  #'ollama-acp/acp-prompt->ollama-messages)
 
 ;; ---------------------------------------------------------------------------
 ;; Prompt normalization

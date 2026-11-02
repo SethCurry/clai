@@ -1,4 +1,4 @@
-(ns clai.agent.messages
+(ns clai.providers.ollama.acp
   "Conversion between ACP wire messages and Ollama chat messages.
 
   ACP clients send prompts as vectors of `ContentBlock`s and expect replies as

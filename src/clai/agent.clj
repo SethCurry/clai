@@ -8,20 +8,21 @@
 
   Supporting pieces live in sibling namespaces:
 
-    * `clai.agent.messages` -- ACP <-> Ollama message conversion and history
-                               replay.
+    * `clai.providers.ollama.acp` -- ACP <-> Ollama message conversion and
+                                     history replay.
     * `clai.agent.loop`     -- the tool-calling chat loop.
     * `clai.config`         -- config/env resolution for the agent's model,
                                client, tools, and chat options."
   (:require [acp.agent :as acp]
             [acp.errors :as acp-errors]
             [clai.agent.loop :as agent-loop]
-            [clai.agent.messages :as messages]
             [clai.config :as config]
+            [clai.providers.ollama.acp :as ollama-acp]
             [clai.log]
             [clai.state :as state]
             [clai.tools :as tools]
             [clojure.string :as str]
+            [malli.instrument :as mi]
             [taoensso.telemere :as tel])
   (:import [java.util UUID]))
 
@@ -49,7 +50,7 @@
                            :cwd       (:cwd session)
                            :messages  (count history)}}
                   "Loaded session")
-        (messages/replay-session-history conn sessionId history)
+        (ollama-acp/replay-session-history conn sessionId history)
         {})
       {})))
 
@@ -223,7 +224,7 @@
              ;; Append the incoming prompt, then drive the Ollama conversation
              ;; to completion -- executing any tool calls the model makes along
              ;; the way -- and relay the final reply.
-             (let [incoming (messages/acp-prompt->ollama-messages prompt)
+             (let [incoming (ollama-acp/acp-prompt->ollama-messages prompt)
                    _        (run! #(state/append-history sessionId %) incoming)
                    _        (tel/log! {:level :info
                                       :id    ::prompt-received

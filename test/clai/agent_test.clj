@@ -6,10 +6,11 @@
             [acp.schema.core :as schemas]
             [clai.agent :as agent]
             [clai.providers.ollama :as ollama]
-            [clai.test-support :refer [quiet-logs]]
+            [clai.test-support :refer [quiet-logs instrument]]
             [clojure.test :refer :all]))
 
 (use-fixtures :once quiet-logs)
+(use-fixtures :once instrument)
 
 (def ^:private test-client
   (ollama/make-client {:host "http://localhost:11434" :timeout 1000}))

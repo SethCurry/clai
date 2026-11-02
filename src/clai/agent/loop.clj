@@ -67,10 +67,9 @@
     (acp/send-session-update conn session-id
       {:_meta        nil
        :sessionUpdate "tool_call"
-       :kind          (tool-call-kind call)
-       :name          (ollama/tool-call-name call)
-       :rawInput      (tool-call-raw-input call)
-       :title         (ollama/tool-call-title call)
+       :name (ollama/tool-call-name call)
+       :title          (ollama/tool-call-title call)
+       :rawInput (tool-call-raw-input call)
        :toolCallId    id
        :status        "in_progress"})
     id))
@@ -101,9 +100,11 @@
       {:_meta        nil
        :sessionUpdate "tool_call_update"
        :content       content
-       :rawOutput     {:result result}
-       :toolCallId    id
-       :status        status})))
+       :toolCallId    id})
+    (acp/send-session-update conn session-id
+      {:sessionUpdate "tool_call_update"
+       :toolCallId id
+       :status status})))
 
 ;; ---------------------------------------------------------------------------
 ;; Tool rounds
