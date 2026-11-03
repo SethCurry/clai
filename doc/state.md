@@ -83,9 +83,9 @@ the map as read, and `save-session` writes back whatever map it is given.
 
 The authoritative description of this shape is the Malli schema
 `clai.state/session`; `clai.state/session-summary` is the same map minus
-`:history`. Note that these schemas are *documentation* — there is no runtime
-validation on read or write, so a hand-edited file with missing or
-mis-typed keys will be loaded as-is and may fail later.
+`:history`. These schemas are enforced at runtime by Malli instrumentation
+(see `clai.instrument`), so a hand-edited file with missing or mis-typed keys
+fails `load-session` rather than being returned as-is.
 
 ### Message maps (`:history` entries)
 

@@ -6,6 +6,7 @@
   `clai.tools` rather than relying on global tool state."
   (:require [acp.agent :as acp]
             [clai.agent :as agent]
+            [clai.instrument :as instrument]
             [clai.log]
             [taoensso.telemere :as tel])
   (:gen-class))
@@ -24,6 +25,7 @@
   `session/prompt` requests by calling the Ollama chat API. Blocks until stdin
   reaches EOF (the client disconnected)."
   [& _args]
+  (instrument/start!)
   (tel/log! {:level :info :id ::agent-starting}
             "Starting clai ACP agent over stdio")
   (try

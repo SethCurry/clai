@@ -306,7 +306,7 @@
 
 (deftest blob-exists-false-on-404
   (reset! *stub-response* {:status 404 :body nil})
-  (is (false? (ollama/blob-exists? sample-client "sha256:missing"))))
+  (is (false? (ollama/blob-exists? sample-client "sha256:deadbeef"))))
 
 (deftest create-blob-posts-octet-stream
   (reset! *stub-response* {:status 201 :body nil})
