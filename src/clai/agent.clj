@@ -17,43 +17,49 @@
             [acp.errors :as acp-errors]
             [clai.agent.loop :as agent-loop]
             [clai.config :as config]
-            [clai.providers.ollama.acp :as ollama-acp]
             [clai.log]
+            [clai.providers.ollama.acp :as ollama-acp]
             [clai.state :as state]
             [clai.tools :as tools]
             [clojure.java.io :as io]
             [clojure.string :as str]
-            [malli.instrument :as mi]
             [taoensso.telemere :as tel])
   (:import [java.util UUID]))
 
 ;; ---------------------------------------------------------------------------
-;; session/load
+;; Protocol negotiation
 ;; ---------------------------------------------------------------------------
 
-(defn- handle-session-load
-  "Handle an ACP `session/load` request: restore the persisted session, replay
-  its conversation history to the client, and return a `LoadSessionResponse`."
-  [conn {:keys [sessionId cwd]}]
-  (cond
-    (str/blank? (str sessionId))
-    (acp-errors/acp-error acp-errors/err-params "Missing sessionId")
+(def ^:private agent-info
+  "Implementation info advertised in the `initialize` response."
+  {:name    "clai"
+   :title   "clai agent"
+   :version "0.1.0-SNAPSHOT"})
 
-    :else
-    (if-let [session (state/load-session sessionId)]
-      (let [session (if (and (some? cwd) (not= (str cwd) (:cwd session)))
-                      (state/save-session (assoc session :cwd (str cwd)))
-                      session)
-            history (or (:history session) [])]
-        (tel/log! {:level :info
-                   :id    ::session-loaded
-                   :data  {:sessionId sessionId
-                           :cwd       (:cwd session)
-                           :messages  (count history)}}
-                  "Loaded session")
-        (ollama-acp/replay-session-history conn sessionId history)
-        {})
-      {})))
+(def ^:private agent-capabilities
+  "Capabilities advertised in the `initialize` response."
+  {:loadSession         true
+   :sessionCapabilities {:list   {}
+                         :delete {}
+                         :resume {}
+                         :close  {}}})
+
+(defn- initialize-response
+  "Build the `initialize` response, negotiating the highest ACP version the
+  agent supports at or below the client's request."
+  [requested-version]
+  (let [negotiated (min acp/protocol-version-2
+                        (long (or requested-version acp/protocol-version-2)))]
+    (tel/log! {:level :debug
+               :id    ::initialize
+               :data  {:client-protocol requested-version
+                       :negotiated      negotiated}}
+              "Initialized ACP connection")
+    {:protocolVersion   negotiated
+     :info              agent-info
+     :agentInfo         agent-info
+     :capabilities      agent-capabilities
+     :agentCapabilities agent-capabilities}))
 
 ;; ---------------------------------------------------------------------------
 ;; Project instructions
@@ -71,16 +77,16 @@
   logged and treated like a missing file rather than failing session setup."
   [cwd]
   (when-not (str/blank? (str cwd))
-    (let [f (io/file (str cwd) agents-md-filename)]
+    (let [file (io/file (str cwd) agents-md-filename)]
       (try
-        (when (and (.isFile f) (.canRead f))
-          (let [contents (slurp f :encoding "UTF-8")]
+        (when (and (.isFile file) (.canRead file))
+          (let [contents (slurp file :encoding "UTF-8")]
             (when-not (str/blank? contents)
               contents)))
         (catch Throwable e
           (tel/log! {:level :warn
                      :id    ::agents-md-read-failed
-                     :data  {:path (.getAbsolutePath f)
+                     :data  {:path  (str file)
                              :error (ex-message e)}}
                     "Failed to read AGENTS.md; continuing without it")
           nil)))))
@@ -94,47 +100,276 @@
   the system prompt. Returns nil when neither is available."
   [sys-prompt cwd]
   (let [agents-md (read-agents-md cwd)]
-    (cond
-      (and (some? sys-prompt) (some? agents-md))
-      (str sys-prompt "\n\n" agents-md)
+    (when (or (some? sys-prompt) (some? agents-md))
+      (str/join "\n\n" (remove nil? [sys-prompt agents-md])))))
 
-      (some? sys-prompt)
-      sys-prompt
+;; ---------------------------------------------------------------------------
+;; Session helpers
+;; ---------------------------------------------------------------------------
 
-      :else
-      agents-md)))
+(defn- sync-session-cwd
+  "Return `session` with `:cwd` replaced by `cwd` -- persisting the change --
+  when the client supplied a different working directory."
+  [session cwd]
+  (if (and (some? cwd) (not= (str cwd) (:cwd session)))
+    (state/save-session (assoc session :cwd (str cwd)))
+    session))
+
+(defn- system-history
+  "The opening history for a new session: a system message when `prompt` is
+  non-nil, otherwise nothing."
+  [prompt]
+  (if (some? prompt)
+    [{:role "system" :content prompt}]
+    []))
+
+(defn- session-summary
+  "Shape one `state/list-session-summaries` entry as an ACP session summary."
+  [{:keys [sessionId cwd updatedAt]}]
+  (cond-> {:sessionId sessionId
+           :cwd       (or cwd "")}
+    (some? updatedAt) (assoc :updatedAt updatedAt)))
 
 ;; ---------------------------------------------------------------------------
 ;; Agent tools
 ;; ---------------------------------------------------------------------------
 
+(defn- base-registry
+  "Build the tool registry described by `opts`, before config-driven
+  narrowing.
+
+  `:tool-registry` (or its `:tools` alias) may be a registry map, a
+  collection of tool maps, or a collection of built-in ids. Absent, the
+  built-ins are used."
+  [opts]
+  (let [provided (or (:tool-registry opts) (:tools opts))]
+    (cond
+      (nil? provided)
+      (tools/built-in-registry)
+
+      (and (sequential? provided) (not-every? map? provided))
+      (tools/select-tools (tools/built-in-registry) provided)
+
+      :else
+      (tools/make-registry provided))))
+
 (defn- resolve-tool-registry
   "Build this agent's private tool registry from `opts` and `cfg`.
 
-  `opts` may carry a tool registry or collection of tool maps as
-  `:tool-registry` (or the `:tools` alias). A collection of ids is resolved
-  against the built-in tools, which is also the default when neither option is
-  supplied. When `cfg` contains a `:tools` vector, the registry is narrowed to
-  those ids."
+  When `cfg` contains a `:tools` vector, the registry is narrowed to those
+  ids."
   [cfg opts]
-  (let [provided (or (:tool-registry opts) (:tools opts))
-        base     (cond
-                   (nil? provided)
-                   (tools/built-in-registry)
+  (cond-> (base-registry opts)
+    (contains? cfg :tools) (tools/select-tools (:tools cfg))))
 
-                   (and (sequential? provided)
-                        (not-every? map? provided))
-                   (tools/select-tools (tools/built-in-registry) provided)
+;; ---------------------------------------------------------------------------
+;; Request handlers
+;; ---------------------------------------------------------------------------
 
-                   :else
-                   (tools/make-registry provided))]
-    (if (contains? cfg :tools)
-      (tools/select-tools base (:tools cfg))
-      base)))
+(defn- load-session!
+  "Handle the `session/load` extension request: restore the persisted session,
+  replay its conversation history to the client, and return an empty result."
+  [conn {:keys [sessionId cwd]}]
+  (if (str/blank? (str sessionId))
+    (acp-errors/acp-error acp-errors/err-params "Missing sessionId")
+    (if-let [session (state/load-session sessionId)]
+      (let [session (sync-session-cwd session cwd)
+            history (:history session [])]
+        (tel/log! {:level :info
+                   :id    ::session-loaded
+                   :data  {:sessionId sessionId
+                           :cwd       (:cwd session)
+                           :messages  (count history)}}
+                  "Loaded session")
+        (ollama-acp/replay-session-history conn sessionId history)
+        {})
+      {})))
+
+(defn- new-session!
+  "Handle `session/new`: create a session with the configured model and
+  record its system prompt (configured prompt plus any `AGENTS.md`)."
+  [sys-prompt model {:keys [cwd]}]
+  (let [session (state/create-session {:cwd cwd :model model})]
+    (run! #(state/append-history (:sessionId session) %)
+          (system-history (system-prompt-for sys-prompt (:cwd session))))
+    {:sessionId (:sessionId session)}))
+
+(defn- list-session-summaries
+  "Handle `session/list`, optionally filtered to a working directory."
+  [{:keys [cwd]}]
+  (let [sessions (cond->> (state/list-session-summaries)
+                   (some? cwd) (filter #(= cwd (:cwd %))))]
+    (tel/log! {:level :debug
+               :id    ::session-list
+               :data  {:count (count sessions)}}
+              "Listed sessions")
+    {:sessions (mapv session-summary sessions)}))
+
+(defn- delete-session!
+  "Handle `session/delete`: drop the persisted session."
+  [{:keys [sessionId]}]
+  (state/delete-session sessionId)
+  (tel/log! {:level :debug
+             :id    ::session-dropped
+             :data  {:sessionId sessionId}}
+            "Dropped session")
+  {})
+
+(defn- resume-session!
+  "Handle `session/resume`.
+
+  An unknown session is registered under the requested id (with the
+  configured system prompt plus any `AGENTS.md` in `cwd`) so resume degrades
+  to new rather than erroring."
+  [sys-prompt {:keys [sessionId cwd]}]
+  (if-let [session (state/load-session sessionId)]
+    (do
+      (sync-session-cwd session cwd)
+      (tel/log! {:level :debug
+                 :id    ::session-resumed
+                 :data  {:sessionId sessionId}}
+                "Resumed existing session"))
+    (state/register-session sessionId cwd
+                            (system-history
+                             (system-prompt-for sys-prompt (str (or cwd "."))))))
+  {:sessionId sessionId})
+
+(defn- close-session!
+  "Handle `session/close`.
+
+  Closing frees the active session but keeps its persisted history so the
+  client can load it again later; `session/delete` removes it."
+  [{:keys [sessionId]}]
+  (tel/log! {:level :debug
+             :id    ::session-closed
+             :data  {:sessionId sessionId}}
+            "Closed session")
+  {})
+
+(defn- prompt-char-count
+  "Total number of characters in the `:content` of `messages`."
+  [messages]
+  (transduce (map (comp count str :content)) + 0 messages))
+
+(defn- run-prompt!
+  "Handle `session/prompt`.
+
+  Append the incoming prompt, drive the Ollama conversation to completion --
+  executing any tool calls the model makes along the way -- and relay the
+  final reply. Passing `:cwd` to the prompt converter lets it read local
+  resource links relative to the session's working directory."
+  [{:keys [client model tool-registry tool-specs chat-opts max-rounds]}
+   conn
+   {:keys [sessionId prompt]}]
+  (let [message-id (str (UUID/randomUUID))]
+    (if-let [session (state/load-session sessionId)]
+      (let [incoming (ollama-acp/acp-prompt->ollama-messages
+                      prompt {:cwd (:cwd session)})]
+        (run! #(state/append-history sessionId %) incoming)
+        (tel/log! {:level :info
+                   :id    ::prompt-received
+                   :data  {:sessionId sessionId
+                           :messages  (count incoming)
+                           :chars     (prompt-char-count incoming)}}
+                  "Received prompt")
+        (let [reply (agent-loop/run-agent-loop
+                     conn sessionId
+                     {:client        client
+                      :model         model
+                      :tool-registry tool-registry
+                      :tool-specs    tool-specs
+                      :chat-opts     chat-opts
+                      :max-rounds    max-rounds})]
+          (tel/log! {:level :info
+                     :id    ::prompt-complete
+                     :data  {:sessionId sessionId
+                             :messageId message-id
+                             :chars     (count (str reply))}}
+                    "Prompt complete")
+          (acp/send-agent-message-chunk conn sessionId (str reply))
+          {:stopReason "end_turn"}))
+      ;; Unknown session: tell the client and bail.
+      (do
+        (tel/log! {:level :warn
+                   :id    ::unknown-session-prompt
+                   :data  {:sessionId sessionId}}
+                  "Received prompt for unknown session")
+        (acp/send-agent-message-chunk conn sessionId (str "No session " sessionId))
+        {:stopReason "end_turn"}))))
 
 ;; ---------------------------------------------------------------------------
 ;; Agent handler
 ;; ---------------------------------------------------------------------------
+
+;; The configured agent handler. Its fields are the per-agent state the
+;; request handlers need: the resolved config, the Ollama client, the model,
+;; the tool registry and the specs derived from it, the tool-round cap, and
+;; the system prompt.
+(defrecord ClaiAgent
+  [cfg client model tool-registry tool-specs max-rounds sys-prompt chat-opts]
+  acp/AgentHandler
+  (handle-initialize [_ _conn {:keys [protocolVersion]}]
+    (initialize-response protocolVersion))
+
+  (handle-authenticate [_ _conn _params]
+    (acp-errors/acp-error acp-errors/err-method))
+
+  (handle-logout [_ _conn _params]
+    (acp-errors/acp-error acp-errors/err-method))
+
+  (handle-session-new [_ _conn params]
+    (new-session! sys-prompt model params))
+
+  (handle-session-list [_ _conn params]
+    (list-session-summaries params))
+
+  (handle-session-delete [_ _conn params]
+    (delete-session! params))
+
+  (handle-session-resume [_ _conn params]
+    (resume-session! sys-prompt params))
+
+  (handle-session-close [_ _conn params]
+    (close-session! params))
+
+  (handle-session-set-config-option [_ _conn _params]
+    (acp-errors/acp-error acp-errors/err-method))
+
+  (handle-session-prompt [agent conn params]
+    (run-prompt! agent conn params))
+
+  (on-session-cancel [_ _conn {:keys [sessionId]}]
+    ;; No background work to cancel for the synchronous handler; the
+    ;; in-flight `session/prompt` already returns on its own.
+    (tel/log! {:level :debug
+               :id    ::session-cancel
+               :data  {:sessionId sessionId}}
+              "Session cancelled")
+    nil)
+
+  (on-cancel-request [_ _conn params]
+    (tel/log! {:level :debug
+               :id    ::cancel-request
+               :data  {:requestId (:requestId params)}}
+              "Cancel request received")
+    nil)
+
+  (on-notification [_ _conn method _params]
+    (tel/log! {:level :debug
+               :id    ::extension-notification
+               :data  {:method method}}
+              "Ignoring extension notification")
+    nil)
+
+  (on-ext-request [_ conn method params]
+    (case method
+      "session/load" (load-session! conn params)
+      (do
+        (tel/log! {:level :debug
+                   :id    ::extension-request
+                   :data  {:method method}}
+                  "Rejecting extension request")
+        (acp-errors/acp-error acp-errors/err-method)))))
 
 (defn ollama-agent
   "Build an `AgentHandler` that answers prompts using an Ollama chat model.
@@ -159,9 +394,9 @@
   the contents of an `AGENTS.md` in the session's `cwd`, if one exists."
   ([] (ollama-agent nil))
   ([opts]
-   (let [cfg           (:cfg opts (config/load-config))
-         client        (:client opts (config/make-ollama-client cfg))
-         model         (:model opts (config/resolve-model cfg))
+   (let [cfg           (or (:cfg opts) (config/load-config))
+         client        (or (:client opts) (config/make-ollama-client cfg))
+         model         (or (:model opts) (config/resolve-model cfg))
          tool-registry (resolve-tool-registry cfg opts)
          tool-specs    (tools/specs tool-registry)
          max-rounds    (config/resolve-max-tool-rounds cfg)
@@ -175,166 +410,11 @@
                         :system-prompt? (some? sys-prompt)
                         :host           (:host client)}}
                "Configured clai agent")
-     (reify acp/AgentHandler
-       (handle-initialize [_ _conn {:keys [protocolVersion]}]
-         (let [negotiated (min acp/protocol-version-2
-                               (long (or protocolVersion 2)))
-               capabilities {:loadSession true
-                             :sessionCapabilities {:list   {}
-                                                   :delete {}
-                                                   :resume {}
-                                                   :close  {}}}
-               info         {:name    "clai"
-                             :title   "clai agent"
-                             :version "0.1.0-SNAPSHOT"}]
-           (tel/log! {:level :debug
-                      :id    ::initialize
-                      :data  {:client-protocol protocolVersion
-                              :negotiated      negotiated}}
-                     "Initialized ACP connection")
-           {:protocolVersion   negotiated
-            :info              info
-            :agentInfo         info
-            :capabilities      capabilities
-            :agentCapabilities capabilities}))
-
-       (handle-authenticate [_ _conn _params]
-         (acp-errors/acp-error acp-errors/err-method))
-
-       (handle-logout [_ _conn _params]
-         (acp-errors/acp-error acp-errors/err-method))
-
-       (handle-session-new [_ _conn {:keys [cwd]}]
-         (let [session (state/create-session {:cwd cwd :model model})
-               prompt  (system-prompt-for sys-prompt (:cwd session))]
-           (when (some? prompt)
-             (state/append-history (:sessionId session)
-                             {:role "system" :content prompt}))
-           {:sessionId (:sessionId session)}))
-
-       (handle-session-list [_ _conn {:keys [cwd]}]
-         (let [sessions (cond->> (state/list-session-summaries)
-                          (some? cwd) (filter #(= cwd (:cwd %))))]
-           (tel/log! {:level :debug
-                      :id    ::session-list
-                      :data  {:count (count sessions)}}
-                     "Listed sessions")
-           {:sessions (mapv (fn [{:keys [sessionId cwd updatedAt]}]
-                              (cond-> {:sessionId sessionId
-                                       :cwd       (or cwd "")}
-                                (some? updatedAt) (assoc :updatedAt updatedAt)))
-                            sessions)}))
-
-       (handle-session-delete [_ _conn {:keys [sessionId]}]
-         (state/delete-session sessionId)
-         (tel/log! {:level :debug
-                    :id    ::session-dropped
-                    :data  {:sessionId sessionId}}
-                   "Dropped session")
-         {})
-
-       (handle-session-resume [_ _ {:keys [sessionId cwd]}]
-         ;; If the session is unknown, register a fresh one under the
-         ;; requested id (with the configured system prompt plus any
-         ;; AGENTS.md in cwd) so resume degrades to new rather than erroring.
-         (if-let [session (state/load-session sessionId)]
-           (do
-             (when (and (some? cwd) (not= (str cwd) (:cwd session)))
-               (state/save-session (assoc session :cwd (str cwd))))
-             (tel/log! {:level :debug
-                        :id    ::session-resumed
-                        :data  {:sessionId sessionId}}
-                       "Resumed existing session"))
-           (let [prompt (system-prompt-for sys-prompt (str (or cwd ".")))]
-             (state/register-session sessionId cwd
-                                     (if (some? prompt)
-                                       [{:role "system" :content prompt}]
-                                       []))))
-         {:sessionId sessionId})
-
-       (handle-session-close [_ _conn {:keys [sessionId]}]
-         ;; Closing frees the active session but keeps its persisted history so
-         ;; the client can load it again later; `session/delete` removes it.
-         (tel/log! {:level :debug
-                    :id    ::session-closed
-                    :data  {:sessionId sessionId}}
-                   "Closed session")
-         {})
-
-       (handle-session-set-config-option [_ _conn _params]
-         (acp-errors/acp-error acp-errors/err-method))
-
-       (handle-session-prompt [_ conn {:keys [sessionId prompt]}]
-         (let [msg-id (str (UUID/randomUUID))]
-           (if-let [session (state/load-session sessionId)]
-             ;; Append the incoming prompt, then drive the Ollama conversation
-             ;; to completion -- executing any tool calls the model makes along
-             ;; the way -- and relay the final reply. Passing `:cwd` lets the
-             ;; prompt converter read local resource links relative to it.
-             (let [incoming (ollama-acp/acp-prompt->ollama-messages
-                              prompt {:cwd (:cwd session)})
-                   _        (run! #(state/append-history sessionId %) incoming)
-                   _        (tel/log! {:level :info
-                                      :id    ::prompt-received
-                                      :data  {:sessionId sessionId
-                                              :messages  (count incoming)
-                                              :chars     (reduce + 0
-                                                                 (map #(count (str (:content %)))
-                                                                      incoming))}}
-                                     "Received prompt")
-                   reply    (agent-loop/run-agent-loop
-                             conn sessionId
-                             {:client        client
-                              :model         model
-                              :tool-registry tool-registry
-                              :tool-specs    tool-specs
-                              :chat-opts     chat-opts
-                              :max-rounds    max-rounds})]
-               (tel/log! {:level :info
-                          :id    ::prompt-complete
-                          :data  {:sessionId sessionId
-                                  :messageId msg-id
-                                  :chars     (count (str reply))}}
-                         "Prompt complete")
-               (acp/send-agent-message-chunk conn sessionId (str reply))
-               {:stopReason "end_turn"})
-             ;; Unknown session: tell the client and bail.
-             (do
-               (tel/log! {:level :warn
-                          :id    ::unknown-session-prompt
-                          :data  {:sessionId sessionId}}
-                         "Received prompt for unknown session")
-               (acp/send-agent-message-chunk conn sessionId
-                                  (str "No session " sessionId))
-               {:stopReason "end_turn"}))))
-
-       (on-session-cancel [_ _conn {:keys [sessionId]}]
-         ;; No background work to cancel for the synchronous handler; the
-         ;; in-flight `session/prompt` already returns on its own.
-         (tel/log! {:level :debug
-                    :id    ::session-cancel
-                    :data  {:sessionId sessionId}}
-                   "Session cancelled")
-         nil)
-
-       (on-cancel-request [_ _conn params]
-         (tel/log! {:level :debug
-                    :id    ::cancel-request
-                    :data  {:requestId (:requestId params)}}
-                   "Cancel request received")
-         nil)
-       (on-notification [_ _conn method _params]
-         (tel/log! {:level :debug
-                    :id    ::extension-notification
-                    :data  {:method method}}
-                   "Ignoring extension notification")
-         nil)
-       (on-ext-request [_ conn method params]
-         (if (= method "session/load")
-           (handle-session-load conn params)
-           (do
-             (tel/log! {:level :debug
-                        :id    ::extension-request
-                        :data  {:method method}}
-                       "Rejecting extension request")
-             (acp-errors/acp-error acp-errors/err-method))))))))
+     (map->ClaiAgent {:cfg           cfg
+                      :client        client
+                      :model         model
+                      :tool-registry tool-registry
+                      :tool-specs    tool-specs
+                      :max-rounds    max-rounds
+                      :sys-prompt    sys-prompt
+                      :chat-opts     chat-opts}))))
