@@ -116,6 +116,26 @@
     [result (str out)]))
 
 ;; ---------------------------------------------------------------------------
+;; $
+;; ---------------------------------------------------------------------------
+
+(deftest $-prints-stdout-and-stderr
+  (let [out    (StringWriter.)
+        err    (StringWriter.)
+        result (binding [*out* out *err* err]
+                 (repl/$ "printf hello; printf oops >&2"))]
+    (is (= "hello" (str out)))
+    (is (= "oops" (str err)))
+    (is (= 0 (:exit result)))
+    (is (= "hello" (:out result)))
+    (is (= "oops" (:err result)))))
+
+(deftest $-does-not-throw-on-a-non-zero-exit
+  (let [[result out] (with-cli-out #(repl/$ "printf failed; exit 3"))]
+    (is (= 3 (:exit result)))
+    (is (= "failed" out))))
+
+;; ---------------------------------------------------------------------------
 ;; new!
 ;; ---------------------------------------------------------------------------
 

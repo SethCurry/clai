@@ -31,6 +31,7 @@
             [acp.errors :as acp-errors]
             [acp.jsonrpc :as jsonrpc]
             [clai.agent :as agent]
+            [clojure.java.shell :as shell]
             [clojure.string :as str])
   (:import [java.util.concurrent BlockingQueue LinkedBlockingQueue TimeUnit]
            [java.util.concurrent.atomic AtomicLong]))
@@ -367,6 +368,25 @@
     (some-> ^Thread agent-thread (.join 2000))
     (some-> ^Thread reader-thread (.join 2000))
     true))
+
+;; ---------------------------------------------------------------------------
+;; Shell
+;; ---------------------------------------------------------------------------
+
+(defn $
+  "Run `command` with `sh -c`, printing its stdout and stderr.
+
+  Output is printed after the command finishes: stdout goes to `*out*` and
+  stderr to `*err*`. Returns the `clojure.java.shell/sh` result map
+  (`{:out ... :err ... :exit ...}`); a non-zero exit status is not an error."
+  [command]
+  (let [{:keys [out err] :as result} (shell/sh "sh" "-c" (str command))]
+    (print out)
+    (flush)
+    (binding [*out* *err*]
+      (print err)
+      (flush))
+    result))
 
 ;; ---------------------------------------------------------------------------
 ;; REPL helpers
