@@ -26,3 +26,4 @@
 (log-to-file!)
 
 (require '[clai.repl :refer :all])
+(require '[clai.repl.git :as git])
