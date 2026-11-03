@@ -8,6 +8,7 @@
   registry and tool-role messages."
   (:require [cheshire.core :as json]
             [clai.tools.schema :as schema]
+            [clai.util :as util]
             [clojure.string :as str]
             [taoensso.telemere :as tel]))
 
@@ -100,7 +101,7 @@
                          :data {:tool     id
                                 :arg-keys (vec (keys args'))}}
                         e)
-            (str "Error: " (or (ex-message e) (class e)))))))))
+            (str "Error: " (util/error-message e))))))))
 
 (defn tool-call->id+args
   "Extract `[tool-id args]` from one Ollama `tool_calls` entry. Tolerates both
@@ -113,6 +114,19 @@
         name (:name f)
         args (parse-arguments (:arguments f))]
     [name args]))
+
+(defn tool-result-message
+  "Build the `tool`-role history message recording `result` for `call`.
+
+  `name` is the tool's name; it is recorded in `:name` so the model can tell
+  the results apart when several tools answer in one round."
+  {:malli/schema [:-> #'schema/tool-call [:maybe :string] #'schema/tool-result
+                  #'schema/tool-call-message]}
+  [call name result]
+  (cond-> {:role    "tool"
+           :content result
+           :name    (or name "unknown")}
+    (some? (:id call)) (assoc :tool_call_id (:id call))))
 
 (defn execute-calls
   "Execute a vector of Ollama `tool_calls` against `tool-registry`, returning
@@ -134,9 +148,5 @@
             "Executing tool calls")
   (vec
    (for [call tool-calls]
-     (let [[id args] (tool-call->id+args call)
-           result    (invoke tool-registry id args ctx)]
-       (cond-> {:role    "tool"
-                :content result
-                :name    (or id "unknown")}
-         (some? (:id call)) (assoc :tool_call_id (:id call)))))))
+     (let [[id args] (tool-call->id+args call)]
+       (tool-result-message call id (invoke tool-registry id args ctx))))))

@@ -1,8 +1,10 @@
 (ns clai.tools.builtin.eval
   "Built-in `eval_clojure` tool, which evaluates Clojure code in the agent's
   own running runtime."
-  (:require [clojure.string :as str]
-            [taoensso.telemere :as tel]))
+  (:require [clai.util :as util]
+            [clojure.string :as str]
+            [taoensso.telemere :as tel])
+  (:import [java.io PrintWriter StringWriter]))
 
 ;; ---------------------------------------------------------------------------
 ;; Clojure evaluation tool
@@ -26,9 +28,40 @@
             (tel/log! {:level :debug
                        :id    ::eval-namespace-require-failed
                        :data  {:namespace (str sym)
-                               :error     (or (ex-message e) (str (class e)))}}
+                               :error     (util/error-message e)}}
                       "Could not load namespace for eval_clojure")
             nil)))))
+
+(defn- evaluate
+  "Evaluate `code` in namespace `ns-name`, capturing its printed output.
+
+  Returns `{:printed <string> :value <value>}` on success, or
+  `{:printed <string> :error <throwable>}` when evaluation throws."
+  [code ns-name]
+  (if (str/blank? code)
+    {:printed "" :value nil}
+    (let [sw (StringWriter.)
+          pw (PrintWriter. sw)]
+      (try
+        (let [target (or (resolve-eval-namespace ns-name)
+                         (throw (ex-info (str "No such namespace: " ns-name)
+                                         {:namespace ns-name})))
+              value  (binding [*out* pw
+                               *err* pw
+                               *ns*  target]
+                       (eval (read-string code)))]
+          (.flush pw)
+          {:printed (str sw) :value value})
+        (catch Throwable e
+          (.flush pw)
+          {:printed (str sw) :error e})))))
+
+(defn- error-text
+  "Render `error` as an `Error: ...` line followed by its stack trace."
+  [^Throwable error]
+  (str "Error: " (util/error-message error)
+       (with-out-str
+         (.printStackTrace error (PrintWriter. *out*)))))
 
 (defn eval-clojure-fn
   "Tool: evaluate a string of Clojure code in the agent's own Clojure
@@ -41,36 +74,8 @@
   (let [ns-name (if (str/blank? (str namespace))
                   default-eval-namespace
                   (str namespace))
-        sw   (java.io.StringWriter.)
-        pr   (java.io.PrintWriter. sw)
-        val  (binding [*out* pr
-                       *err* pr]
-               (try
-                 (if (str/blank? code)
-                   nil
-                   (if-let [target-ns (resolve-eval-namespace ns-name)]
-                     (binding [*ns* target-ns]
-                       (eval (read-string code)))
-                     (throw (ex-info (str "No such namespace: " ns-name)
-                                     {:namespace ns-name}))))
-                 (catch Throwable e
-                   (ex-info (or (ex-message e) (str (class e)))
-                            {:cause e}))))
-        _      (.flush pr)
-        printed (.toString sw)
-        result  (cond
-                  (instance? clojure.lang.ExceptionInfo val)
-                  (str "Error: " (ex-message val)
-                       (when-let [^Throwable c (:cause (ex-data val))]
-                         (str "\n"
-                              (with-out-str
-                                (.printStackTrace c (java.io.PrintWriter. *out*))))))
-
-                  (nil? val)
-                  "nil"
-
-                  :else
-                  (pr-str val))]
+        {:keys [printed value error]} (evaluate code ns-name)
+        result  (if error (error-text error) (pr-str value))]
     (str (when-not (str/blank? printed)
            (str printed (when-not (str/ends-with? printed "\n") "\n")))
          "=> " result)))

@@ -10,17 +10,13 @@
   "Implementation of `clai.providers.ollama/generate`."
   [client req]
   (schemas/validate! schemas/generate-request req "generate")
-  (if (http/streaming? req)
-    (http/perform-stream client :post "/api/generate" req)
-    (http/perform client :post "/api/generate" req)))
+  (http/post client "/api/generate" req))
 
 (defn chat
   "Implementation of `clai.providers.ollama/chat`."
   [client req]
   (schemas/validate! schemas/chat-request req "chat")
-  (if (http/streaming? req)
-    (http/perform-stream client :post "/api/chat" req)
-    (http/perform client :post "/api/chat" req)))
+  (http/post client "/api/chat" req))
 
 (defn embed
   "Implementation of `clai.providers.ollama/embed`."

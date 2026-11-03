@@ -1,6 +1,7 @@
 (ns clai.providers.ollama.schemas
   "Malli schemas and request validation for the Ollama client."
   (:require [clai.log]
+            [clai.util :as util]
             [malli.core :as m]
             [malli.error :as me]
             [taoensso.telemere :as tel])
@@ -13,7 +14,7 @@
 
 (def non-empty-string
   "A string of at least one character."
-  [:re #".+"])
+  util/non-empty-string)
 
 (def image-source
   "Anything `encode-image` accepts: bytes, InputStream, File, URL, or path string."

@@ -26,9 +26,7 @@
   "Implementation of `clai.providers.ollama/create-model`."
   [client req]
   (schemas/validate! schemas/create-model-request req "create-model")
-  (if (http/streaming? req)
-    (http/perform-stream client :post "/api/create" req)
-    (http/perform client :post "/api/create" req)))
+  (http/post client "/api/create" req))
 
 (defn copy-model
   "Implementation of `clai.providers.ollama/copy-model`."
@@ -40,17 +38,13 @@
   "Implementation of `clai.providers.ollama/pull-model`."
   [client req]
   (schemas/validate! schemas/pull-push-request req "pull-model")
-  (if (http/streaming? req)
-    (http/perform-stream client :post "/api/pull" req)
-    (http/perform client :post "/api/pull" req)))
+  (http/post client "/api/pull" req))
 
 (defn push-model
   "Implementation of `clai.providers.ollama/push-model`."
   [client req]
   (schemas/validate! schemas/pull-push-request req "push-model")
-  (if (http/streaming? req)
-    (http/perform-stream client :post "/api/push" req)
-    (http/perform client :post "/api/push" req)))
+  (http/post client "/api/push" req))
 
 (defn delete-model
   "Implementation of `clai.providers.ollama/delete-model`."

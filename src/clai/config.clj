@@ -36,9 +36,8 @@
   (:require [clai.log]
             [clai.providers.ollama :as ollama]
             [clai.tools :as tools]
-            [clojure.edn :as edn]
+            [clai.util :as util]
             [clojure.java.io :as io]
-            [malli.instrument :as mi]
             [taoensso.telemere :as tel])
   (:import [java.io File]))
 
@@ -48,7 +47,7 @@
 
 (def non-empty-string
   "A string of at least one character."
-  [:re #".+"])
+  util/non-empty-string)
 
 (def config-file
   "A `java.io.File` naming a config file."
@@ -88,7 +87,7 @@
 (defn- cwd-config-file
   "Return `./clai.edn` as a `java.io.File`."
   []
-  (File. "clai.edn"))
+  (io/file "clai.edn"))
 
 (defn- home-config-file
   "Return `~/.config/clai/config.edn` as a `java.io.File`."
@@ -96,16 +95,16 @@
   (let [home (or (System/getenv "XDG_CONFIG_HOME")
                  (System/getenv "HOME")
                  (System/getProperty "user.home"))]
-    (File. (str home "/.config/clai/config.edn"))))
+    (io/file home ".config/clai/config.edn")))
 
 (defn- candidate-files
   "Return the ordered list of candidate config files. `nil` entries (e.g. an
   unset `CLAI_CONFIG`) are dropped."
   []
-  (keep identity
-        [(when-let [p (env-config-path)] (File. ^String p))
-         (cwd-config-file)
-         (home-config-file)]))
+  (remove nil?
+          [(when-let [p (env-config-path)] (File. ^String p))
+           (cwd-config-file)
+           (home-config-file)]))
 
 (defn- first-existing
   "Return the first `File` in `files` that exists and is a regular file, or
@@ -116,28 +115,15 @@
        first))
 
 ;; ---------------------------------------------------------------------------
-;; Parsing
-;; ---------------------------------------------------------------------------
-
-(defn- read-edn-file
-  "Parse `file` as EDN and return the resulting map. Throws an `ex-info`
-  with the file path on failure so a malformed config is easy to spot."
-  [^File file]
-  (try
-    (with-open [r (java.io.PushbackReader. (io/reader file))]
-      (edn/read {:readers *data-readers* :eof nil} r))
-    (catch Throwable e
-      (tel/error! {:id   ::config-read-failed
-                   :data {:file (.getAbsolutePath file)}}
-                  e)
-      (throw (ex-info (str "Failed to read clai config file "
-                           (.getAbsolutePath file) ": "
-                           (or (ex-message e) (class e)))
-                      {:file file :cause e})))))
-
-;; ---------------------------------------------------------------------------
 ;; Public API
 ;; ---------------------------------------------------------------------------
+
+(defn- use-defaults!
+  "Log why configuration is falling back to the built-in defaults and return
+  the empty config overlay."
+  [level id data message]
+  (tel/log! {:level level :id id :data data} message)
+  {})
 
 (defn candidates
   "Return the ordered list of candidate config file paths (as absolute
@@ -168,48 +154,36 @@
   ([]
    (if-let [^File f (first-existing (candidate-files))]
      (load-config f)
-     (do
-       (tel/log! {:level :debug
-                  :id    ::no-config-file
-                  :data  {:candidates (vec (candidates))}}
-                 "No clai config file found; using defaults")
-       {})))
+     (use-defaults! :debug ::no-config-file {:candidates (vec (candidates))}
+                    "No clai config file found; using defaults")))
   ([path]
-   (let [^File f (if (instance? File path) path (File. (str path)))]
+   (let [^File f (if (instance? File path) path (File. (str path)))
+         path*  (.getAbsolutePath f)]
      (cond
        (not (.exists f))
-       (do
-         (tel/log! {:level :debug
-                    :id    ::config-not-found
-                    :data  {:path (.getAbsolutePath f)}}
-                   "Config file does not exist; using defaults")
-         {})
+       (use-defaults! :debug ::config-not-found {:path path*}
+                      "Config file does not exist; using defaults")
 
        (.isDirectory f)
-       (do
-         (tel/log! {:level :warn
-                    :id    ::config-is-directory
-                    :data  {:path (.getAbsolutePath f)}}
-                   "Config path is a directory; using defaults")
-         {})
+       (use-defaults! :warn ::config-is-directory {:path path*}
+                      "Config path is a directory; using defaults")
 
        :else
-       (let [parsed (read-edn-file f)]
+       (let [parsed (util/read-edn-file
+                     f
+                     {:error-id ::config-read-failed
+                      :label    "clai config file"
+                      :readers  *data-readers*})]
          (if (map? parsed)
            (do
              (tel/log! {:level :debug
                         :id    ::config-loaded
-                        :data  {:path (.getAbsolutePath f)
-                                :keys (vec (keys parsed))}}
+                        :data  {:path path* :keys (vec (keys parsed))}}
                        "Loaded clai config")
              parsed)
-           (do
-             (tel/log! {:level :warn
-                        :id    ::config-not-a-map
-                        :data  {:path (.getAbsolutePath f)
-                                :type (str (class parsed))}}
-                       "Config file did not contain a map; using defaults")
-             {})))))))
+           (use-defaults! :warn ::config-not-a-map
+                          {:path path* :type (str (class parsed))}
+                          "Config file did not contain a map; using defaults")))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Runtime settings
@@ -247,24 +221,15 @@
   `OLLAMA_API_KEY`) and defaults."
   {:malli/schema [:-> #'config #'ollama/client-schema]}
   [cfg]
-  (let [ollama-cfg (:ollama cfg)
-        opts       (into {}
-                         (keep (fn [k]
-                                 (when-some [v (get ollama-cfg k)]
-                                   [k v])))
-                         [:host :api-key :timeout])]
-    (ollama/make-client opts)))
+  (ollama/make-client (util/select-present (:ollama cfg)
+                                           [:host :api-key :timeout])))
 
 (defn chat-options
   "Return the Ollama `/api/chat` request options carried by `cfg` (only the
   keys that are present)."
   {:malli/schema [:-> #'config [:map]]}
   [cfg]
-  (into {}
-        (keep (fn [k]
-                (when-some [v (get cfg k)]
-                  [k v])))
-        [:options :think :format]))
+  (util/select-present cfg [:options :think :format]))
 
 (defn tool-ids
   "Return the tool ids selected by `cfg`, or nil when every tool in the

@@ -37,11 +37,11 @@
 
     :id      the tool name (matches the Ollama `function.name`).
     :handler a Clojure function `(args ctx) -> string`, where `args` is the
-             parsed JSON arguments map and `ctx` carries session context
-             (`:cwd`, ...). Returning a string keeps the tool-result message
-             simple; non-string return values are pr-str'd.
+                  parsed JSON arguments map and `ctx` carries session context
+                  (`:cwd`, ...). Returning a string keeps the tool-result message
+                  simple; non-string return values are pr-str'd.
     :spec    the Ollama tool definition map:
-             `{:type \"function\" :function {:name ... :description ...
+                  `{:type \"function\" :function {:name ... :description ...
               :parameters {:type \"object\" :properties {...} :required [...]}}}`
 
   Tool execution never throws out to the caller: if a tool function raises,
@@ -49,52 +49,40 @@
   (:require [clai.tools.builtin :as builtin]
             [clai.tools.invoke :as invoke]
             [clai.tools.registry :as registry]
-            [clai.tools.schema :as schema]))
-
-(defmacro ^:private import-vars
-  "Define public vars in this namespace that alias the implementation vars
-  named by `syms`, copying their docs and malli schemas."
-  [& syms]
-  `(do
-     ~@(for [sym syms]
-         (let [local (symbol (name sym))]
-           `(do
-              (def ~local ~sym)
-              (alter-meta! (var ~local)
-                           merge
-                           (select-keys (meta (var ~sym))
-                                        [:doc :arglists :malli/schema])))))))
+            [clai.tools.schema :as schema]
+            [clai.util :as util]))
 
 ;; Schemas
-(import-vars schema/non-empty-string
-             schema/tool-id
-             schema/tool-parameters
-             schema/tool-spec
-             schema/tool-args
-             schema/tool-ctx
-             schema/tool-result
-             schema/tool
-             schema/tool-registry
-             schema/tool-call
-             schema/tool-call-message)
+(util/import-vars schema/non-empty-string
+                  schema/tool-id
+                  schema/tool-parameters
+                  schema/tool-spec
+                  schema/tool-args
+                  schema/tool-ctx
+                  schema/tool-result
+                  schema/tool
+                  schema/tool-registry
+                  schema/tool-call
+                  schema/tool-call-message)
 
 ;; Registry
-(import-vars registry/make-registry
-             registry/register-tool
-             registry/unregister-tool
-             registry/registered-tools
-             registry/tool-ids
-             registry/select-tools
-             registry/spec
-             registry/specs
-             registry/specs-for)
+(util/import-vars registry/make-registry
+                  registry/register-tool
+                  registry/unregister-tool
+                  registry/registered-tools
+                  registry/tool-ids
+                  registry/select-tools
+                  registry/spec
+                  registry/specs
+                  registry/specs-for)
 
 ;; Invocation
-(import-vars invoke/parse-arguments
-             invoke/invoke
-             invoke/tool-call->id+args
-             invoke/execute-calls)
+(util/import-vars invoke/parse-arguments
+                  invoke/invoke
+                  invoke/tool-call->id+args
+                  invoke/tool-result-message
+                  invoke/execute-calls)
 
 ;; Built-ins
-(import-vars builtin/built-in-tools
-             builtin/built-in-registry)
+(util/import-vars builtin/built-in-tools
+                  builtin/built-in-registry)

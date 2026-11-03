@@ -17,6 +17,7 @@
   (:require [clai.providers.ollama :as ollama]
             [clai.tools.invoke :as invoke]
             [clai.tools.registry :as registry]
+            [clai.util :as util]
             [clojure.string :as str]
             [taoensso.telemere :as tel]))
 
@@ -53,10 +54,6 @@
 ;; ---------------------------------------------------------------------------
 ;; Argument helpers
 ;; ---------------------------------------------------------------------------
-
-(defn- blank?
-  [value]
-  (str/blank? (str value)))
 
 (defn- as-long
   "Coerce `value` to a long, returning `default` when it is nil or invalid."
@@ -113,11 +110,11 @@
   `{:message ...}` or `{:error <throwable>}`."
   [client model history tool-registry chat-opts]
   (let [specs   (registry/specs tool-registry)
-        request (cond-> {:model    model
-                         :messages history
-                         :stream   false}
-                  (seq specs) (assoc :tools specs))
-        request (merge request chat-opts)]
+        request (merge (cond-> {:model    model
+                                :messages history
+                                :stream   false}
+                         (seq specs) (assoc :tools specs))
+                       chat-opts)]
     (try
       {:message (ollama/assistant-message (ollama/chat client request))}
       (catch Throwable e
@@ -127,23 +124,23 @@
   "Drive the child conversation to completion, executing its tool calls with
   its own registry and context. Returns the final assistant text or an error
   string."
-  [client model history child-registry child-context chat-opts max-rounds]
+  [history {:keys [client model tool-registry chat-opts max-rounds] :as context}]
   (loop [history history
          round   0]
     (if (>= round max-rounds)
       (str "Error: sub-agent stopped after " max-rounds
            " tool rounds without a final reply.")
       (let [{:keys [message error]}
-            (chat-request client model history child-registry chat-opts)]
+            (chat-request client model history tool-registry chat-opts)]
         (cond
           (some? error)
           (str "Error: sub-agent request failed: "
-               (or (ex-message error) (str (class error))))
+               (util/error-message error))
 
           (ollama/has-tool-calls? message)
           (let [tool-calls (:tool_calls message)
-                results    (invoke/execute-calls child-registry tool-calls
-                                                 child-context)
+                results    (invoke/execute-calls tool-registry tool-calls
+                                                 context)
                 next-hist  (into (conj history message) results)]
             (tel/log! {:level :debug
                        :id    ::subagent-tool-round
@@ -156,7 +153,7 @@
 
           :else
           (let [content (str (or (:content message) ""))]
-            (if (blank? content)
+            (if (str/blank? content)
               "(sub-agent returned no text)"
               content)))))))
 
@@ -196,31 +193,31 @@
       (str "Error: sub-agent depth limit reached (" default-max-depth
            "); refusing to spawn a nested sub-agent.")
 
-      (blank? prompt)
+      (str/blank? prompt)
       "Error: spawn_agent requires a non-blank `prompt`."
 
       (nil? client)
       "Error: spawn_agent requires an Ollama client in the tool context."
 
-      (blank? child-model)
+      (str/blank? child-model)
       "Error: spawn_agent requires a model name in the tool context."
 
       :else
-      (let [requested   (requested-tool-ids tools)
-            child-reg   (child-tool-registry ctx requested)
-            sys-prompt  (if (blank? system_prompt)
-                          default-system-prompt
-                          (str system_prompt))
-            history     [{:role "system" :content sys-prompt}
-                         {:role "user" :content (str prompt)}]
+      (let [requested     (requested-tool-ids tools)
+            child-reg     (child-tool-registry ctx requested)
+            sys-prompt    (if (str/blank? system_prompt)
+                            default-system-prompt
+                            (str system_prompt))
+            history       [{:role "system" :content sys-prompt}
+                           {:role "user" :content (str prompt)}]
             child-context (child-ctx ctx
-                                     {:client       client
-                                      :model        child-model
-                                      :chat-opts    (:chat-opts ctx)
-                                      :max-rounds   child-max
-                                      :cwd          cwd
-                                      :depth        depth
-                                      :registry     child-reg})]
+                                     {:client     client
+                                      :model      child-model
+                                      :chat-opts  (:chat-opts ctx)
+                                      :max-rounds child-max
+                                      :cwd        cwd
+                                      :depth      depth
+                                      :registry   child-reg})]
         (tel/log! {:level :info
                    :id    ::subagent-start
                    :data  {:depth      depth
@@ -231,15 +228,14 @@
                            :prompt-chars (count (str prompt))}}
                   "Starting sub-agent")
         (let [result (try
-                       (run-conversation client child-model history child-reg
-                                         child-context (:chat-opts ctx) child-max)
+                       (run-conversation history child-context)
                        (catch Throwable e
                          (tel/error! {:id ::subagent-failed
                                       :data {:depth depth
                                              :model child-model}}
                                      e)
                          (str "Error: sub-agent failed: "
-                              (or (ex-message e) (str (class e))))))]
+                              (util/error-message e))))]
           (tel/log! {:level :info
                      :id    ::subagent-complete
                      :data  {:depth depth

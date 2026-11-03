@@ -1,6 +1,7 @@
 (ns clai.tools.builtin.shell
   "Built-in shell tool: `run_command`."
   (:require [clai.tools.builtin.common :as common]
+            [clai.util :as util]
             [clojure.java.io :as io]
             [taoensso.telemere :as tel])
   (:import [java.io ByteArrayOutputStream InputStream]
@@ -40,7 +41,7 @@
                    :id    ::output-stream-failed
                    :data  {:chars (count text)}}
                   (str "Could not stream command output: "
-                       (or (ex-message e) (class e))))))))
+                       (util/error-message e)))))))
 
 (defn- pump-output
   "Copy `stream` into `buf` until EOF, capped at `common/max-output-bytes`,
@@ -79,7 +80,7 @@
                                   :id    ::output-pump-stopped
                                   :data  {:chars (.size buf)}}
                                  (str "Stopped reading command output: "
-                                      (or (ex-message e) (class e)))))))
+                                      (util/error-message e))))))
                  "clai-run-command-output")
     (.setDaemon true)
     (.start)))
@@ -108,9 +109,9 @@
                :data  {:command (str command)
                        :cwd     (:cwd ctx)}}
               "Running shell command")
-    (let [proc   (.start builder)
-          buf    (ByteArrayOutputStream.)
-          reader (start-output-pump proc buf ctx)]
+    (let [proc        (.start builder)
+          buf         (ByteArrayOutputStream.)
+          ^Thread reader (start-output-pump proc buf ctx)]
       (try
         (let [exited (try
                        (.waitFor proc 30 TimeUnit/SECONDS)

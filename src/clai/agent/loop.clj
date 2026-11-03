@@ -8,12 +8,13 @@
   ACP client as `tool_call` / `tool_call_update` session updates, and model
   reasoning returned by Ollama in an assistant message's `:thinking` field is
   streamed as `agent_thought_chunk` updates."
-  (:require [clai.log]
+  (:require [acp.agent.helpers :as helpers]
+            [clai.log]
             [clai.providers.ollama :as ollama]
             [clai.state :as state]
             [clai.tools :as tools]
+            [clai.util :as util]
             [clojure.string :as str]
-            [acp.agent.helpers :as helpers]
             [taoensso.telemere :as tel]))
 
 ;; ---------------------------------------------------------------------------
@@ -26,7 +27,7 @@
   tools like `spawn_agent` can run their own conversations."
   [session-id {:keys [client model tool-registry chat-opts max-rounds
                       agent-depth]}]
-  {:cwd           (-> (state/load-session session-id) :cwd)
+  {:cwd           (:cwd (state/load-session session-id))
    :session-id    session-id
    :client        client
    :model         model
@@ -40,15 +41,14 @@
 ;; ---------------------------------------------------------------------------
 
 (defn- tool-call-raw-input
-  "Return the parsed arguments of an Ollama tool call as a map suitable for
+  "Return the parsed arguments of an Ollama tool call, as a map suitable for
   the ACP `rawInput` field."
   [call]
-  (let [f    (or (:function call) call)
-        args (tools/parse-arguments (:arguments f))]
-    (or args {})))
+  (second (tools/tool-call->id+args call)))
 
 (defn- send-tool-call-started
-  "Emit a `tool_call` SessionUpdate announcing that `call` is starting."
+  "Emit a `tool_call` SessionUpdate announcing that `call` is starting.
+  Returns the id the update was sent under."
   [conn session-id call]
   (let [id (ollama/tool-call-id call)]
     (helpers/send-tool-call-started conn session-id id
@@ -68,43 +68,45 @@
   [{:type    "content"
     :content {:type "text" :text (str result)}}])
 
+(defn- send-tool-call-update
+  "Emit a `tool_call_update` for tool call `id` carrying `content`. When
+  `status` is non-nil it is sent as the update's terminal status.
+
+  ACP treats the update's `:content` as a *replacement* for what the client
+  already holds, so callers always pass the full output collected so far --
+  see [[send-tool-call-output]] and [[send-tool-call-finished]]."
+  ([conn session-id id content]
+   (send-tool-call-update conn session-id id content nil))
+  ([conn session-id id content status]
+   (helpers/send-session-update conn session-id
+     (cond-> {:_meta        nil
+              :sessionUpdate "tool_call_update"
+              :content       (tool-result-content content)
+              :toolCallId    id}
+       status (assoc :status status)))))
+
 (defn- send-tool-call-finished
-  "Emit the finished state of `call` as a `tool_call_update` carrying the
-  result and a terminal `:status` (`completed`/`failed`).
+  "Emit the finished state of tool call `id` as a `tool_call_update` carrying
+  the result and a terminal `:status` (`completed`/`failed`).
 
   Some ACP clients only render a tool's output from a terminal-status update,
   so the result is attached to the same update that closes the call. See
   [[tool-result-content]] for why the output lives in `:content`."
-  [conn session-id call id result]
-  (let [failed? (str/starts-with? result "Error:")
-        status  (if failed? "failed" "completed")
-        content (tool-result-content result)]
-    (helpers/send-session-update conn session-id
-      {:_meta        nil
-       :sessionUpdate "tool_call_update"
-       :content       content
-       :toolCallId    id
-       :status        status})))
-
-;; ---------------------------------------------------------------------------
-;; ACP tool output
-;; ---------------------------------------------------------------------------
+  [conn session-id id result]
+  (send-tool-call-update conn session-id id result
+                         (if (str/starts-with? result "Error:")
+                           "failed"
+                           "completed")))
 
 (defn- send-tool-call-output
   "Emit a `tool_call_update` carrying the output a running tool has produced
   so far, so long-running work (a chatty `run_command`, say) is visible while
   it happens instead of only once it finishes.
 
-  ACP treats a `tool_call_update`'s `:content` as a *replacement* for what
-  the client already holds, so each update carries the whole output collected
-  to date rather than just the newest chunk. No `:status` is sent: the call is
-  still in progress until [[send-tool-call-finished]] closes it."
+  No `:status` is sent: the call is still in progress until
+  [[send-tool-call-finished]] closes it."
   [conn session-id id output]
-  (helpers/send-session-update conn session-id
-    {:_meta        nil
-     :sessionUpdate "tool_call_update"
-     :content       (tool-result-content output)
-     :toolCallId    id}))
+  (send-tool-call-update conn session-id id output))
 
 ;; ---------------------------------------------------------------------------
 ;; ACP thought updates
@@ -142,10 +144,29 @@
              (send-tool-call-output conn session-id call-id output)))
     ctx))
 
+(defn- execute-tool-call
+  "Run one Ollama tool call, streaming its activity to the client, and return
+  the `tool`-role history message recording its result."
+  [conn session-id ctx call]
+  (let [tool-name (or (ollama/tool-call-name call) "?")
+        call-id   (send-tool-call-started conn session-id call)
+        [id args] (tools/tool-call->id+args call)]
+    (tel/log! {:level :info
+               :id    ::tool-call
+               :data  {:sessionId session-id
+                       :tool      tool-name}}
+              "Executing tool call")
+    (let [result (tools/invoke (:tool-registry ctx)
+                               (or id tool-name)
+                               args
+                               (call-tool-ctx conn session-id call-id ctx))]
+      (send-tool-call-finished conn session-id call-id result)
+      (tools/tool-result-message call (or id tool-name) result))))
+
 (defn- run-tool-round
-  "Execute the tool calls in `msg` against `tool-registry`, append the assistant
-  message and each `tool`-role result to the session history, and return the
-  updated history.
+  "Execute the tool calls in `msg` against the loop's tool registry, append the
+  assistant message and each `tool`-role result to the session history, and
+  return the updated history.
 
   Emits a `tool_call` SessionUpdate as each call starts, then a finished
   `tool_call_update` when it completes, so the client can render structured
@@ -154,39 +175,85 @@
   the context's `:on-output` callback as they go, which [[call-tool-ctx]]
   turns into further `tool_call_update`s. Does not call Ollama; the caller
   chats again with the new history."
-  [conn session-id msg {:keys [tool-registry] :as opts}]
-  (let [tool-calls (:tool_calls msg)]
+  [conn session-id msg opts]
+  (let [tool-calls (:tool_calls msg)
+        ctx        (session-tool-ctx session-id opts)]
     ;; Record the assistant message (with its tool_calls) verbatim so the
     ;; model sees its own request in the next round.
     (state/append-history session-id msg)
-    (let [ctx (session-tool-ctx session-id opts)]
-      (doseq [call tool-calls]
-        (let [tool-name (or (ollama/tool-call-name call) "?")
-              call-id   (send-tool-call-started conn session-id call)]
-          (tel/log! {:level :info
-                     :id    ::tool-call
-                     :data  {:sessionId session-id
-                             :tool      tool-name}}
-                    "Executing tool call")
-          (let [[id args] (tools/tool-call->id+args call)
-                result    (tools/invoke tool-registry (or id tool-name) args
-                                       (call-tool-ctx conn session-id call-id ctx))]
-            (send-tool-call-finished conn session-id call call-id result)
-            (state/append-history session-id
-                            (cond-> {:role    "tool"
-                                     :content result
-                                     :name    (or id tool-name)}
-                              (some? (:id call)) (assoc :tool_call_id (:id call)))))))
-      (tel/log! {:level :debug
-                 :id    ::tool-round-complete
-                 :data  {:sessionId session-id
-                         :results   (count tool-calls)}}
-                "Tool round complete")
-      (state/session-history session-id))))
+    (doseq [call tool-calls]
+      (state/append-history session-id
+                            (execute-tool-call conn session-id ctx call)))
+    (tel/log! {:level :debug
+               :id    ::tool-round-complete
+               :data  {:sessionId session-id
+                       :results   (count tool-calls)}}
+              "Tool round complete")
+    (state/session-history session-id)))
 
 ;; ---------------------------------------------------------------------------
 ;; Agent loop
 ;; ---------------------------------------------------------------------------
+
+(defn- chat-once
+  "Send one non-streaming `/api/chat` request for `history`.
+
+  Returns `{:message <assistant message>}` on success or `{:error <text>}` on
+  failure, so the loop can relay the failure to the client instead of
+  throwing."
+  [session-id {:keys [client model tool-specs chat-opts]} history round]
+  (tel/log! {:level :debug
+             :id    ::chat-request
+             :data  {:sessionId session-id
+                     :round     round
+                     :model     model
+                     :messages  (count history)
+                     :tools     (count tool-specs)}}
+            "Sending Ollama chat request")
+  (try
+    {:message (ollama/assistant-message
+               (ollama/chat client
+                            (merge {:model    model
+                                    :messages history
+                                    :tools    tool-specs
+                                    :stream   false}
+                                   chat-opts)))}
+    (catch Throwable e
+      (tel/error! {:id   ::chat-request-failed
+                   :data {:sessionId session-id
+                          :round     round
+                          :model     model}}
+                  e)
+      {:error (str "Ollama request failed: " (util/error-message e))})))
+
+(defn- finish-reply
+  "Record the assistant's final `msg` in the session history and return its
+  text."
+  [session-id msg round]
+  (let [content  (or (:content msg) "")
+        thinking (:thinking msg)]
+    (state/append-history session-id
+                          (cond-> {:role "assistant" :content content}
+                            (not (str/blank? (str thinking)))
+                            (assoc :thinking (str thinking))))
+    (tel/log! {:level :debug
+               :id    ::chat-response
+               :data  {:sessionId session-id
+                       :round     round
+                       :chars     (count content)}}
+              "Received Ollama chat response")
+    content))
+
+(defn- tool-round-cap-reply
+  "Log that the loop hit its tool-round cap and return the text to relay."
+  [session-id max-rounds]
+  (tel/log! {:level :warn
+             :id    ::tool-round-cap
+             :data  {:sessionId session-id
+                     :maxRounds max-rounds}}
+            "Stopped after tool round cap without a final reply")
+  (str "Stopped after " max-rounds
+       " tool rounds without a final reply."))
 
 (defn run-agent-loop
   "Drive the Ollama chat conversation for `session-id` to completion.
@@ -210,62 +277,18 @@
 
   On error (HTTP failure or hitting the round cap) returns a descriptive
   string rather than throwing, so the caller can relay it to the client."
-  [conn session-id {:keys [client model tool-registry tool-specs chat-opts
-                           max-rounds] :as opts}]
-  (let [tool-specs (or tool-specs (tools/specs tool-registry))]
+  [conn session-id {:keys [tool-registry tool-specs max-rounds] :as opts}]
+  (let [opts (assoc opts :tool-specs (or tool-specs (tools/specs tool-registry)))]
     (loop [round 0]
       (if (>= round max-rounds)
-        (do
-          (tel/log! {:level :warn
-                     :id    ::tool-round-cap
-                     :data  {:sessionId session-id
-                             :maxRounds max-rounds}}
-                    "Stopped after tool round cap without a final reply")
-          (str "Stopped after " max-rounds
-               " tool rounds without a final reply."))
-        (let [history (state/session-history session-id)
-              _       (tel/log! {:level :debug
-                                 :id    ::chat-request
-                                 :data  {:sessionId session-id
-                                         :round     round
-                                         :model     model
-                                         :messages  (count history)
-                                         :tools     (count tool-specs)}}
-                                "Sending Ollama chat request")
-              resp    (try
-                        (ollama/chat client
-                          (merge {:model    model
-                                  :messages history
-                                  :tools    tool-specs
-                                  :stream   false}
-                                 chat-opts))
-                        (catch Throwable e
-                          (tel/error! {:id   ::chat-request-failed
-                                       :data {:sessionId session-id
-                                              :round     round
-                                              :model     model}}
-                                      e)
-                          {:__error__ (ex-message e)}))]
-          (cond
-            (:__error__ resp)
-            (str "Ollama request failed: " (:__error__ resp))
-
-            :else
-            (let [msg (ollama/assistant-message resp)]
-              (send-thought conn session-id msg)
-              (if (ollama/has-tool-calls? msg)
-                (do (run-tool-round conn session-id msg opts)
+        (tool-round-cap-reply session-id max-rounds)
+        (let [history                 (state/session-history session-id)
+              {:keys [message error]} (chat-once session-id opts history round)]
+          (if error
+            error
+            (do
+              (send-thought conn session-id message)
+              (if (ollama/has-tool-calls? message)
+                (do (run-tool-round conn session-id message opts)
                     (recur (inc round)))
-                (let [content  (or (:content msg) "")
-                      thinking (:thinking msg)]
-                  (state/append-history session-id
-                                  (cond-> {:role "assistant" :content content}
-                                    (not (str/blank? (str thinking)))
-                                    (assoc :thinking (str thinking))))
-                  (tel/log! {:level :debug
-                             :id    ::chat-response
-                             :data  {:sessionId session-id
-                                     :round     round
-                                     :chars     (count content)}}
-                            "Received Ollama chat response")
-                  content)))))))))
+                (finish-reply session-id message round)))))))))

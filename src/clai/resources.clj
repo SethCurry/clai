@@ -15,7 +15,8 @@
 
   Embedded `resource` blocks carry their contents directly; text resources are
   inlined and binary blobs are described rather than dumped."
-  (:require [clojure.java.io :as io]
+  (:require [clai.util :as util]
+            [clojure.java.io :as io]
             [clojure.string :as str])
   (:import [java.io File]
            [java.net URI]
@@ -80,7 +81,7 @@
   spaces are handled correctly. URIs with no scheme are treated as paths,
   resolved against `cwd` when relative."
   [uri cwd]
-  (let [u (parse-uri uri)]
+  (let [^URI u (parse-uri uri)]
     (cond
       (nil? u) nil
       (= "file" (.getScheme u))
@@ -98,24 +99,8 @@
   "Heuristically decide whether `bytes` look like binary data rather than
   UTF-8 text. A NUL byte in the sniffed prefix is treated as binary."
   [^bytes bytes]
-  (let [n (min (alength bytes) binary-sniff-bytes)]
-    (loop [i 0]
-      (cond
-        (>= i n) false
-        (zero? (aget bytes i)) true
-        :else (recur (inc i))))))
-
-(defn- read-at-most
-  "Read up to `n` bytes from `in`, returning a byte array (possibly shorter)."
-  [^java.io.InputStream in n]
-  (let [buf (byte-array n)]
-    (loop [off 0]
-      (if (>= off n)
-        buf
-        (let [read-n (.read in buf off (- n off))]
-          (if (neg? read-n)
-            (Arrays/copyOf buf off)
-            (recur (+ off read-n))))))))
+  (boolean (some #(zero? (aget bytes %))
+                 (range (min (alength bytes) binary-sniff-bytes)))))
 
 (defn- read-file-contents
   "Read a local file as text for inlining.
@@ -131,15 +116,15 @@
     :else
     (try
       (with-open [in (io/input-stream f)]
-        (let [bytes      (read-at-most in (inc max-bytes))
-              truncated? (> (alength bytes) max-bytes)
-              bytes      (if truncated? (Arrays/copyOf bytes max-bytes) bytes)]
-          (if (binary-bytes? bytes)
-            {:error (str "binary resource (" (alength bytes) " bytes)")}
-            {:text       (String. bytes StandardCharsets/UTF_8)
+        (let [data       (util/read-at-most in (inc max-bytes))
+              truncated? (> (alength ^bytes data) max-bytes)
+              ^bytes kept (if truncated? (Arrays/copyOf ^bytes data (int max-bytes)) data)]
+          (if (binary-bytes? kept)
+            {:error (str "binary resource (" (alength kept) " bytes)")}
+            {:text       (String. kept StandardCharsets/UTF_8)
              :truncated? truncated?})))
       (catch Throwable e
-        {:error (or (ex-message e) (str (class e)))}))))
+        {:error (util/error-message e)}))))
 
 (defn- rendered-file-contents
   "Render the body of a linked file: its text, a truncation marker, or an

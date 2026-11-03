@@ -3,6 +3,7 @@
   `list_directory`. Paths are resolved against the session `:cwd` unless they
   are absolute."
   (:require [clai.tools.builtin.common :as common]
+            [clai.util :as util]
             [clojure.java.io :as io]
             [clojure.string :as str])
   (:import [java.io File]))
@@ -14,19 +15,16 @@
 (defn read-file-fn
   "Tool: read the contents of a file (UTF-8), truncating past 64 KiB."
   [{:keys [path]} ctx]
-  (let [^File f (common/resolve-path path ctx)
+  (let [^File f   (common/resolve-path path ctx)
         max-bytes common/max-output-bytes]
     (cond
-      (not (.exists f))   (str "Error: no such file: " path)
-      (.isDirectory f)    (str "Error: not a file (is a directory): " path)
+      (not (.exists f)) (str "Error: no such file: " path)
+      (.isDirectory f)  (str "Error: not a file (is a directory): " path)
       :else
       (with-open [in (io/input-stream f)]
-        (let [buf (byte-array max-bytes)
-              n   (.read in buf 0 max-bytes)
-              s   (String. buf 0 (max 0 n) "UTF-8")]
-          (if (>= n max-bytes)
-            (str s "\n... [truncated at " max-bytes " bytes]")
-            s))))))
+        (let [{:keys [text truncated?]} (util/read-text in max-bytes)]
+          (cond-> text
+            truncated? (str "\n... [truncated at " max-bytes " bytes]")))))))
 
 (defn write-file-fn
   "Tool: write `content` to `path`, creating parent directories as needed."
@@ -48,8 +46,7 @@
            (sort-by (fn [^File x] (.getName x)))
            (map (fn [^File x]
                   (str (if (.isDirectory x) "d " "- ") (.getName x))))
-           (str/join "\n")
-           (str)))))
+           (str/join "\n")))))
 
 ;; ---------------------------------------------------------------------------
 ;; Tool definitions

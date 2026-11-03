@@ -2,12 +2,11 @@
   "Entry point for the `clai` ACP agent over stdio.
 
   The agent itself lives in `clai.agent`; this namespace wires it to
-  `acp.agent/run` and gives each launched agent its own tool registry from
+  `acp.agent/run`. Each launched agent builds its own tool registry from
   `clai.tools` rather than relying on global tool state."
   (:require [acp.agent :as acp]
             [clai.agent :as agent]
             [clai.log]
-            [clai.tools :as tools]
             [taoensso.telemere :as tel])
   (:gen-class))
 
@@ -18,9 +17,7 @@
   `:tool-registry` (or `:tools`) to give the agent a custom registry. Config
   `:tools` ids still narrow whichever registry is supplied."
   ([] (make-agent {}))
-  ([opts]
-   (agent/ollama-agent
-    (merge {:tool-registry (tools/built-in-tools)} opts))))
+  ([opts] (agent/ollama-agent opts)))
 
 (defn -main
   "Start the `clai` agent over stdio: read ACP messages from stdin and answer

@@ -11,7 +11,8 @@
              simple; non-string return values are pr-str'd.
     :spec    the Ollama tool definition map:
              `{:type \"function\" :function {:name ... :description ...
-              :parameters {:type \"object\" :properties {...} :required [...]}}}`")
+              :parameters {:type \"object\" :properties {...} :required [...]}}}`"
+  (:require [clai.util :as util]))
 
 ;; ---------------------------------------------------------------------------
 ;; Schemas
@@ -19,7 +20,7 @@
 
 (def non-empty-string
   "A string of at least one character."
-  [:re #".+"])
+  util/non-empty-string)
 
 (def tool-id
   "The id (name) of a tool; matches the Ollama `function.name`."

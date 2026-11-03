@@ -16,6 +16,16 @@
 ;; ACP -> Ollama message conversion
 ;; ---------------------------------------------------------------------------
 
+(defn- name->str
+  "Normalize a keyword or string to its string form. Returns nil for nil and
+  falls back to `str` for anything else."
+  [x]
+  (cond
+    (nil? x)     nil
+    (string? x)  x
+    (keyword? x) (name x)
+    :else        (str x)))
+
 (defn- part->text
   "Extract a plain-text string from a single ACP content part.
 
@@ -31,16 +41,12 @@
     (string? part) part
 
     (map? part)
-    (let [t (cond
-              (keyword? (:type part)) (name (:type part))
-              (string? (:type part))  (:type part)
-              :else                   nil)]
-      (cond
-        (= t "text")          (:text part)
-        (= t "resource_link") (resources/resource-link->text part opts)
-        (= t "resource")      (resources/embedded-resource->text part opts)
-        (some? (:text part))  (:text part)     ; tolerant of variants
-        :else                 nil))
+    (case (name->str (:type part))
+      "text"          (:text part)
+      "resource_link" (resources/resource-link->text part opts)
+      "resource"      (resources/embedded-resource->text part opts)
+      ;; Tolerant of variants that carry text without a known :type.
+      (:text part))
 
     :else nil))
 
@@ -52,21 +58,14 @@
    (cond
      (nil? content)        ""
      (string? content)     content
-     (sequential? content) (->> content
-                                (map #(part->text % opts))
-                                (remove nil?)
-                                (interpose "\n")
-                                (apply str))
+     (sequential? content) (str/join "\n" (keep #(part->text % opts) content))
      :else                 (str content))))
 
 (defn- role->string
   "Normalize an ACP `role` (string or keyword) to its Ollama string form,
   defaulting to `user`."
   [role]
-  (cond
-    (nil? role)    "user"
-    (string? role) role
-    :else          (name role)))
+  (or (name->str role) "user"))
 
 (defn- acp-message->ollama
   "Convert one role-tagged ACP `Message` (`{:role ... :content [...]}`) to an
@@ -125,11 +124,7 @@
   messages become an `agent_thought_chunk` (when the stored message carries
   reasoning in `:thinking`) followed by an `agent_message_chunk`."
   [{:keys [role content thinking]}]
-  (let [role (cond
-               (nil? role)     nil
-               (string? role)  role
-               (keyword? role) (name role)
-               :else           (str role))
+  (let [role (name->str role)
         text (content->text content)
         thought (when-not (str/blank? (str thinking))
                   {:sessionUpdate "agent_thought_chunk"

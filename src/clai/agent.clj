@@ -21,6 +21,7 @@
             [clai.providers.ollama.acp :as ollama-acp]
             [clai.state :as state]
             [clai.tools :as tools]
+            [clai.util :as util]
             [clojure.java.io :as io]
             [clojure.string :as str]
             [taoensso.telemere :as tel])
@@ -76,7 +77,7 @@
   so a missing project-instructions file is simply a no-op. Read failures are
   logged and treated like a missing file rather than failing session setup."
   [cwd]
-  (when-not (str/blank? (str cwd))
+  (when-not (str/blank? cwd)
     (let [file (io/file (str cwd) agents-md-filename)]
       (try
         (when (and (.isFile file) (.canRead file))
@@ -87,7 +88,7 @@
           (tel/log! {:level :warn
                      :id    ::agents-md-read-failed
                      :data  {:path  (str file)
-                             :error (ex-message e)}}
+                             :error (util/error-message e)}}
                     "Failed to read AGENTS.md; continuing without it")
           nil)))))
 
@@ -116,10 +117,11 @@
     session))
 
 (defn- system-history
-  "The opening history for a new session: a system message when `prompt` is
-  non-nil, otherwise nothing."
-  [prompt]
-  (if (some? prompt)
+  "The opening history for a session: a system message built from the
+  configured `sys-prompt` plus any `AGENTS.md` in `cwd`, or nothing when
+  neither is present."
+  [sys-prompt cwd]
+  (if-let [prompt (system-prompt-for sys-prompt cwd)]
     [{:role "system" :content prompt}]
     []))
 
@@ -142,16 +144,11 @@
   collection of tool maps, or a collection of built-in ids. Absent, the
   built-ins are used."
   [opts]
-  (let [provided (or (:tool-registry opts) (:tools opts))]
-    (cond
-      (nil? provided)
-      (tools/built-in-registry)
-
-      (and (sequential? provided) (not-every? map? provided))
+  (if-some [provided (or (:tool-registry opts) (:tools opts))]
+    (if (and (sequential? provided) (not-every? map? provided))
       (tools/select-tools (tools/built-in-registry) provided)
-
-      :else
-      (tools/make-registry provided))))
+      (tools/make-registry provided))
+    (tools/built-in-registry)))
 
 (defn- resolve-tool-registry
   "Build this agent's private tool registry from `opts` and `cfg`.
@@ -191,10 +188,10 @@
   [sys-prompt model {:keys [cwd]}]
   (let [session (state/create-session {:cwd cwd :model model})]
     (run! #(state/append-history (:sessionId session) %)
-          (system-history (system-prompt-for sys-prompt (:cwd session))))
+          (system-history sys-prompt (:cwd session)))
     {:sessionId (:sessionId session)}))
 
-(defn- list-session-summaries
+(defn- list-sessions!
   "Handle `session/list`, optionally filtered to a working directory."
   [{:keys [cwd]}]
   (let [sessions (cond->> (state/list-session-summaries)
@@ -231,7 +228,7 @@
                 "Resumed existing session"))
     (state/register-session sessionId cwd
                             (system-history
-                             (system-prompt-for sys-prompt (str (or cwd "."))))))
+                             sys-prompt (str (or cwd ".")))))
   {:sessionId sessionId})
 
 (defn- close-session!
@@ -251,6 +248,13 @@
   [messages]
   (transduce (map (comp count str :content)) + 0 messages))
 
+(defn- send-reply!
+  "Send `text` to the client as the prompt's final agent message and return
+  the ACP stop reason."
+  [conn session-id text]
+  (acp/send-agent-message-chunk conn session-id (str text))
+  {:stopReason "end_turn"})
+
 (defn- run-prompt!
   "Handle `session/prompt`.
 
@@ -258,9 +262,7 @@
   executing any tool calls the model makes along the way -- and relay the
   final reply. Passing `:cwd` to the prompt converter lets it read local
   resource links relative to the session's working directory."
-  [{:keys [client model tool-registry tool-specs chat-opts max-rounds]}
-   conn
-   {:keys [sessionId prompt]}]
+  [agent conn {:keys [sessionId prompt]}]
   (let [message-id (str (UUID/randomUUID))]
     (if-let [session (state/load-session sessionId)]
       (let [incoming (ollama-acp/acp-prompt->ollama-messages
@@ -272,30 +274,21 @@
                            :messages  (count incoming)
                            :chars     (prompt-char-count incoming)}}
                   "Received prompt")
-        (let [reply (agent-loop/run-agent-loop
-                     conn sessionId
-                     {:client        client
-                      :model         model
-                      :tool-registry tool-registry
-                      :tool-specs    tool-specs
-                      :chat-opts     chat-opts
-                      :max-rounds    max-rounds})]
+        (let [reply (agent-loop/run-agent-loop conn sessionId agent)]
           (tel/log! {:level :info
                      :id    ::prompt-complete
                      :data  {:sessionId sessionId
                              :messageId message-id
                              :chars     (count (str reply))}}
                     "Prompt complete")
-          (acp/send-agent-message-chunk conn sessionId (str reply))
-          {:stopReason "end_turn"}))
+          (send-reply! conn sessionId reply)))
       ;; Unknown session: tell the client and bail.
       (do
         (tel/log! {:level :warn
                    :id    ::unknown-session-prompt
                    :data  {:sessionId sessionId}}
                   "Received prompt for unknown session")
-        (acp/send-agent-message-chunk conn sessionId (str "No session " sessionId))
-        {:stopReason "end_turn"}))))
+        (send-reply! conn sessionId (str "No session " sessionId))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Agent handler
@@ -321,7 +314,7 @@
     (new-session! sys-prompt model params))
 
   (handle-session-list [_ _conn params]
-    (list-session-summaries params))
+    (list-sessions! params))
 
   (handle-session-delete [_ _conn params]
     (delete-session! params))
