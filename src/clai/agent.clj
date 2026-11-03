@@ -182,7 +182,7 @@
         {})
       {})))
 
-(defn- new-session!
+(defn new-session!
   "Handle `session/new`: create a session with the configured model and
   record its system prompt (configured prompt plus any `AGENTS.md`)."
   [sys-prompt model {:keys [cwd]}]

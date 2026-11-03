@@ -250,7 +250,7 @@
   pass the registry they own via the two-argument arity."
   {:malli/schema [:function
                   [:=> [:cat #'config] [:vector #'tools/tool-spec]]
-                  [:=> [:cat #'config #'tools/tool-registry]
+                  [:=> [:cat #'config #'tools/ToolRegistry]
                    [:vector #'tools/tool-spec]]]}
   ([cfg]
    (tool-specs cfg (tools/built-in-registry)))

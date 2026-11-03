@@ -62,7 +62,7 @@
   `{\"path\" \"x\"}` work. Returns a string result. If the tool is unknown or
   throws, an error string is returned instead of propagating, so the agent
   loop can feed the failure back to the model."
-  {:malli/schema [:-> #'schema/tool-registry #'schema/tool-id
+  {:malli/schema [:-> #'schema/ToolRegistry #'schema/tool-id
                   [:maybe #'schema/tool-args]
                   [:maybe #'schema/tool-ctx] #'schema/tool-result]}
   [tool-registry id args ctx]
@@ -135,7 +135,7 @@
 
   `ctx` is passed to each tool function; it should carry at least `:cwd` for
   the filesystem/shell tools."
-  {:malli/schema [:-> #'schema/tool-registry
+  {:malli/schema [:-> #'schema/ToolRegistry
                   [:sequential #'schema/tool-call]
                   [:maybe #'schema/tool-ctx]
                   [:vector #'schema/tool-call-message]]}

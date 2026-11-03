@@ -60,8 +60,8 @@
                   schema/tool-args
                   schema/tool-ctx
                   schema/tool-result
-                  schema/tool
-                  schema/tool-registry
+                  schema/Tool
+                  schema/ToolRegistry
                   schema/tool-call
                   schema/tool-call-message)
 

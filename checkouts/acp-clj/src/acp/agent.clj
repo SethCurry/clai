@@ -1,15 +1,10 @@
 (ns acp.agent
   (:require
-            [cheshire.core :as json]
-            [clojure.java.io :as io]
-            [clojure.string :as str]
             [acp.schema.core :as schemas]
             [acp.schema-runtime :as rt]
             [acp.jsonrpc :as jsonrpc]
             [acp.errors :as errors])
-  (:import [java.io BufferedReader BufferedWriter InputStream OutputStream
-            Reader Writer]
-           [java.util.concurrent Callable Executors ExecutorService
+  (:import [java.util.concurrent Callable Executors ExecutorService
             ThreadFactory TimeUnit]
            [java.util.concurrent.atomic AtomicLong]))
 
@@ -31,7 +26,7 @@
 (defprotocol AgentHandler
   "The interface an ACP agent implements.
 
-  Each `handle-*` method receives the handler, the `StdioConnection`, and the
+  Each `handle-*` method receives the handler, the `Connection`, and the
   parsed request `params` map (camelCase keyword keys, verbatim from the wire;
   `{}` when params were omitted or `null`). It returns the JSON-RPC `result`
   map, or an `AcpError` (returned or thrown) to produce an error response.
@@ -204,10 +199,8 @@
 ;; Connection
 ;; ---------------------------------------------------------------------------
 
-(defrecord StdioConnection
-    [^BufferedReader in
-     ^BufferedWriter out
-     ^Object out-lock                      ; serializes all stdout writes
+(defrecord Connection
+    [channel                               ; acp.jsonrpc/Channel: the transport
      ^AtomicLong next-id                   ; outbound request id generator
      pending                               ; atom: id -> promise of response envelope
      cancellable                           ; atom: inbound id -> future (for $/cancel_request)
@@ -217,7 +210,7 @@
 
 (defn connection?
   [x]
-  (instance? StdioConnection x))
+  (instance? Connection x))
 
 (defn- daemon-thread-factory
   ^ThreadFactory [^String prefix]
@@ -231,42 +224,41 @@
   (Executors/newCachedThreadPool (daemon-thread-factory "clai-acp")))
 
 (defn make-connection
-  "Construct a `StdioConnection` for `handler`.
+  "Construct a `Connection` for `handler`.
 
   Options:
 
-    :in   A `java.io.Reader` or `java.io.InputStream` to read messages from.
-          Defaults to `System/in`.
-    :out  A `java.io.Writer` or `java.io.OutputStream` to write messages to.
-          Defaults to `System/out`.
+    :channel  An `acp.jsonrpc/Channel` carrying JSON-RPC messages to and from
+              the client. When supplied, `:in`/`:out` are ignored.
+    :in       A `java.io.Reader` or `java.io.InputStream` to read messages
+              from. Defaults to `System/in`. Used to build a stdio channel.
+    :out      A `java.io.Writer` or `java.io.OutputStream` to write messages
+              to. Defaults to `System/out`. Used to build a stdio channel.
 
-  The returned connection is not yet reading; call `run` to start the reader
-  loop. Construction does no I/O."
+  Absent an explicit `:channel`, a `jsonrpc/new-stdio-channel` is built from
+  `:in`/`:out`, so the connection is not tied to stdio. The returned
+  connection is not yet reading; call `run` to start the reader loop.
+  Construction does no I/O."
   ([handler] (make-connection handler nil))
-  ([handler {:keys [in out]
-             :or {in  System/in
-                  out System/out}}]
-   (let [^Reader   reader (cond-> in (instance? InputStream in) (io/reader))
-         ^Writer   writer (cond-> out (instance? OutputStream out) (io/writer))
-         conn
-         (->StdioConnection
-          (BufferedReader. reader)
-          (BufferedWriter. writer)
-          (Object.)
-          (AtomicLong. 1)
-          (atom {})                            ; pending
-          (atom {})                            ; cancellable
-          (atom {:initialized? false
-                 :protocol-version nil
-                 :client-info nil
-                 :client-capabilities nil})
-          (make-executor)
-          handler)]
-     conn)))
+  ([handler {:keys [channel in out]}]
+   (->Connection
+    (or channel
+        (jsonrpc/new-stdio-channel {:in  (or in System/in)
+                                    :out (or out System/out)}))
+    (AtomicLong. 1)
+    (atom {})                               ; pending
+    (atom {})                               ; cancellable
+    (atom {:initialized? false
+           :protocol-version nil
+           :client-info nil
+           :client-capabilities nil})
+    (make-executor)
+    handler)))
 
 (defn shutdown
-  "Stop the connection's worker pool. The reader loop exits on stdin EOF and
-  calls this automatically; call it explicitly when integrating elsewhere."
+  "Stop the connection's worker pool. The reader loop exits when the channel
+  closes and calls this automatically; call it explicitly when integrating
+  elsewhere."
   ([conn] (shutdown conn 1))
   ([conn ^long await-seconds]
    (let [^ExecutorService ex (:executor conn)]
@@ -526,28 +518,33 @@
 ;; ---------------------------------------------------------------------------
 
 (defn- read-loop
-  "Read newline-delimited JSON from `in`, dispatching each message. Blocks
-  until EOF (the client closed stdin) and then returns."
+  "Read messages from the connection's channel, dispatching each one. Blocks
+  until the channel closes (`take!` returns `nil`) and then returns. Frames the
+  transport could not decode get a parse-error response, and reading
+  continues."
   [conn]
-  (let [^BufferedReader reader (:in conn)]
-    (loop []
-      (if-let [line (.readLine reader)]
+  (loop []
+    (let [msg (jsonrpc/take! (:channel conn))]
+      (cond
+        (nil? msg)
+        nil
+
+        (jsonrpc/parse-error? msg)
         (do
-          (let [line (str/trim line)]
-            (when-not (str/blank? line)
-              (try
-                (let [parsed (json/parse-string-strict line true)]
-                  (process-message conn parsed))
-                (catch Throwable e
-                  (jsonrpc/write-message conn
-                                 (jsonrpc/error-envelope nil (errors/acp-error errors/err-parse)))))))
+          (jsonrpc/write-message conn
+                                 (jsonrpc/error-envelope
+                                  nil (errors/acp-error errors/err-parse)))
           (recur))
-        ;; EOF: stop.
-          nil))))
+
+        :else
+        (do
+          (process-message conn msg)
+          (recur))))))
 
 (defn run
-  "Start the agent: read ACP messages from stdin until EOF, dispatching to
-  `handler`. Blocks the calling thread until the connection ends.
+  "Start the agent: read ACP messages from the connection's channel until it
+  closes, dispatching to `handler`. Blocks the calling thread until the
+  connection ends.
 
   `handler` may be an `AgentHandler` or a map of options for
   `default-handler` (in which case a `DefaultHandler` is built). Returns
@@ -555,7 +552,11 @@
 
   Options (for the connection, not the handler):
 
-    :in  / :out  override stdin/stdout (see `make-connection`)."
+    :channel     An `acp.jsonrpc/Channel` to run over. For example an
+                 in-process channel pair (see `jsonrpc/channel-pair`) or a
+                 `jsonrpc/new-queue-channel`. Defaults to a stdio channel.
+    :in  / :out  stdio endpoints used when `:channel` is not supplied (see
+                 `make-connection`)."
   ([handler] (run handler nil))
   ([handler opts]
    (let [handler (if (satisfies? AgentHandler handler)

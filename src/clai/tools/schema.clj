@@ -73,17 +73,17 @@
   of the `tool`-role message)."
   :string)
 
-(def tool
+(def Tool
   "A tool map as stored in a registry: `{:id ... :handler ... :spec ...}`."
   [:map
    [:id tool-id]
    [:handler [:=> [:cat tool-args tool-ctx] [:maybe :any]]]
    [:spec tool-spec]])
 
-(def tool-registry
+(def ToolRegistry
   "A per-agent tool registry: a map of tool id to tool, as returned by
   `make-registry` and `built-in-registry`."
-  [:map-of tool-id tool])
+  [:map-of tool-id Tool])
 
 (def tool-call
   "One entry of an Ollama `tool_calls` vector. Both the nested

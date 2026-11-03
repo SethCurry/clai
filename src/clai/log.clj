@@ -1,32 +1,4 @@
 (ns clai.log
-  "Telemere-backed logging for `clai`.
-
-  An ACP agent speaks newline-delimited JSON-RPC over stdout, so **every log
-  signal must go to stderr**. Telemere's default console handler writes
-  non-error signals to `*out*`, which would corrupt the protocol. Loading this
-  namespace replaces that handler with one pinned to `*err*`.
-
-  ## Usage
-
-  Require this namespace for its side effects (preferably before any other
-  `clai` namespace that logs), then use Telemere directly:
-
-      (require '[taoensso.telemere :as tel])
-
-      (tel/log! {:level :debug, :id ::request, :data {:url url}}
-                \"Sending request\")
-
-      (tel/error! {:id ::request-failed, :data {:url url}} ex)
-
-  `log!`/`event!` default to `:info`; `:debug` and `:trace` signals are hidden
-  under Telemere's default `:info` minimum level.
-
-  ## Configuration
-
-  Telemere's standard environmental config works as usual, including
-  `TAOENSSO_TELEMERE_RT_MIN_LEVEL` and
-  `TAOENSSO_TELEMERE_RT_NS_FILTER`. For convenience, `CLAI_LOG_LEVEL` is also
-  honored (for example `CLAI_LOG_LEVEL=debug` when launching `clai`)."
   (:require [clojure.string :as str]
             [taoensso.telemere :as tel]))
 

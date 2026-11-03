@@ -18,7 +18,7 @@
   can use to read/write files, run shell commands within its session cwd,
   evaluate Clojure code in the running process, and delegate work to a
   sub-agent with its own tools and system prompt."
-  {:malli/schema [:-> [:vector #'schema/tool]]}
+  {:malli/schema [:-> [:vector #'schema/Tool]]}
   []
   (into []
         (concat (builtin-files/tools)
@@ -30,6 +30,6 @@
   "Return a fresh registry containing the default built-in tools. Each agent
   owns the returned value, so registering or removing tools for one agent does
   not affect any other."
-  {:malli/schema [:-> #'schema/tool-registry]}
+  {:malli/schema [:-> #'schema/ToolRegistry]}
   []
   (registry/make-registry (built-in-tools)))

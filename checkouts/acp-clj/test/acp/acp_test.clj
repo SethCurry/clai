@@ -447,6 +447,46 @@
     (.close pout)))
 
 ;; ---------------------------------------------------------------------------
+;; Channel transport
+;; ---------------------------------------------------------------------------
+
+(defn- take-with-timeout
+  "Take one message from `channel`, returning `::timeout` after `ms`."
+  [channel ms]
+  (deref (future (jsonrpc/take! channel)) ms ::timeout))
+
+(deftest agent-runs-over-an-in-process-channel-pair
+  (let [[client agent-channel] (jsonrpc/channel-pair)
+        _ (test-support/track-thread!
+           (doto (Thread. #(acp/run (acp/default-handler)
+                                    {:channel agent-channel}))
+             (.setDaemon true)
+             (.start)))]
+    (try
+      ;; Inbound: the channel feeds the agent, no stdin involved.
+      (jsonrpc/send! client (init-request 2))
+      (let [msg (take-with-timeout client 2000)]
+        (is (map? msg))
+        (is (= 1 (:id msg)))
+        (is (= 2 (-> msg :result :protocolVersion))))
+      ;; Outbound: responses come back over the same channel, not stdout.
+      (jsonrpc/send! client {:jsonrpc "2.0" :id 2 :method "session/new"
+                             :params {:cwd "/tmp" :mcpServers []}})
+      (let [msg (take-with-timeout client 2000)]
+        (is (= 2 (:id msg)))
+        (is (= errors/err-method (-> msg :error :code))))
+      (finally
+        ;; Closing the client side ends the agent's reader loop.
+        (jsonrpc/send! client nil)))))
+
+(deftest queue-channel-round-trips-and-closes
+  (let [[a b] (jsonrpc/channel-pair)]
+    (jsonrpc/send! a {:jsonrpc "2.0" :method "ping"})
+    (is (= {:jsonrpc "2.0" :method "ping"} (take-with-timeout b 1000)))
+    (is (nil? (do (jsonrpc/send! a nil)
+                  (take-with-timeout b 1000))))))
+
+;; ---------------------------------------------------------------------------
 ;; Unit-level helpers
 ;; ---------------------------------------------------------------------------
 

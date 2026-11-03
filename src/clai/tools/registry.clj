@@ -15,8 +15,8 @@
 (defn make-registry
   "Build a tool registry from `tools`, a collection of `{:id :handler :spec}` maps.
   A map `{id tool}` is accepted and returned as-is. Later duplicate ids win."
-  {:malli/schema [:-> [:or [:sequential #'schema/tool] #'schema/tool-registry]
-                  #'schema/tool-registry]}
+  {:malli/schema [:-> [:or [:sequential #'schema/Tool] #'schema/ToolRegistry]
+                  #'schema/ToolRegistry]}
   [tools]
   (if (map? tools)
     tools
@@ -24,8 +24,8 @@
 
 (defn register-tool
   "Return `tool-registry` with `tool` added (or replaced) under its id."
-  {:malli/schema [:-> #'schema/tool-registry #'schema/tool
-                  #'schema/tool-registry]}
+  {:malli/schema [:-> #'schema/ToolRegistry #'schema/Tool
+                  #'schema/ToolRegistry]}
   [tool-registry tool]
   (tel/log! {:level :debug
              :id    ::register-tool
@@ -35,8 +35,8 @@
 
 (defn unregister-tool
   "Return `tool-registry` without the tool named `id`, if present."
-  {:malli/schema [:-> #'schema/tool-registry #'schema/tool-id
-                  #'schema/tool-registry]}
+  {:malli/schema [:-> #'schema/ToolRegistry #'schema/tool-id
+                  #'schema/ToolRegistry]}
   [tool-registry id]
   (let [removed? (contains? tool-registry id)]
     (tel/log! {:level :debug
@@ -47,13 +47,13 @@
 
 (defn registered-tools
   "Return the registry map `{id tool}`. Mainly for inspection and tests."
-  {:malli/schema [:-> #'schema/tool-registry #'schema/tool-registry]}
+  {:malli/schema [:-> #'schema/ToolRegistry #'schema/ToolRegistry]}
   [tool-registry]
   tool-registry)
 
 (defn tool-ids
   "Return the ids in `tool-registry`."
-  {:malli/schema [:-> #'schema/tool-registry [:vector #'schema/tool-id]]}
+  {:malli/schema [:-> #'schema/ToolRegistry [:vector #'schema/tool-id]]}
   [tool-registry]
   (vec (keys tool-registry)))
 
@@ -62,9 +62,9 @@
   order of `ids` where the registry is inspected through `specs-for`. Unknown
   ids are skipped (with a warning). A nil `ids` means every tool is kept; an
   empty collection disables tools entirely."
-  {:malli/schema [:-> #'schema/tool-registry
+  {:malli/schema [:-> #'schema/ToolRegistry
                   [:maybe [:sequential #'schema/tool-id]]
-                  #'schema/tool-registry]}
+                  #'schema/ToolRegistry]}
   [tool-registry ids]
   (if (nil? ids)
     tool-registry
@@ -87,7 +87,7 @@
 
 (defn spec
   "Return the Ollama tool definition for `id` in `tool-registry`, or nil."
-  {:malli/schema [:-> #'schema/tool-registry #'schema/tool-id
+  {:malli/schema [:-> #'schema/ToolRegistry #'schema/tool-id
                   [:maybe #'schema/tool-spec]]}
   [tool-registry id]
   (-> (get tool-registry id) :spec))
@@ -95,14 +95,14 @@
 (defn specs
   "Return a vector of every tool definition in `tool-registry`, suitable for
   passing as the `:tools` field of an Ollama `/api/chat` request."
-  {:malli/schema [:-> #'schema/tool-registry [:vector #'schema/tool-spec]]}
+  {:malli/schema [:-> #'schema/ToolRegistry [:vector #'schema/tool-spec]]}
   [tool-registry]
   (mapv :spec (vals tool-registry)))
 
 (defn specs-for
   "Return a vector of tool definitions for `ids` (in the order given), skipping
   any ids that are not present in `tool-registry`."
-  {:malli/schema [:-> #'schema/tool-registry
+  {:malli/schema [:-> #'schema/ToolRegistry
                   [:sequential #'schema/tool-id]
                   [:vector #'schema/tool-spec]]}
   [tool-registry ids]
