@@ -30,3 +30,4 @@
 (require '[clai.repl.docker :as docker])
 (require '[clai.repl.git :as git])
 (require '[clai.repl.task :as task])
+(require '[clojure.pprint :refer [pprint]])
