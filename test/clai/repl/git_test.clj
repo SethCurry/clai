@@ -1,6 +1,7 @@
 (ns clai.repl.git-test
   "Tests for the git CLI helpers in `clai.repl.git`."
-  (:require [clai.repl.git :as git]
+  (:require [clai.repl.cli :as cli]
+            [clai.repl.git :as git]
             [clojure.java.io :as io]
             [clojure.test :refer :all])
   (:import [java.io File StringWriter]
@@ -85,6 +86,15 @@
                             {:dir dir :in "hello\n"})]
         (is (:success? result))
         (is (re-matches #"[0-9a-f]{40}\n" (:out result)))))))
+
+(deftest run-uses-the-shared-virtual-cwd
+  (with-repo
+    (fn [dir]
+      (binding [cli/*cwd* (.getAbsolutePath dir)]
+        (let [result (git/run ["rev-parse" "--is-inside-work-tree"])]
+          (is (:success? result))
+          (is (= "true\n" (:out result)))
+          (is (= (.getAbsolutePath dir) (:dir result))))))))
 
 (deftest git-prints-output
   (with-repo

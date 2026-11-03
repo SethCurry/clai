@@ -28,36 +28,36 @@
 
       (commit \"Fix the parser\" {:dir \"/repo\"})
 
-  The working directory defaults to [[*dir*]], then to the JVM's working
-  directory. It can be set for a single call with the `:dir` option or bound
-  for a series of calls:
+  The working directory is virtual: it comes from `:dir`, then [[*dir*]], then
+  the shared `clai.repl.cli/*cwd*`, then the JVM's working directory. It can
+  be set for a single call with the `:dir` option or bound for a series of
+  calls with either git's compatibility var or the shared one:
 
       (binding [git/*dir* \"/repo\"] (status))
+      (binding [clai.repl.cli/*cwd* \"/repo\"] (status))
 
   Commands are non-interactive by default: the pager is disabled, the editor
   is set to `true` (so a missing commit message fails instead of hanging), and
   terminal credential prompts are turned off. Override any of those with the
   `:env` option, for example `{:env {\"GIT_EDITOR\" \"vim\"}}`."
   (:refer-clojure :exclude [merge run!])
-  (:require [clojure.java.io :as io]
-            [clojure.string :as str])
-  (:import [java.io ByteArrayOutputStream File InputStream OutputStream]
-           [java.nio.charset StandardCharsets]
-           [java.util.concurrent TimeUnit]))
+  (:require [clai.repl.cli :as cli]
+            [clojure.string :as str]))
 
 ;; ---------------------------------------------------------------------------
 ;; Configuration
 ;; ---------------------------------------------------------------------------
 
 (def ^:dynamic *dir*
-  "Default working directory for git commands. When nil, the JVM's working
-  directory (`user.dir`) is used."
+  "Deprecated git-specific default working directory. Prefer binding
+  `clai.repl.cli/*cwd*`; when non-nil this still takes precedence for git
+  commands."
   nil)
 
 (def ^:dynamic *timeout-ms*
-  "Default number of milliseconds to wait for a git command before killing it.
-  Bind or pass `:timeout` to change it; pass `:timeout nil` to wait forever."
-  30000)
+  "Deprecated git-specific command timeout. Prefer binding
+  `clai.repl.cli/*timeout-ms*`; when non-nil this still overrides it for git."
+  nil)
 
 (def ^:private default-env
   "Environment defaults that keep git commands from blocking a REPL."
@@ -68,92 +68,36 @@
    "GIT_TERMINAL_PROMPT" "0"})
 
 ;; ---------------------------------------------------------------------------
-;; Process plumbing
+;; Runner
 ;; ---------------------------------------------------------------------------
 
 (defn- arg->string
   "Render one git argument. Keywords and symbols lose their leading colon, so
   `:--oneline` and `'--oneline` both work as flags."
   [arg]
-  (cond
-    (keyword? arg) (name arg)
-    (symbol? arg)  (name arg)
-    :else          (str arg)))
+  (cli/arg->string arg))
 
-(defn- normalize-args
-  "Normalize an args value to a vector of strings."
-  [args]
-  (cond
-    (nil? args)        []
-    (string? args)     [args]
-    (sequential? args) (mapv arg->string args)
-    :else              [(arg->string args)]))
-
-(defn- resolve-dir
-  "Resolve the working directory for a command, verifying that it exists."
+(defn- run-opts
+  "Apply git-specific environment defaults and compatibility vars before
+  handing `opts` to the shared CLI runner."
   [opts]
-  (let [dir (io/file (arg->string (or (:dir opts) *dir*
-                                      (System/getProperty "user.dir"))))]
-    (when-not (.isDirectory dir)
-      (throw (ex-info (str "Not a git working directory: " (.getPath dir))
-                      {:git/dir (.getAbsolutePath dir)})))
-    (.getAbsoluteFile dir)))
+  (cond-> (update opts :env #(clojure.core/merge default-env %))
+    (and (nil? (:dir opts)) (some? *dir*))
+    (assoc :dir *dir*)
 
-(defn- start-pump!
-  "Start a daemon thread copying `in` into `buf`. Returns the thread."
-  [^InputStream in ^ByteArrayOutputStream buf thread-name]
-  (doto (Thread. ^Runnable
-                 (fn []
-                   (try
-                     (with-open [in in]
-                       (io/copy in buf))
-                     (catch Throwable _ nil)))
-                 thread-name)
-    (.setDaemon true)
-    (.start)))
-
-(defn- start-input!
-  "Start a daemon thread feeding `in` to the process's stdin and closing it.
-
-  `in` may be nil, a string, a byte array, or an `InputStream`. Closing stdin
-  is important: otherwise a command that reads stdin can wait forever."
-  [^OutputStream out in]
-  (doto (Thread. ^Runnable
-                 (fn []
-                   (try
-                     (with-open [out out]
-                       (when (some? in)
-                         (cond
-                           (instance? InputStream in) (io/copy in out)
-                           (bytes? in)                (.write out ^bytes in)
-                           :else
-                           (.write out (.getBytes (str in)
-                                                  StandardCharsets/UTF_8)))))
-                     (catch Throwable _ nil)))
-                 "clai-git-stdin")
-    (.setDaemon true)
-    (.start)))
-
-(defn- join-thread!
-  "Wait briefly for a pump thread to finish."
-  [^Thread thread]
-  (when thread
-    (try
-      (.join thread 2000)
-      (catch InterruptedException _ nil))))
-
-;; ---------------------------------------------------------------------------
-;; Runner
-;; ---------------------------------------------------------------------------
+    (and (not (contains? opts :timeout)) (some? *timeout-ms*))
+    (assoc :timeout *timeout-ms*)))
 
 (defn run
-  "Run `git` with `args` in `opts`' `:dir` and capture its output.
+  "Run `git` with `args` in `opts`' virtual working directory and capture its
+  output.
 
   `args` is a string or a sequential collection of strings, keywords, and
   symbols; arguments are passed to git verbatim, so no shell quoting or
   escaping is involved. `opts` may contain:
 
-    :dir      working directory (defaults to [[*dir*]] or `user.dir`)
+    :dir      working directory (defaults to [[*dir*]], then
+              `clai.repl.cli/*cwd*`, then `user.dir`)
     :timeout  milliseconds to wait, or nil to wait forever
     :in       stdin contents (a string, byte array, or InputStream)
     :env      extra environment variables; a nil value removes one
@@ -162,75 +106,16 @@
   and `:timed-out?`. A non-zero exit is not an error; use [[run!]] for that."
   ([args] (run args {}))
   ([args opts]
-   (let [args     (normalize-args args)
-         dir      (resolve-dir opts)
-         command  (into ["git"] args)
-         timeout  (if (contains? opts :timeout) (:timeout opts) *timeout-ms*)
-         builder  (doto (ProcessBuilder. ^java.util.List command)
-                    (.directory dir)
-                    (.redirectErrorStream false))
-         env      (.environment builder)]
-     (doseq [[k v] (clojure.core/merge default-env (:env opts))]
-       (if (nil? v)
-         (.remove env (arg->string k))
-         (.put env (arg->string k) (str v))))
-     (let [proc (try
-                  (.start builder)
-                  (catch java.io.IOException e
-                    (throw (ex-info (str "Could not start git: "
-                                         (or (ex-message e) (str (class e))))
-                                    {:git/command command
-                                     :git/dir     (.getAbsolutePath dir)}
-                                    e))))
-           out-buf    (ByteArrayOutputStream.)
-           err-buf    (ByteArrayOutputStream.)
-           out-thread (start-pump! (.getInputStream proc) out-buf
-                                   "clai-git-stdout")
-           err-thread (start-pump! (.getErrorStream proc) err-buf
-                                   "clai-git-stderr")
-           in-thread  (start-input! (.getOutputStream proc) (:in opts))
-           finished   (try
-                        (if (some? timeout)
-                          (.waitFor proc (long timeout) TimeUnit/MILLISECONDS)
-                          (do (.waitFor proc) true))
-                        (catch InterruptedException _
-                          false))
-           timed-out? (not finished)
-           _          (when timed-out? (.destroyForcibly proc))
-           _          (when timed-out?
-                        (try
-                          (.waitFor proc 2000 TimeUnit/MILLISECONDS)
-                          (catch InterruptedException _ nil)))
-           exit       (when-not timed-out? (.exitValue proc))]
-       (join-thread! out-thread)
-       (join-thread! err-thread)
-       (join-thread! in-thread)
-       {:command    command
-        :dir        (.getAbsolutePath dir)
-        :exit       exit
-        :out        (String. (.toByteArray out-buf) StandardCharsets/UTF_8)
-        :err        (String. (.toByteArray err-buf) StandardCharsets/UTF_8)
-        :success?   (and (some? exit) (zero? exit))
-        :timed-out? timed-out?}))))
+   (cli/run "git" args (assoc (run-opts opts)
+                               :label "git"
+                               :data-prefix "git"))))
 
 (defn check!
   "Return `result` when git succeeded, or throw an `ex-info` describing the
   failure. The exception's data contains the command, exit, stdout, and
   stderr."
-  [{:keys [command exit out err timed-out?] :as result}]
-  (if (:success? result)
-    result
-    (let [detail (str/trim (if (str/blank? (str err)) (str out) (str err)))]
-      (throw (ex-info (str "git command failed"
-                           (when (some? exit) (str " (exit " exit ")"))
-                           (when timed-out? " (timed out)")
-                           ": " (str/join " " command)
-                           (when (seq detail) (str "\n" detail)))
-                      {:git/command    command
-                       :git/exit       exit
-                       :git/out        out
-                       :git/err        err
-                       :git/timed-out? timed-out?})))))
+  [result]
+  (cli/check! result {:label "git" :data-prefix "git"}))
 
 (defn run!
   "Like [[run]], but throw when git exits non-zero. Returns the result map."
@@ -239,41 +124,14 @@
 
 (defn- echo-result!
   "Print a result map's stdout and stderr, without altering the map."
-  [{:keys [out err timed-out?] :as result}]
-  (when (pos? (count (str out)))
-    (print (str out))
-    (flush))
-  (when (pos? (count (str err)))
-    (binding [*out* *err*]
-      (print (str err))
-      (flush)))
-  (when timed-out?
-    (binding [*out* *err*]
-      (println "[git timed out]")
-      (flush)))
-  result)
+  [result]
+  (cli/echo-result! "git" result))
 
 (defn- split-git-args
-  "Separate an optional options map from variadic [[git]] arguments.
-
-  The map may be first or last, and a single sequential argument is treated as
-  the full argument list, so `(git {:dir d} \"status\")`, `(git \"status\"
-  {:dir d})`, and `(git [\"status\"])` all work."
+  "Separate an optional options map from variadic [[git]] arguments. See
+  `clai.repl.cli/split-args`."
   [args]
-  (let [args (vec args)
-        [opts args] (cond
-                      (and (seq args) (map? (first args)))
-                      [(first args) (subvec args 1)]
-
-                      (and (seq args) (map? (peek args)))
-                      [(peek args) (pop args)]
-
-                      :else
-                      [{} args])
-        args (if (and (= 1 (count args)) (sequential? (first args)))
-               (vec (first args))
-               args)]
-    [opts args]))
+  (cli/split-args args))
 
 (defn git
   "Run git and print its stdout and stderr, like the `git` command itself.
