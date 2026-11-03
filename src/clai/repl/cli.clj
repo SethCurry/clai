@@ -2,7 +2,8 @@
   "Shared REPL-friendly helpers for driving command-line programs.
 
   This is the process plumbing used by the program-specific namespaces such as
-  `clai.repl.git` and `clai.repl.task`. The core primitive is [[run]]: it
+  `clai.repl.git`, `clai.repl.task`, and `clai.repl.docker`. The core primitive
+  is [[run]]: it
   starts a program directly (never through a shell), captures stdout and
   stderr separately, and returns a result map without throwing when the
   program exits non-zero:
