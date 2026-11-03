@@ -20,6 +20,7 @@
 
       (new!)                             ; start and select a session
       (prompt! \"summarize AGENTS.md\")    ; stream a reply
+      (history!)                         ; print the conversation so far
       (resume! \"<session-id>\")           ; replay a previous conversation
       (disconnect!)                      ; stop the in-process agent
 
@@ -183,8 +184,8 @@
 
 (defn- close-stream!
   "Terminate the currently open streamed chunk, if any."
-  [{:keys [open] :as stream}]
-  (when open
+  [stream]
+  (when (:open @stream)
     (println)
     (flush))
   (reset! stream {}))
@@ -245,7 +246,7 @@
           (do (close-stream! stream) (render-tool-call! update))
 
           (= "tool_call_update" kind)
-          (render-tool-call-update! update)
+          (do (close-stream! stream) (render-tool-call-update! update))
 
           (= "plan" kind)
           (do (close-stream! stream) (render-plan! update))
@@ -447,6 +448,36 @@
            session  (assoc response :sessionId (str id) :cwd cwd)]
        (alter-var-root #'current-session (constantly session))
        session))))
+
+(defn history!
+  "Print the history of the current session.
+
+  ACP has no dedicated history request: an agent replays a session's messages
+  as `session/update` notifications when the session is loaded. This sends
+  `session/load` for [[current-session]] and renders the replayed conversation
+  without changing the selected session. It requires an agent that advertises
+  `loadSession` support.
+
+  With no argument this reads [[current-session]]. An argument may be a
+  session id or a map with `:sessionId` and optionally `:cwd` to read another
+  session's history. Returns the `session/load` result."
+  ([] (history! nil))
+  ([arg]
+   (let [client (connect!)
+         opts   (cond
+                  (nil? arg) {}
+                  (map? arg) arg
+                  :else      {:sessionId (str arg)})
+         id     (or (:sessionId opts) (current-session-id))]
+     (when (nil? id)
+       (throw (ex-info "No current session; call (new!) or (resume! ...) first."
+                       {:clai/no-session true})))
+     (when-not (get-in @runtime [:initialize :capabilities :loadSession])
+       (throw (ex-info "This agent cannot replay history (no loadSession)."
+                       {:clai/no-history true})))
+     (request! client "session/load"
+               (cond-> {:sessionId (str id)}
+                 (some? (:cwd opts)) (assoc :cwd (str (:cwd opts))))))))
 
 (defn prompt!
   "Send `content` to the current session and stream the agent's reply.

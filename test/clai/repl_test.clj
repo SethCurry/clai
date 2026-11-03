@@ -52,15 +52,48 @@
                                     :content {:type "text" :text "contents"}}]})
                  {:stopReason "end_turn"})
 
+        "stream" (do
+                   (acp/send-session-update
+                    conn sessionId
+                    {:sessionUpdate "agent_thought_chunk"
+                     :content       {:type "text" :text "pondering"}})
+                   (acp/send-agent-message-chunk conn sessionId "answer")
+                   (acp/send-session-update
+                    conn sessionId
+                    {:sessionUpdate "tool_call"
+                     :toolCallId    "call-2"
+                     :title         "a tool"})
+                   {:stopReason "end_turn"})
+
         (do
           (acp/send-agent-message-chunk conn sessionId "echo: ")
           (acp/send-agent-message-chunk conn sessionId text)
           {:stopReason "end_turn"}))))
 
-  (on-ext-request [_ _ method _params]
+  (on-ext-request [_ conn method {:keys [sessionId]}]
     (if (= "session/load" method)
-      {}
+      (do
+        (when (= "with-history" sessionId)
+          (acp/send-session-update
+           conn sessionId
+           {:sessionUpdate "user_message_chunk"
+            :content       {:type "text" :text "hello"}})
+          (acp/send-session-update
+           conn sessionId
+           {:sessionUpdate "agent_message_chunk"
+            :content       {:type "text" :text "hi there"}}))
+        {})
       (acp-errors/acp-error acp-errors/err-method))))
+
+(defrecord NoLoadHandler []
+  acp/AgentHandler
+  (handle-initialize [_ _ {:keys [protocolVersion]}]
+    {:protocolVersion (long (or protocolVersion acp/protocol-version-2))
+     :info            {:name "no-load" :version "0"}
+     :capabilities    {}})
+
+  (handle-session-new [_ _ {:keys [cwd]}]
+    {:sessionId "no-load" :cwd cwd}))
 
 (use-fixtures :once quiet-logs)
 (use-fixtures :once instrument)
@@ -123,6 +156,19 @@
     (is (str/includes? out "[tool] call-1 completed"))
     (is (str/includes? out "contents"))))
 
+(deftest prompt!-ends-a-reply-with-a-newline
+  (repl/new!)
+  (let [[_ out] (with-cli-out #(repl/prompt! "ping"))]
+    (is (= "clai> echo: ping\n" out))))
+
+(deftest prompt!-starts-tool-calls-on-their-own-line
+  (repl/new!)
+  (let [[_ out] (with-cli-out #(repl/prompt! "stream"))]
+    (is (= ["thinking> pondering"
+            "clai> answer"
+            "  [tool] a tool"]
+           (str/split-lines out)))))
+
 (deftest prompt!-throws-on-an-agent-error
   (repl/new!)
   (let [ex (try
@@ -153,6 +199,36 @@
 (deftest resume!-uses-the-selected-session
   (repl/new!)
   (is (= "stub-session" (:sessionId (repl/resume!)))))
+
+;; ---------------------------------------------------------------------------
+;; history!
+;; ---------------------------------------------------------------------------
+
+(deftest history!-replays-the-current-session
+  (repl/new!)
+  (alter-var-root #'repl/current-session
+                  (constantly {:sessionId "with-history" :cwd "/tmp"}))
+  (let [[result out] (with-cli-out #(repl/history!))]
+    (is (= {} result))
+    (is (= ["you> hello" "clai> hi there"] (str/split-lines out)))))
+
+(deftest history!-accepts-an-explicit-session-id
+  (repl/new!)
+  (let [[_ out] (with-cli-out #(repl/history! "with-history"))]
+    (is (str/includes? out "you> hello"))))
+
+(deftest history!-requires-a-session
+  (is (thrown? clojure.lang.ExceptionInfo (repl/history!))))
+
+(deftest history!-requires-load-session-support
+  (with-redefs [repl/current-agent (->NoLoadHandler)]
+    (repl/new!)
+    (let [ex (try
+               (binding [*out* (StringWriter.)] (repl/history!))
+               nil
+               (catch clojure.lang.ExceptionInfo e e))]
+      (is (some? ex))
+      (is (true? (:clai/no-history (ex-data ex)))))))
 
 ;; ---------------------------------------------------------------------------
 ;; disconnect!
