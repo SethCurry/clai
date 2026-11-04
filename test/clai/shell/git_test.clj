@@ -1,7 +1,7 @@
-(ns clai.repl.git-test
-  "Tests for the git CLI helpers in `clai.repl.git`."
-  (:require [clai.repl.cli :as cli]
-            [clai.repl.git :as git]
+(ns clai.shell.git-test
+  "Tests for the git CLI helpers in `clai.shell.git`."
+  (:require [clai.shell.cli :as cli]
+            [clai.shell.git :as git]
             [clojure.java.io :as io]
             [clojure.test :refer :all])
   (:import [java.io File StringWriter]

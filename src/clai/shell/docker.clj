@@ -1,4 +1,4 @@
-(ns clai.repl.docker
+(ns clai.shell.docker
   "REPL-friendly helpers for driving the `docker` CLI.
 
   The core primitive is [[run]]. It starts `docker` directly (never through a
@@ -33,11 +33,11 @@
           :state)
 
   The working directory is virtual and shared with the other CLI helper
-  namespaces. It comes from `:dir`, then `clai.repl.cli/*cwd*`, then the JVM's
+  namespaces. It comes from `:dir`, then `clai.shell.cli/*cwd*`, then the JVM's
   working directory, so it matters for relative bind mounts, build contexts,
   and compose files:
 
-      (binding [clai.repl.cli/*cwd* \"/project\"]
+      (binding [clai.shell.cli/*cwd* \"/project\"]
         (build \".\" {:tag \"my-app:dev\"}))
 
   Commands are kept non-interactive by default: CLI hints are disabled,
@@ -54,10 +54,10 @@
   docker flag is not wrapped by a dedicated option, and list helpers accept
   `:filter` as either a string, a sequence of strings, or a map of
   `key value` pairs. Commands use the shared timeout
-  (`clai.repl.cli/*timeout-ms*`, 30 seconds by default)."
+  (`clai.shell.cli/*timeout-ms*`, 30 seconds by default)."
   (:refer-clojure :exclude [run!])
   (:require [cheshire.core :as json]
-            [clai.repl.cli :as cli]
+            [clai.shell.cli :as cli]
             [clojure.string :as str]))
 
 ;; ---------------------------------------------------------------------------
@@ -236,7 +236,7 @@
   symbols; arguments are passed to docker verbatim, so no shell quoting or
   escaping is involved. `opts` may contain:
 
-    :dir        working directory (defaults to `clai.repl.cli/*cwd*`, then
+    :dir        working directory (defaults to `clai.shell.cli/*cwd*`, then
                 `user.dir`)
     :timeout    milliseconds to wait, or nil to wait forever
     :in         stdin contents (a string, byte array, or InputStream)

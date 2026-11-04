@@ -11,11 +11,23 @@
             [acp.schema.terminal :as terminal]
             [acp.schema.tool :as tool]))
 
-;; The protocol defines a type named `Error`, so drop java.lang's
-;; automatic class mapping before it becomes a var.
+;; The protocol defines a type named `Error`, which collides with the
+;; `java.lang.Error` class that every namespace imports by default.  Creating
+;; that var the obvious way prints "WARNING: Error already refers to: class
+;; java.lang.Error", so this namespace
+;;
+;;   * drops the class mapping before creating the var,
+;;   * creates it with `intern` instead of `declare`/`def`, and
+;;   * refers to it with `ns-resolve` instead of a `#'Error` var quote.
+;;
+;; The last two only matter once this namespace is AOT compiled: the `ns` form
+;; restores the class mapping on every load, and both a compiled `def` and a
+;; compiled var quote intern the var from the class that embeds them -- before
+;; the code below gets a chance to drop the class mapping again.
 (when (class? (get (ns-map *ns*) 'Error))
   (ns-unmap *ns* 'Error))
 
+(intern *ns* 'Error)
 
 ;; Schemas refer to one another, so declare every name up front.
 (declare
@@ -26,7 +38,6 @@
  ClientNotification
  ClientRequest
  ClientResponse
- Error
  ErrorCode
  ExtNotification
  ExtRequest
@@ -121,7 +132,7 @@
       #'session/SetSessionConfigOptionResponse
       #'session/PromptResponse
       #'ExtResponse]]]
-   [:map {:closed false} [:id #'common/RequestId] [:error #'Error]]])
+   [:map {:closed false} [:id #'common/RequestId] [:error (ns-resolve *ns* 'Error)]]])
 
 (def ->AgentResponse
   "Create a `AgentResponse` value."
@@ -233,7 +244,7 @@
       #'tool/KillTerminalResponse
       #'elicitation/CreateElicitationResponse
       #'ExtResponse]]]
-   [:map {:closed false} [:id #'common/RequestId] [:error #'Error]]])
+   [:map {:closed false} [:id #'common/RequestId] [:error (ns-resolve *ns* 'Error)]]])
 
 (def ->ClientResponse
   "Create a `ClientResponse` value."
@@ -244,18 +255,20 @@
 ;; Error
 ;; -------------------------------------------------------------------------
 
-(def Error
-  "JSON-RPC error object. Represents an error that occurred during method execution, following the JSON-RPC 2.0 error object specification with optional additional data. See protocol docs: [JSON-RPC Error Object](https://www.jsonrpc.org/specification#error_object)"
+(intern *ns* 'Error
   [:map
    {:closed false}
    [:code #'ErrorCode]
    [:message :string]
    [:data {:optional true} :any]])
 
+(alter-meta! (ns-resolve *ns* 'Error) assoc
+  :doc "JSON-RPC error object. Represents an error that occurred during method execution, following the JSON-RPC 2.0 error object specification with optional additional data. See protocol docs: [JSON-RPC Error Object](https://www.jsonrpc.org/specification#error_object)")
+
 (def ->Error
   "Create a `Error` value."
   (rt/make-object-constructor
-    #'Error
+    (ns-resolve *ns* 'Error)
     "Error"
     [{:key :code, :required? true, :nullable? false}
      {:key :message, :required? true, :nullable? false}

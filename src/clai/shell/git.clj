@@ -1,4 +1,4 @@
-(ns clai.repl.git
+(ns clai.shell.git
   "REPL-friendly helpers for driving the `git` CLI.
 
   The core primitive is [[run]]. It starts `git` directly (never through a
@@ -29,19 +29,19 @@
       (commit \"Fix the parser\" {:dir \"/repo\"})
 
   The working directory is virtual: it comes from `:dir`, then [[*dir*]], then
-  the shared `clai.repl.cli/*cwd*`, then the JVM's working directory. It can
+  the shared `clai.shell.cli/*cwd*`, then the JVM's working directory. It can
   be set for a single call with the `:dir` option or bound for a series of
   calls with either git's compatibility var or the shared one:
 
       (binding [git/*dir* \"/repo\"] (status))
-      (binding [clai.repl.cli/*cwd* \"/repo\"] (status))
+      (binding [clai.shell.cli/*cwd* \"/repo\"] (status))
 
   Commands are non-interactive by default: the pager is disabled, the editor
   is set to `true` (so a missing commit message fails instead of hanging), and
   terminal credential prompts are turned off. Override any of those with the
   `:env` option, for example `{:env {\"GIT_EDITOR\" \"vim\"}}`."
   (:refer-clojure :exclude [merge run!])
-  (:require [clai.repl.cli :as cli]
+  (:require [clai.shell.cli :as cli]
             [clojure.string :as str]))
 
 ;; ---------------------------------------------------------------------------
@@ -50,13 +50,13 @@
 
 (def ^:dynamic *dir*
   "Deprecated git-specific default working directory. Prefer binding
-  `clai.repl.cli/*cwd*`; when non-nil this still takes precedence for git
+  `clai.shell.cli/*cwd*`; when non-nil this still takes precedence for git
   commands."
   nil)
 
 (def ^:dynamic *timeout-ms*
   "Deprecated git-specific command timeout. Prefer binding
-  `clai.repl.cli/*timeout-ms*`; when non-nil this still overrides it for git."
+  `clai.shell.cli/*timeout-ms*`; when non-nil this still overrides it for git."
   nil)
 
 (def ^:private default-env
@@ -97,7 +97,7 @@
   escaping is involved. `opts` may contain:
 
     :dir      working directory (defaults to [[*dir*]], then
-              `clai.repl.cli/*cwd*`, then `user.dir`)
+              `clai.shell.cli/*cwd*`, then `user.dir`)
     :timeout  milliseconds to wait, or nil to wait forever
     :in       stdin contents (a string, byte array, or InputStream)
     :env      extra environment variables; a nil value removes one
@@ -129,7 +129,7 @@
 
 (defn- split-git-args
   "Separate an optional options map from variadic [[git]] arguments. See
-  `clai.repl.cli/split-args`."
+  `clai.shell.cli/split-args`."
   [args]
   (cli/split-args args))
 

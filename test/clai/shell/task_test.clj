@@ -1,7 +1,7 @@
-(ns clai.repl.task-test
-  "Tests for the task-binary helpers in `clai.repl.task`."
-  (:require [clai.repl.cli :as cli]
-            [clai.repl.task :as task]
+(ns clai.shell.task-test
+  "Tests for the task-binary helpers in `clai.shell.task`."
+  (:require [clai.shell.cli :as cli]
+            [clai.shell.task :as task]
             [clojure.java.io :as io]
             [clojure.string :as str]
             [clojure.test :refer :all])

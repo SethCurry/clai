@@ -26,8 +26,8 @@
 (log-to-file!)
 
 (require '[clai.repl :refer :all])
-(require '[clai.repl.cli :as cli])
-(require '[clai.repl.docker :as docker])
-(require '[clai.repl.git :as git])
-(require '[clai.repl.task :as task])
+(require '[clai.shell.cli :as cli])
+(require '[clai.shell.docker :as docker])
+(require '[clai.shell.git :as git])
+(require '[clai.shell.task :as task])
 (require '[clojure.pprint :refer [pprint]])

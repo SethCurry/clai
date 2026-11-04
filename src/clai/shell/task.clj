@@ -1,4 +1,4 @@
-(ns clai.repl.task
+(ns clai.shell.task
   "REPL-friendly helpers for driving the `task` binary (go-task).
 
   The core primitive is [[run]]. It starts `task` directly (never through a
@@ -29,11 +29,11 @@
       (run! \"build\" {:dir \"/project\"})
 
   The working directory is virtual and shared with the other CLI helper
-  namespaces. It comes from `:dir`, then `clai.repl.cli/*cwd*`, then the JVM's
+  namespaces. It comes from `:dir`, then `clai.shell.cli/*cwd*`, then the JVM's
   working directory. It can be set for a single call with the `:dir` option or
   bound for a series of calls:
 
-      (binding [clai.repl.cli/*cwd* \"/project\"]
+      (binding [clai.shell.cli/*cwd* \"/project\"]
         (task/list))
 
   Common options are accepted in a map, in any position:
@@ -54,9 +54,9 @@
     :vars        task variables as a map or sequence of `KEY=value` strings
 
   As with the other CLI helpers, commands are run with the configured timeout
-  (`clai.repl.cli/*timeout-ms*`, 30 seconds by default)."
+  (`clai.shell.cli/*timeout-ms*`, 30 seconds by default)."
   (:refer-clojure :exclude [list run!])
-  (:require [clai.repl.cli :as cli]
+  (:require [clai.shell.cli :as cli]
             [clojure.string :as str]))
 
 ;; ---------------------------------------------------------------------------
@@ -120,7 +120,7 @@
 
   `tasks` may be a task name, a collection of task names, or nil. Options are
   described in the namespace docstring. The virtual working directory is
-  selected from `:dir`, then `clai.repl.cli/*cwd*`, then `user.dir`.
+  selected from `:dir`, then `clai.shell.cli/*cwd*`, then `user.dir`.
 
   Returns a map with `:command`, `:dir`, `:exit`, `:out`, `:err`, `:success?`,
   and `:timed-out?`. A non-zero exit is not an error; use [[run!]] for that."

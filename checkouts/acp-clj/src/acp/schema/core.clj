@@ -590,7 +590,12 @@
 (def ClientResponse protocol/ClientResponse)
 (def ->ClientResponse protocol/->ClientResponse)
 
-(def Error protocol/Error)
+;; `Error` is re-exported with `intern` and resolved by name, rather than with a
+;; `def`/`protocol/Error` reference; see the note on the `ns-unmap` above.  Both
+;; a compiled `def` and a compiled reference to the var re-print the
+;; `java.lang.Error` shadowing warning when this namespace is loaded from AOT
+;; classes.
+(intern *ns* 'Error @(ns-resolve 'acp.schema.protocol 'Error))
 (def ->Error protocol/->Error)
 
 (def ErrorCode protocol/ErrorCode)

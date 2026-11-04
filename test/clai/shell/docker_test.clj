@@ -1,7 +1,7 @@
-(ns clai.repl.docker-test
-  "Tests for the Docker CLI helpers in `clai.repl.docker`."
-  (:require [clai.repl.cli :as cli]
-            [clai.repl.docker :as docker]
+(ns clai.shell.docker-test
+  "Tests for the Docker CLI helpers in `clai.shell.docker`."
+  (:require [clai.shell.cli :as cli]
+            [clai.shell.docker :as docker]
             [clojure.java.io :as io]
             [clojure.string :as str]
             [clojure.test :refer :all])

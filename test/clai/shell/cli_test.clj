@@ -1,6 +1,6 @@
-(ns clai.repl.cli-test
-  "Tests for the shared CLI process helpers in `clai.repl.cli`."
-  (:require [clai.repl.cli :as cli]
+(ns clai.shell.cli-test
+  "Tests for the shared CLI process helpers in `clai.shell.cli`."
+  (:require [clai.shell.cli :as cli]
             [clojure.string :as str]
             [clojure.test :refer :all])
   (:import [java.io File]

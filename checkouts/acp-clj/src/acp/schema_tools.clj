@@ -293,9 +293,17 @@
 
 (defn- var-source
   "Render a schema reference var as an unqualified var quote, so generated code
-  resolves it in its own namespace."
+  resolves it in its own namespace.
+
+  The protocol type named `Error` is referenced with `ns-resolve` instead: a
+  `#'Error` quote is embedded as a constant in AOT-compiled classes, and
+  interning that var re-prints the `java.lang.Error` shadowing warning before
+  the `ns` form in the generated file can drop the class mapping."
   [v]
-  (str "#'" (:name (meta v))))
+  (let [var-name (str (:name (meta v)))]
+    (if (= var-name "Error")
+      (str "(ns-resolve *ns* '" var-name ")")
+      (str "#'" var-name))))
 
 (declare emit-form)
 
@@ -394,6 +402,39 @@
     (.append sb ")")
     (str sb)))
 
+(defn- intern-source
+  "Source text for a var created with `intern` instead of `def`, with `doc` set
+  as the var's `:doc` metadata.
+
+  Needed for the protocol type named `Error`: the `ns` form restores java.lang's
+  `Error` class mapping on every load -- including when an AOT-compiled copy of
+  the namespace is loaded -- so a compiled `def` (or a `#'Error` var quote)
+  prints \"WARNING: Error already refers to: class java.lang.Error\" at startup.
+  An `intern` call, plus `ns-resolve` where the var is referred to, creates and
+  uses the same var without the warning."
+  [name-symbol doc form]
+  (let [sb (StringBuilder.)]
+    (.append sb "(intern *ns* '")
+    (.append sb (str name-symbol))
+    (.append sb "\n  ")
+    (emit-form sb form 2)
+    (.append sb ")")
+    (when (seq doc)
+      (.append sb "\n\n(alter-meta! (ns-resolve *ns* '")
+      (.append sb (str name-symbol))
+      (.append sb ") assoc :doc ")
+      (.append sb (pr-str doc))
+      (.append sb ")"))
+    (str sb)))
+
+(defn- schema-def-source
+  "Source text binding one protocol type.  Every type is a `def` except `Error`,
+  which `intern-source` has to create."
+  [type-name doc form]
+  (if (= type-name "Error")
+    (intern-source (symbol type-name) doc form)
+    (def-source (symbol type-name) doc form)))
+
 (defn- section-source
   [title]
   (str rule "\n;; " title "\n" rule))
@@ -433,9 +474,9 @@
              (intern *ns* (symbol (str "->" type-name))
                      (make-constructor type-name infos union?))
              [(section-source type-name)
-              (def-source (symbol type-name)
-                          (description node)
-                          @(schema-var type-name))
+              (schema-def-source type-name
+                                 (description node)
+                                 @(schema-var type-name))
               (def-source (symbol (str "->" type-name))
                           (str "Create a `" type-name "` value.")
                           (constructor-form type-name infos union?))])))
@@ -489,7 +530,9 @@
      :or   {ns-symbol 'acp.schemas-generated
             schema-path "acp/schema.json"}}]
    (let [sb (StringBuilder.)]
-     (emit-form sb (cons 'declare (map (comp symbol first) schema-defs)) 0)
+     (emit-form sb (cons 'declare (remove #{'Error}
+                                          (map (comp symbol first) schema-defs)))
+                0)
      (str (ns-header ns-symbol schema-path)
           "(ns " ns-symbol "\n"
           "  \"Malli schemas for the Agent Client Protocol.\n\n"
@@ -499,6 +542,10 @@
           ";; automatic class mapping before it becomes a var.\n"
           "(when (class? (get (ns-map *ns*) 'Error))\n"
           "  (ns-unmap *ns* 'Error))\n\n"
+          ";; `Error` is created with `intern` rather than `declare`/`def`, so loading\n"
+          ";; an AOT-compiled copy of this namespace does not re-print the\n"
+          ";; `java.lang.Error` shadowing warning.\n"
+          "(intern *ns* 'Error)\n\n"
           ";; Schemas refer to one another, so declare every name up front.\n"
           sb "\n\n"
           (str/join "\n\n" generated-definitions)
