@@ -4,5 +4,5 @@ TODO: write [great documentation](https://jacobian.org/writing/what-to-write/)
 
 ## Further reading
 
-* [Session storage format](state.md) — the EDN files `clai.state` writes
+* [Session storage format](state.md) — the EDN files `clai.agent.state` writes
   under `~/.local/clai/sessions/`.

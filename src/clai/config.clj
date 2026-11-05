@@ -4,7 +4,7 @@
   The config file is plain EDN (https://github.com/edn-format/edn) and may
   contain any subset of the recognized keys; anything omitted falls back to
   the usual environment variables / defaults documented in this namespace
-  and `clai.providers.ollama`.
+  and `clai.agent.providers.ollama`.
 
   ## Recognized keys
 
@@ -19,7 +19,7 @@
                         :timeout  600000}    ; ms
        :tools          [\"read_file\" \"write_file\" ...]}
 
-  `:tools` is a vector of tool ids (see `clai.tools/built-in-tools`) to
+  `:tools` is a vector of tool ids (see `clai.agent.tools/built-in-tools`) to
   enable. When omitted, every tool in the agent's registry is enabled; when
   present but empty, no tools are offered to the model.
 
@@ -33,9 +33,9 @@
 
   If none of these exist, an empty map is returned and `clai` behaves exactly
   as it did before config-file support (env vars + defaults)."
-  (:require [clai.log]
-            [clai.providers.ollama :as ollama]
-            [clai.tools :as tools]
+  (:require [clai.agent.providers.ollama :as ollama]
+            [clai.agent.tools :as tools]
+            [clai.log]
             [clai.util :as util]
             [clojure.java.io :as io]
             [taoensso.telemere :as tel])
@@ -55,7 +55,7 @@
 
 (def ollama-config
   "The `:ollama` sub-map of a config file, forwarded to
-  `clai.providers.ollama/make-client`."
+  `clai.agent.providers.ollama/make-client`."
   [:map
    [:host {:optional true} :string]
    [:api-key {:optional true} [:maybe :string]]

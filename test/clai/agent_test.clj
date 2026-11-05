@@ -6,8 +6,8 @@
             [acp.agent.helpers :as helpers]
             [acp.schema.core :as schemas]
             [clai.agent :as agent]
-            [clai.providers.ollama :as ollama]
-            [clai.state :as state]
+            [clai.agent.providers.ollama :as ollama]
+            [clai.agent.state :as state]
             [clai.test-support :refer [quiet-logs instrument]]
             [clojure.string :as str]
             [clojure.test :refer :all])

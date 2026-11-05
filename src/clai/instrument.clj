@@ -10,15 +10,15 @@
   Test namespaces are skipped so loading the test suite (or a REPL that has
   loaded it) never instruments test helpers. Use [[start!]] to re-scan after
   loading new `clai` namespaces and [[stop!]] to remove instrumentation."
-  (:require [clai.config]
+  (:require [clai.agent.providers.ollama]
+            [clai.agent.providers.ollama.image]
+            [clai.agent.providers.ollama.messages]
+            [clai.agent.state]
+            [clai.agent.tools.builtin]
+            [clai.agent.tools.invoke]
+            [clai.agent.tools.registry]
+            [clai.config]
             [clai.log]
-            [clai.providers.ollama]
-            [clai.providers.ollama.image]
-            [clai.providers.ollama.messages]
-            [clai.state]
-            [clai.tools.builtin]
-            [clai.tools.invoke]
-            [clai.tools.registry]
             [clai.util]
             [clojure.string :as str]
             [malli.instrument :as mi]

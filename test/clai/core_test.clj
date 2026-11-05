@@ -32,16 +32,16 @@
 (deftest repl-forwards-its-arguments
   (let [seen (atom ::none)]
     (with-redefs [core/launch-repl (fn [args] (reset! seen (vec args)))]
-      (is (zero? (core/run ["repl"])))
+      (is (zero? (core/run ["shell"])))
       (is (= [] @seen))
-      (is (zero? (core/run ["repl" "--standalone" "--color"])))
+      (is (zero? (core/run ["shell" "--standalone" "--color"])))
       (is (= ["--standalone" "--color"] @seen)))))
 
 (deftest help-prints-usage
   (doseq [args [["help"] ["--help"] ["-h"]]]
     (let [{:keys [out err]} (capture #(is (zero? (core/run args))))]
       (is (str/includes? out "Usage: clai [command]") (pr-str args))
-      (is (str/includes? out "repl") (pr-str args))
+      (is (str/includes? out "shell") (pr-str args))
       (is (str/blank? err) (pr-str args)))))
 
 (deftest unknown-command-fails

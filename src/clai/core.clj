@@ -100,7 +100,7 @@
 (def commands
   "The `clai` subcommands, as `[name description]` pairs."
   [["agent" "Serve the ACP agent over stdio; the default command."]
-   ["repl"  "Launch an interactive REPLY REPL that drives the agent in-process."]])
+   ["shell" "Launch an interactive REPLY REPL that drives the agent in-process."]])
 
 (defn usage
   "The `clai` usage text."
@@ -110,7 +110,7 @@
                   (concat (map (fn [[command description]]
                                  (format "  %-6s %s" command description))
                                commands)
-                          ["" "Run `clai repl --help` for the REPL's options."]))))
+                          ["" "Run `clai shell --help` for the REPL's options."]))))
 
 (defn run
   "Run the `clai` CLI described by `args` and return an exit status.
@@ -123,7 +123,7 @@
   (let [command (or (first args) "agent")]
     (case command
       "agent" (do (serve-agent) 0)
-      "repl"  (do (launch-repl (rest args)) 0)
+      "shell" (do (launch-repl (rest args)) 0)
       ("help" "--help" "-h") (do (println (usage)) 0)
       (do
         (binding [*out* *err*]

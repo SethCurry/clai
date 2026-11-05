@@ -30,4 +30,5 @@
 (require '[clai.shell.docker :as docker])
 (require '[clai.shell.git :as git])
 (require '[clai.shell.task :as task])
+(require '[clai.shell.help :refer [help!]])
 (require '[clojure.pprint :refer [pprint]])

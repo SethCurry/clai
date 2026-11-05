@@ -2,25 +2,32 @@
   "The `clai` ACP agent handler.
 
   `ollama-agent` builds an `acp/AgentHandler` that answers `session/prompt`
-  requests with a `clai.providers.ollama` chat model, persists sessions via
-  `clai.state`, and executes model tool calls via its own per-agent tool
-  registry from `clai.tools`.
+  requests with a `clai.agent.providers.ollama` chat model, persists sessions
+  via `clai.agent.state`, and executes model tool calls via its own per-agent
+  tool registry from `clai.agent.tools`.
 
-  Supporting pieces live in sibling namespaces:
+  Supporting pieces live in sibling namespaces under `clai.agent.*`:
 
-    * `clai.providers.ollama.acp` -- ACP <-> Ollama message conversion and
-                                     history replay.
-    * `clai.agent.loop`     -- the tool-calling chat loop.
-    * `clai.config`         -- config/env resolution for the agent's model,
-                               client, tools, and chat options."
+    * `clai.agent.loop`                    -- the tool-calling chat loop.
+    * `clai.agent.providers.ollama`        -- the Ollama HTTP client.
+    * `clai.agent.providers.ollama.acp`    -- ACP <-> Ollama message
+                                              conversion and history replay.
+    * `clai.agent.resources`               -- ACP resource blocks rendered as
+                                              text for the model.
+    * `clai.agent.state`                   -- persistent session storage.
+    * `clai.agent.tools`                   -- per-agent tool registries and
+                                              invocation.
+    * `clai.config`                        -- config/env resolution for the
+                                              agent's model, client, tools,
+                                              and chat options."
   (:require [acp.agent :as acp]
             [acp.errors :as acp-errors]
             [clai.agent.loop :as agent-loop]
+            [clai.agent.providers.ollama.acp :as ollama-acp]
+            [clai.agent.state :as state]
+            [clai.agent.tools :as tools]
             [clai.config :as config]
             [clai.log]
-            [clai.providers.ollama.acp :as ollama-acp]
-            [clai.state :as state]
-            [clai.tools :as tools]
             [clai.util :as util]
             [clojure.java.io :as io]
             [clojure.string :as str]
@@ -371,7 +378,7 @@
 
     :cfg            the loaded config map (`clai.config/load-config`).
                     Defaults to `(config/load-config)`.
-    :client         the `clai.providers.ollama.Client` to use. Defaults to one
+    :client         the `clai.agent.providers.ollama.Client` to use. Defaults to one
                     built from `cfg` and the environment (`OLLAMA_HOST`,
                     `OLLAMA_API_KEY`).
     :model          the model name to send to `/api/chat`. Defaults to `cfg`'s

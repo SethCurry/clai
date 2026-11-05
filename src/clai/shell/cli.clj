@@ -28,6 +28,9 @@
   [[check!]] turns a failed result into an `ex-info`; [[echo-result!]] prints
   a result the way the underlying program would; [[run!]] combines them.
 
+  [[cd]] changes that default for the rest of the JVM's life rather than for a
+  single `binding` form, and [[pwd]] reports the directory it set.
+
   Commands are non-interactive only insofar as the caller's environment
   defaults make them so. Pass `:env` to add or remove environment variables
   for a single call (`nil` removes a variable)."
@@ -88,6 +91,55 @@
                       {:dir     (.getAbsolutePath dir)
                        :cli/dir (.getAbsolutePath dir)})))
     (.getAbsoluteFile dir)))
+
+(defn- expand-home
+  "Expand a leading `~` in `path` to the user's home directory."
+  [path]
+  (if (or (= path "~") (str/starts-with? path "~/"))
+    (str (System/getProperty "user.home") (subs path 1))
+    path))
+
+(defn pwd
+  "Return the current virtual working directory as an absolute path: the value
+  of [[*cwd*]], or the JVM's working directory when that is nil."
+  []
+  (.getAbsolutePath
+   (io/file (arg->string (or *cwd* (System/getProperty "user.dir"))))))
+
+(defn cd
+  "Change the default virtual working directory used by later commands.
+
+  `path` is resolved against the current virtual working directory (see
+  [[*cwd*]]), a leading `~` expands to the user's home directory, and the
+  result is canonicalized. The target must exist, so a typo throws an
+  `ex-info` -- carrying `:dir` and `:cli/dir` -- instead of silently changing
+  the directory.
+
+  Unlike `binding`, the change is written to the root of [[*cwd*]] and so
+  persists for later commands in this JVM, including the program-specific
+  namespaces such as `clai.shell.git`. A `binding` around the call still
+  shadows the new root until it is popped. With no argument the directory
+  changes to the user's home directory. Returns the new working directory as
+  an absolute path.
+
+      (cd \"/repo\")   ;=> \"/repo\"
+      (cd \"src\")     ;=> \"/repo/src\"
+      (cd)            ;=> the user's home directory"
+  ([] (cd (System/getProperty "user.home")))
+  ([path]
+   (let [path (expand-home (arg->string path))
+         base (io/file (arg->string (or *cwd*
+                                       (System/getProperty "user.dir"))))
+         dir  (let [dir (io/file path)]
+                (if (.isAbsolute dir) dir (io/file base path)))
+         dir  (.getCanonicalFile dir)]
+     (when-not (.isDirectory dir)
+       (throw (ex-info (str "Not a working directory: " (.getPath dir))
+                       {:dir     (.getAbsolutePath dir)
+                        :cli/dir (.getAbsolutePath dir)})))
+     (let [path (.getAbsolutePath dir)]
+       (alter-var-root #'*cwd* (constantly path))
+       path))))
 
 ;; ---------------------------------------------------------------------------
 ;; Process plumbing

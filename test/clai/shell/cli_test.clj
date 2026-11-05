@@ -1,6 +1,7 @@
 (ns clai.shell.cli-test
   "Tests for the shared CLI process helpers in `clai.shell.cli`."
   (:require [clai.shell.cli :as cli]
+            [clojure.java.io :as io]
             [clojure.string :as str]
             [clojure.test :refer :all])
   (:import [java.io File]
@@ -90,3 +91,66 @@
         (is (true? (:timed-out? result)))
         (is (nil? (:exit result)))
         (is (false? (:success? result)))))))
+
+(defn- with-root-cwd
+  "Run `f` with [[cli/*cwd*]]'s root binding set to `dir`, restoring the
+  original root afterwards."
+  [dir f]
+  (let [original (var-get #'cli/*cwd*)]
+    (try
+      (alter-var-root #'cli/*cwd* (constantly dir))
+      (f)
+      (finally
+        (alter-var-root #'cli/*cwd* (constantly original))))))
+
+(deftest pwd-reports-the-virtual-working-directory
+  (with-temp-dir
+    (fn [dir]
+      (binding [cli/*cwd* (.getAbsolutePath dir)]
+        (is (= (.getAbsolutePath dir) (cli/pwd))))
+      (with-root-cwd
+        nil
+        (fn []
+          (is (= (.getAbsolutePath (io/file (System/getProperty "user.dir")))
+                 (cli/pwd))))))))
+
+(deftest cd-updates-the-default-working-directory
+  (with-temp-dir
+    (fn [dir]
+      (let [sub (io/file dir "sub")]
+        (is (.mkdir sub))
+        (with-root-cwd
+          nil
+          (fn []
+            (is (= (.getCanonicalPath dir)
+                   (cli/cd (.getAbsolutePath dir))))
+            (is (= (.getCanonicalPath dir) (cli/pwd)))
+            (is (= (.getCanonicalPath dir)
+                   (str/trim (:out (cli/run "pwd" [])))))
+            (is (= (.getCanonicalPath sub) (cli/cd "sub")))
+            (is (= (.getCanonicalPath sub)
+                   (str/trim (:out (cli/run "pwd" [])))))))))))
+
+(deftest cd-rejects-a-missing-directory
+  (with-temp-dir
+    (fn [dir]
+      (with-root-cwd
+        nil
+        (fn []
+          (let [missing (.getAbsolutePath (io/file dir "nope"))
+                ex      (try
+                          (cli/cd missing)
+                          nil
+                          (catch clojure.lang.ExceptionInfo e e))]
+            (is (some? ex))
+            (is (= missing (:dir (ex-data ex))))
+            (is (str/starts-with? (ex-message ex) "Not a working directory"))
+            (is (nil? cli/*cwd*))))))))
+
+(deftest cd-defaults-to-the-home-directory
+  (with-root-cwd
+    nil
+    (fn []
+      (let [home (System/getProperty "user.home")]
+        (is (= (.getCanonicalPath (io/file home)) (cli/cd)))
+        (is (= (.getCanonicalPath (io/file home)) (cli/pwd)))))))

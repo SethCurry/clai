@@ -9,10 +9,10 @@
   reasoning returned by Ollama in an assistant message's `:thinking` field is
   streamed as `agent_thought_chunk` updates."
   (:require [acp.agent.helpers :as helpers]
+            [clai.agent.providers.ollama :as ollama]
+            [clai.agent.state :as state]
+            [clai.agent.tools :as tools]
             [clai.log]
-            [clai.providers.ollama :as ollama]
-            [clai.state :as state]
-            [clai.tools :as tools]
             [clai.util :as util]
             [clojure.string :as str]
             [taoensso.telemere :as tel]))
@@ -265,11 +265,11 @@
 
   `opts` keys:
 
-    :client         the `clai.providers.ollama` client to chat with.
+    :client         the `clai.agent.providers.ollama` client to chat with.
     :model          the model name sent to `/api/chat`.
     :tool-registry  this agent's `{id tool}` registry, used to execute calls.
     :tool-specs     optional vector of Ollama tool definitions to offer;
-                    defaults to `(clai.tools/specs tool-registry)`.
+                    defaults to `(clai.agent.tools/specs tool-registry)`.
     :chat-opts      extra Ollama request keys (e.g. `:options`, `:think`,
                     `:format`) merged into each `/api/chat` request.
     :max-rounds     cap on consecutive tool-call rounds per prompt, so a model
