@@ -24,6 +24,12 @@
       (resume! \"<session-id>\")           ; replay a previous conversation
       (disconnect!)                      ; stop the in-process agent
 
+  Every session gets its own namespace, `sessions.<session-id>`. [[new!]] and
+  [[resume!]] create or reuse that namespace, seed it with the Vars and
+  aliases of `user`, and move the REPL into it with `in-ns`. The namespace
+  also gets its own `current-session` Var, so returning to it keeps the
+  helpers pointed at its session.
+
   [[current-session]] and [[current-agent]] are vars rather than atoms so a
   REPL can rebind or redefine them: `(with-redefs [current-agent my-agent]
   (new!))` drives a different handler."
@@ -42,7 +48,11 @@
 
 (def current-session
   "The session the helpers act on: a map carrying at least `:sessionId` (a bare
-  id string is accepted too), or nil before [[new!]]/[[resume!]]."
+  id string is accepted too), or nil before [[new!]]/[[resume!]].
+
+  [[new!]] and [[resume!]] keep this global selection up to date, but each
+  session's namespace also gets a local `current-session`, which
+  [[current-session-id]] prefers when the helpers are called there."
   nil)
 
 (def current-agent
@@ -81,9 +91,15 @@
     :else           (str session)))
 
 (defn current-session-id
-  "The id of [[current-session]], or nil when no session is selected."
+  "The id of the session selected in the calling namespace, or nil.
+
+  A session's namespace has its own `current-session`, so its helpers keep
+  acting on that session even after another session is selected elsewhere.
+  Namespaces that do not map `current-session` (application code calling the
+  helpers directly, for example) fall back to the global [[current-session]]."
   []
-  (session-id current-session))
+  (let [v (ns-resolve *ns* 'current-session)]
+    (session-id (if (var? v) @v current-session))))
 
 ;; ---------------------------------------------------------------------------
 ;; Inbound dispatch
@@ -389,6 +405,96 @@
     result))
 
 ;; ---------------------------------------------------------------------------
+;; Session namespaces
+;; ---------------------------------------------------------------------------
+
+(def ^:private session-ns-prefix
+  "Prefix of the namespace a session's REPL runs in."
+  "sessions")
+
+(defn- session-ns-segment
+  "A namespace-safe version of session id `id`.
+
+  Session ids are usually UUID strings, but agents are free to use anything;
+  characters that cannot appear in a namespace name are replaced with `_`."
+  [id]
+  (let [id (str id)]
+    (if (str/blank? id)
+      "unnamed"
+      (str/replace id #"[^A-Za-z0-9_.-]" "_"))))
+
+(defn session-ns
+  "The symbol naming the REPL namespace of `session`: `sessions.<id>`.
+
+  `session` is a session map or a bare session id. The id is made
+  namespace-safe by replacing everything but letters, digits, `.`, `_` and
+  `-` with `_`."
+  [session]
+  (symbol (str session-ns-prefix "." (session-ns-segment (session-id session)))))
+
+(defn- refer-publics!
+  "Refer every public Var of namespace `from` into `ns`."
+  [ns from]
+  (doseq [[sym v] (ns-publics from)]
+    (.refer ^clojure.lang.Namespace ns sym v))
+  ns)
+
+(defn- seed-session-ns!
+  "Fill a fresh session namespace `ns` with the REPL's helpers.
+
+  The namespace starts as a copy of `user`: its aliases (`git`, `docker`,
+  ...) and Vars (`help!`, `pprint`, definitions made in `user`, ...) are
+  referred here, so code written in a session namespace can use the same
+  helpers as code written in `user`. The `clai.repl` helpers are referred
+  explicitly as well, so a session namespace is usable even when `user` is
+  sparse (as it is under `lein test`, for example)."
+  [ns]
+  (binding [*ns* ns]
+    (refer 'clojure.core))
+  (refer-publics! ns 'clai.repl)
+  (when-let [user-ns (find-ns 'user)]
+    (doseq [[alias target] (ns-aliases user-ns)]
+      (.addAlias ^clojure.lang.Namespace ns alias target))
+    (doseq [[sym v] (ns-map user-ns)
+            :when (var? v)]
+      (.refer ^clojure.lang.Namespace ns sym v)))
+  ns)
+
+(defn- select-session!
+  "Make `session` current and move the REPL into its namespace.
+
+  The namespace `sessions.<id>` is created and seeded on first use; a
+  namespace that already exists (because the session was visited earlier in
+  this JVM) keeps the definitions made in it. Either way, its
+  `current-session` Var is set to `session` and `*ns*` is switched there with
+  `in-ns`, so the prompt and subsequent evaluations run in the session's
+  namespace."
+  [session]
+  (alter-var-root #'current-session (constantly session))
+  (let [ns-sym (session-ns session)
+        ns     (find-ns ns-sym)
+        fresh? (nil? ns)
+        ns     (or ns (create-ns ns-sym))]
+    (when fresh?
+      (seed-session-ns! ns)
+      (alter-meta! ns assoc
+                   :doc (str "REPL namespace for clai session "
+                             (session-id session) ".")))
+    ;; `seed-session-ns!` refers `current-session` along with the other
+    ;; `user` Vars; drop that refer so the namespace gets its own Var
+    ;; without the "already refers to" warning a replacing `refer` prints.
+    (when-let [existing (get (ns-map ns) 'current-session)]
+      (when-not (and (var? existing)
+                     (identical? ns (.ns ^clojure.lang.Var existing)))
+        (ns-unmap ns 'current-session)))
+    (let [v (intern ns 'current-session session)]
+      (alter-meta! v assoc
+                   :doc (str "The clai session selected in this namespace ("
+                             (session-id session) ").")))
+    (in-ns ns-sym)
+    session))
+
+;; ---------------------------------------------------------------------------
 ;; REPL helpers
 ;; ---------------------------------------------------------------------------
 
@@ -422,7 +528,8 @@
     "session/resume"))
 
 (defn new!
-  "Start a new agent session and make it the [[current-session]].
+  "Start a new agent session, make it the [[current-session]], and move the
+  REPL into its namespace (`sessions.<id>`, seeded from `user`).
 
   `opts` is a map with optional `:cwd` (defaults to the JVM's working
   directory) and `:mcpServers` (defaults to none); a bare string is read as the
@@ -436,14 +543,15 @@
                             {:cwd        cwd
                              :mcpServers (vec (or (:mcpServers opts) []))})
          session  (assoc response :cwd cwd)]
-     (alter-var-root #'current-session (constantly session))
-     session)))
+     (select-session! session))))
 
 (defn resume!
-  "Resume an existing session, replaying its history to the display, and make
-  it the [[current-session]].
+  "Resume an existing session, replaying its history to the display, make it
+  the [[current-session]], and move the REPL into its namespace
+  (`sessions.<id>`).
 
-  With no argument this resumes [[current-session]] when one is selected, and
+  With no argument this resumes the session selected in the calling namespace
+  when one is selected, and
   otherwise the most recently updated session the agent lists. An argument may
   be a session id or a map with `:sessionId` and optionally `:cwd`. Returns the
   resumed session map."
@@ -466,8 +574,7 @@
                                :cwd        cwd
                                :mcpServers []})
            session  (assoc response :sessionId (str id) :cwd cwd)]
-       (alter-var-root #'current-session (constantly session))
-       session))))
+       (select-session! session)))))
 
 (defn history!
   "Print the history of the current session.

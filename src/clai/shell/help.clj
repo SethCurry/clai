@@ -192,7 +192,7 @@
   (println (help-text target))
   nil)
 
-(defmacro help!
+(defmacro help
   "Print the documentation and call signatures of a Var, without quoting it.
 
       (help git/commit)
@@ -207,7 +207,7 @@
 
   See [[help-text]] for the same text as a string."
   ([]
-   `(help* (var ~(var-symbol #'help!))))
+   `(help* (var ~(var-symbol #'help))))
   ([sym]
    (cond
      ;; `(help 'git/commit)`: the caller quoted the symbol for us.
@@ -223,3 +223,8 @@
 
      :else
      `(help* ~sym))))
+
+(defmacro help!
+  "Alias for [[help]], kept for callers that use the side-effecting name."
+  [& args]
+  `(help ~@args))

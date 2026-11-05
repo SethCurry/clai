@@ -99,13 +99,17 @@
 (use-fixtures :once instrument)
 (use-fixtures :each
   (fn [f]
-    (try
-      (with-redefs [repl/current-agent (->StubHandler)]
-        (alter-var-root #'repl/current-session (constantly nil))
-        (f))
-      (finally
-        (repl/disconnect!)
-        (alter-var-root #'repl/current-session (constantly nil))))))
+    ;; `new!` and `resume!` switch `*ns*` into the session's namespace; put
+    ;; the runner back where it was so later tests do not inherit it.
+    (let [test-ns *ns*]
+      (try
+        (with-redefs [repl/current-agent (->StubHandler)]
+          (alter-var-root #'repl/current-session (constantly nil))
+          (f))
+        (finally
+          (repl/disconnect!)
+          (alter-var-root #'repl/current-session (constantly nil))
+          (in-ns (ns-name test-ns)))))))
 
 (defn- with-cli-out
   "Run `f`, capturing everything written to `*out*` and returning
@@ -149,6 +153,70 @@
 
 (deftest new!-accepts-a-bare-cwd
   (is (= "/tmp" (:cwd (repl/new! "/tmp")))))
+
+;; ---------------------------------------------------------------------------
+;; session namespaces
+;; ---------------------------------------------------------------------------
+
+(deftest session-ns-names-the-session-namespace
+  (is (= 'sessions.123 (repl/session-ns "123")))
+  (is (= 'sessions.abc-def (repl/session-ns {:sessionId "abc-def"})))
+  (is (= 'sessions.a_b (repl/session-ns "a/b"))))
+
+(deftest new!-enters-the-session-namespace
+  (binding [*ns* (the-ns 'user)]
+    (let [session (repl/new! {:cwd "/tmp"})
+          ns-sym  (repl/session-ns session)
+          ns      (find-ns ns-sym)]
+      (is (= 'sessions.stub-session ns-sym))
+      (is (identical? ns *ns*))
+      (is (= "sessions.stub-session" (str (ns-name *ns*))))
+      (is (= session (var-get (get (ns-map ns) 'current-session))))
+      (is (= "stub-session" (repl/current-session-id))))))
+
+(deftest session-namespaces-are-seeded-from-user
+  (let [user-ns    (the-ns 'user)
+        session-id "seed-session-ns-from-user"
+        ns-sym     (repl/session-ns session-id)
+        tmp-alias  'clai-repl-test-tmp-alias
+        tmp-var    (intern user-ns 'clai-repl-test-tmp-var 42)]
+    ;; Make sure this session namespace is created fresh, even when the tests
+    ;; run more than once in the same JVM.
+    (remove-ns ns-sym)
+    (binding [*ns* user-ns]
+      (alias tmp-alias 'clojure.string))
+    (try
+      (binding [*ns* user-ns]
+        (let [session    (repl/resume! session-id)
+              session-ns (find-ns ns-sym)]
+          (is (= session-id (repl/current-session-id)))
+          (is (identical? session-ns *ns*))
+
+          ;; The aliases and Vars of `user` are inserted into the session ns.
+          (is (= 'clojure.string
+                 (some-> (get (ns-aliases session-ns) tmp-alias) ns-name)))
+          (is (identical? tmp-var
+                          (get (ns-map session-ns) 'clai-repl-test-tmp-var)))
+
+          ;; And its own current-session points at this session.
+          (is (= session
+                 (var-get (get (ns-map session-ns) 'current-session))))))
+      (finally
+        (remove-ns ns-sym)
+        (ns-unalias user-ns tmp-alias)
+        (ns-unmap user-ns 'clai-repl-test-tmp-var)))))
+
+(deftest namespaces-keep-their-own-current-session
+  (binding [*ns* (the-ns 'user)]
+    (repl/resume! "older")
+    (is (= "older" (repl/current-session-id)))
+    (repl/new!)
+    (is (= "stub-session" (repl/current-session-id)))
+    ;; Returning to an earlier session's namespace selects its session again,
+    ;; even though the global current-session now points at the new one.
+    (binding [*ns* (the-ns (repl/session-ns "older"))]
+      (is (= "older" (repl/current-session-id))))
+    (is (= "stub-session" (repl/current-session-id)))))
 
 ;; ---------------------------------------------------------------------------
 ;; prompt!
@@ -228,7 +296,9 @@
   (repl/new!)
   (alter-var-root #'repl/current-session
                   (constantly {:sessionId "with-history" :cwd "/tmp"}))
-  (let [[result out] (with-cli-out #(repl/history!))]
+  ;; Read the global current-session rather than the session namespace's copy.
+  (let [[result out] (binding [*ns* (the-ns 'user)]
+                       (with-cli-out #(repl/history!)))]
     (is (= {} result))
     (is (= ["you> hello" "clai> hi there"] (str/split-lines out)))))
 
