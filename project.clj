@@ -9,6 +9,7 @@
                  [com.taoensso/telemere "1.2.1"]
                  [metosin/malli "0.17.0"]
                  [reply/reply "0.5.1"]
+                 [com.datomic/local "1.0.301"]
                  [io.scurry/acp "0.1.0-SNAPSHOT"]]
   :main clai.core
   :target-path "target/%s"
