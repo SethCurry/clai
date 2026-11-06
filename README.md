@@ -9,7 +9,7 @@ runtime live.
 It should enable the agent to modify itself at runtime, in major ways.
 
 At the end of this, you should end up with an agent where you can just say
-"I want to use a new LLM provider.  My key is $x, and the API docs are at $y.
+"I want to use a new LLM provider. My key is $x, and the API docs are at $y.
 Write a provider for them, and then run this prompt: $z"
 
 It should be able to write a provider that implements that and then send that
@@ -17,10 +17,15 @@ prompt, or even add subagent support to itself and use that.
 
 **WARNING**
 
-This is not sandboxed at all.  Your LLM can modify its harness to steal your
+This is not sandboxed at all. Your LLM can modify its harness to steal your
 memecoins and tell your cat that Santa isn't real.
 
-Be extremely careful.  You should _not_ run this outside of Docker, a VM, something like that.
+Be extremely careful. You should _not_ run this outside of Docker, a VM, something like that.
 
-Also, _the entire repo is vibecoded_.  This is mostly a toy, I'm not reviewing what goes on in here
-for the most part.  There could be cryptominers in here, I have no idea, and I make no promises.
+Also, _the entire repo is vibecoded_. This is mostly a toy, I'm not reviewing what goes on in here
+for the most part. There could be cryptominers in here, I have no idea, and I make no promises.
+
+## cljdocs
+
+You can get a local copy by running `task cljd` and navigating
+to http://localhost:9122/d/clai/clai/0.1.0-SNAPSHOT/doc/readme

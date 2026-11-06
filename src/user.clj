@@ -26,6 +26,7 @@
 (log-to-file!)
 
 (require '[clai.repl :refer :all])
+(require '[clai.shell.browser :as browser])
 (require '[clai.shell.cli :as cli])
 (require '[clai.shell.docker :as docker])
 (require '[clai.shell.git :as git])

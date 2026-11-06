@@ -31,7 +31,7 @@
 
 (deftest repl-forwards-its-arguments
   (let [seen (atom ::none)]
-    (with-redefs [core/launch-repl (fn [args] (reset! seen (vec args)))]
+    (with-redefs [core/launch-repl (fn [args] (reset! seen (vec args)) 0)]
       (is (zero? (core/run ["shell"])))
       (is (= [] @seen))
       (is (zero? (core/run ["shell" "--standalone" "--color"])))
@@ -52,33 +52,103 @@
     (is (str/blank? out))))
 
 ;; ---------------------------------------------------------------------------
+;; nREPL server
+;; ---------------------------------------------------------------------------
+
+(deftest nrepl-starts-a-server
+  (let [started (atom [])
+        out     (StringWriter.)]
+    (with-redefs [core/start-nrepl! (fn [port]
+                                      (swap! started conj port)
+                                      {:port 7888})
+                  core/await-shutdown (fn [] nil)]
+      (binding [*out* out]
+        (is (zero? (core/run ["nrepl"])))
+        (is (zero? (core/run ["nrepl" "7888"])))))
+    (is (= [nil 7888] @started))
+    (is (str/includes? (str out) "7888"))))
+
+(deftest nrepl-rejects-bad-ports
+  (with-redefs [core/start-nrepl! (fn [_] (throw (ex-info "should not start" {})))]
+    (let [{:keys [out err]}
+          (capture #(is (= 1 (core/run ["nrepl" "nope"]))))]
+      (is (str/includes? err "Invalid nREPL port"))
+      (is (str/blank? out))))
+  (let [{:keys [err]} (capture #(is (= 1 (core/run ["nrepl" "1" "2"]))))]
+    (is (str/includes? err "Usage: clai nrepl"))))
+
+(deftest nrepl-port-file-round-trips
+  (let [file (java.io.File/createTempFile "clai-nrepl" ".port")]
+    (try
+      (with-redefs [core/port-file (.getPath file)
+                    clojure.core/requiring-resolve
+                    (fn [sym]
+                      (when (= sym 'nrepl.server/start-server)
+                        (fn [& _] {:port 7888})))]
+        (is (= 7888 (:port (core/start-nrepl! nil))))
+        (is (= 7888 (core/running-nrepl-port))))
+      (finally
+        (.delete file)))))
+
+;; ---------------------------------------------------------------------------
 ;; REPLY launch
 ;; ---------------------------------------------------------------------------
 
 (defn- stub-reply
-  "Run `f` with REPLY's parser and launcher replaced by `parse` and `launch`."
+  "Run `f` with REPLY's parser and launcher replaced by `parse` and `launch`,
+  and with an nREPL server advertised on port 51234."
   [parse launch f]
   (with-redefs [clojure.core/requiring-resolve
                 (fn [sym]
                   (case sym
                     reply.main/parse-args parse
-                    reply.main/launch     launch))]
+                    reply.main/launch     launch))
+                core/running-nrepl-port (constantly 51234)]
     (f)))
 
 (deftest launch-repl-adds-the-clai-bootstrap
   (let [launched (atom nil)]
     (stub-reply (fn [_] [{:color true} [] "REPL-y banner"])
                 (fn [options] (reset! launched options))
-                #(is (nil? (core/launch-repl ["--color"]))))
+                #(is (zero? (core/launch-repl ["--color"]))))
     (is (= true (:color @launched)))
     (is (= core/repl-init (:custom-init @launched)))))
+
+(deftest launch-repl-attaches-to-the-running-server
+  (let [launched (atom nil)]
+    (stub-reply (fn [_] [{} [] ""])
+                (fn [options] (reset! launched options))
+                #(is (zero? (core/launch-repl []))))
+    (is (= "51234" (:attach @launched)))))
+
+(deftest launch-repl-prefers-an-explicit-server
+  (doseq [[options args] [[{:attach "9999"} ["--attach" "9999"]]
+                          [{:standalone true} ["--standalone"]]]]
+    (let [launched (atom nil)]
+      (stub-reply (fn [_] [options [] ""])
+                  (fn [options] (reset! launched options))
+                  #(is (zero? (core/launch-repl args))))
+      (is (= options (select-keys @launched [:attach :standalone]))
+          (pr-str args)))))
+
+(deftest launch-repl-requires-a-running-server
+  (let [launched (atom false)]
+    (stub-reply (fn [_] [{} [] ""])
+                (fn [_] (reset! launched true))
+                (fn []
+                  (with-redefs [core/running-nrepl-port (constantly nil)]
+                    (let [{:keys [out err]}
+                          (capture #(is (= 1 (core/launch-repl []))))]
+                      (is (str/includes? err "clai nrepl"))
+                      (is (str/blank? out))))))
+    (is (false? @launched))))
 
 (deftest launch-repl-keeps-a-user-init-form
   (let [launched  (atom nil)
         user-init '(println "user init")]
     (stub-reply (fn [_] [{:custom-init user-init} [] ""])
                 (fn [options] (reset! launched options))
-                #(core/launch-repl ["--init" "init.clj"]))
+                #(is (zero? (core/launch-repl ["--init" "init.clj"]))))
     (is (= `(do ~core/repl-init ~user-init) (:custom-init @launched)))))
 
 (deftest launch-repl-prints-reply-help-without-launching
