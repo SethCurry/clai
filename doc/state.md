@@ -2,7 +2,9 @@
 
 This document describes how `clai` persists ACP sessions. Sessions are stored
 in PostgreSQL by `clai.agent.state` (`src/clai/agent/state.clj`), which is a
-thin session-storage facade over `clai.daemon.postgres`
+thin session-storage facade over `clai.daemon.postgres.sessions`
+(`src/clai/daemon/postgres/sessions.clj`). The connection/client code and the
+arbitrary-data store live beside it in `clai.daemon.postgres`
 (`src/clai/daemon/postgres.clj`).
 
 ## Overview
@@ -69,8 +71,9 @@ clai_data (
 )
 ```
 
-Only the first two tables hold sessions. `clai_data` is a separate
-arbitrary key/value store exposed by `clai.daemon.postgres`.
+Only the first two tables hold sessions; their queries live in
+`clai.daemon.postgres.sessions`. `clai_data` is a separate arbitrary
+key/value store exposed by `clai.daemon.postgres`.
 
 ## Session shape
 
@@ -162,16 +165,18 @@ What the agent writes, in order:
   the old file store used. Multiple processes sharing a database can update
   the same session concurrently; concurrent appends are serialized by the
   database rather than lost.
-* A failed query is logged (`::query-failed`) and rethrown as an
-  `ExceptionInfo` naming the operation. Unlike the old file store, one bad
-  session cannot corrupt the store; other sessions remain readable.
+* A failed query is logged (`::query-failed`, from `clai.daemon.postgres`) and
+  rethrown as an `ExceptionInfo` naming the operation. Unlike the old file
+  store, one bad session cannot corrupt the store; other sessions remain
+  readable.
 
 ## API surface
 
-All functions live in `clai.agent.state` and take a
-`clai.daemon.postgres/Client` as their first argument. The agent keeps its
-client in the `:postgres` field of its handler record and passes it to
-`clai.agent.loop` for the reads and writes along the chat loop.
+All functions live in `clai.agent.state` (and, one level down, in
+`clai.daemon.postgres.sessions`) and take a `clai.daemon.postgres/Client` as
+their first argument. The agent keeps its client in the `:postgres` field of
+its handler record and passes it to `clai.agent.loop` for the reads and writes
+along the chat loop.
 
 ### Lifecycle
 
@@ -195,7 +200,8 @@ client in the `:postgres` field of its handler record and passes it to
 ### Mutation
 
 All of these return the updated full state map, or `nil` (plus a
-`::unknown-session` warning log) if the session does not exist:
+`::unknown-session` warning log, emitted by `clai.daemon.postgres.sessions`) if
+the session does not exist:
 
 | Function | Effect |
 |----------|--------|

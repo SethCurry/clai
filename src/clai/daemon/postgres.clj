@@ -1,9 +1,10 @@
 (ns clai.daemon.postgres
-  "A PostgreSQL client for `clai`'s daemon.
+  "A PostgreSQL client for `clai`'s daemon, plus an arbitrary-data store.
 
   The client owns no global connection or mutable state: requiring this
   namespace has no side effects. Call [[make-client]] (or [[open]]) to build a
-  client, then use the session and arbitrary-data functions with it.
+  client, then pass it to the functions here or to the session storage in
+  `clai.daemon.postgres.sessions`.
 
   ## Connections
 
@@ -37,8 +38,9 @@
       clai_session_messages  append-only message history, one JSONB per row
       clai_data              arbitrary namespaced key/value data
 
-  The session tables mirror the shape used by `clai.agent.state`; that
-  namespace is a thin facade over the session functions here.
+  Sessions are read and written by `clai.daemon.postgres.sessions` (and, one
+  level up, by `clai.agent.state`). The data table backs the functions at the
+  end of this namespace.
 
   ## Example
 
@@ -49,18 +51,12 @@
                             :user \"clai\"
                             :password \"secret\"}))
 
-      (def session (pg/create-session client {:cwd \"/tmp/project\"
-                                              :model \"gemma3\"}))
-      (pg/append-history client (:sessionId session)
-                         {:role \"user\" :content \"hello\"})
-
       (pg/put-data! client \"notes\" \"todo\" {:text \"write the docs\"})
       (pg/get-data client \"notes\" \"todo\")
       ;; => {:text \"write the docs\"}"
   (:require [cheshire.core :as json]
             [clai.log]
             [clai.util :as util]
-            [clojure.java.io :as io]
             [clojure.string :as str]
             [malli.core :as m]
             [malli.error :as me]
@@ -68,11 +64,10 @@
             [next.jdbc.connection :as conn]
             [next.jdbc.result-set :as rs]
             [taoensso.telemere :as tel])
-  (:import [java.io File]
-           [java.sql Timestamp]
+  (:import [java.sql Timestamp]
            [java.time Instant OffsetDateTime]
            [java.time.temporal ChronoUnit]
-           [java.util Date UUID]
+           [java.util Date]
            [javax.sql DataSource]))
 
 ;; ---------------------------------------------------------------------------
@@ -105,45 +100,6 @@
    [:datasource [:fn #(instance? DataSource %)]]
    [:options client-options]])
 
-(def message
-  "A chat message stored in a session's `:history`, shaped like an Ollama
-  chat message."
-  [:map
-   [:role non-empty-string]
-   [:content {:optional true} [:or :string [:sequential [:map]]]]
-   [:thinking {:optional true} [:maybe :string]]
-   [:images {:optional true} [:sequential :string]]
-   [:tool_calls {:optional true} [:sequential [:map]]]])
-
-(def session
-  "A session state map, as returned by [[create-session]], [[load-session]],
-  and [[list-sessions]]."
-  [:map
-   [:sessionId non-empty-string]
-   [:cwd :string]
-   [:model {:optional true} [:maybe :string]]
-   [:params {:optional true} [:map]]
-   [:createdAt :string]
-   [:updatedAt {:optional true} [:maybe :string]]
-   [:history {:optional true} [:vector message]]])
-
-(def session-summary
-  "A session state map without `:history`."
-  [:map
-   [:sessionId non-empty-string]
-   [:cwd :string]
-   [:model {:optional true} [:maybe :string]]
-   [:params {:optional true} [:map]]
-   [:createdAt :string]
-   [:updatedAt {:optional true} [:maybe :string]]])
-
-(def create-session-opts
-  "Options accepted by [[create-session]]."
-  [:map
-   [:cwd {:optional true} [:or :string [:fn #(instance? File %)]]]
-   [:model {:optional true} [:maybe :string]]
-   [:params {:optional true} [:map]]])
-
 (def data-entry
   "A value returned by the arbitrary-data store."
   [:map
@@ -166,9 +122,11 @@
 (def ^:private default-database "clai")
 (def ^:private default-application-name "clai")
 
-(defn- validate!
+(defn ^:no-doc validate!
   "Validate `value` against `schema`, returning `value` when valid or throwing
-  an `ex-info` with a human-readable malli explanation otherwise."
+  an `ex-info` with a human-readable malli explanation otherwise.
+
+  Shared with `clai.daemon.postgres.sessions`."
   [schema value fn-name]
   (if-let [errors (and schema (m/explain schema value))]
     (let [explained (me/humanize errors)]
@@ -292,8 +250,7 @@
 
 (defrecord Client [datasource options])
 
-;; [[open]] and [[ensure-schema!]] are defined below with the SQL helpers they
-;; depend on.
+;; [[ensure-schema!]] is defined below with the SQL helpers it depends on.
 (declare ensure-schema! exec!)
 
 (defn make-client
@@ -422,6 +379,9 @@
 ;; ---------------------------------------------------------------------------
 ;; SQL helpers
 ;; ---------------------------------------------------------------------------
+;;
+;; The `^:no-doc` functions here and in the next section are the shared
+;; plumbing used by this namespace and by `clai.daemon.postgres.sessions`.
 
 (def ^:private row-opts
   {:builder-fn rs/as-unqualified-kebab-maps})
@@ -439,7 +399,7 @@
                        " (" (util/error-message e) ")")
                   {:op op} e)))
 
-(defn- exec!
+(defn ^:no-doc exec!
   "Execute `sql` with `params`, returning a vector of rows (or update-count
   maps)."
   [connectable op sql params]
@@ -448,7 +408,7 @@
     (catch Throwable e
       (sql-failed! op e))))
 
-(defn- exec-one!
+(defn ^:no-doc exec-one!
   "Execute `sql` with `params`, returning the first row (or update-count map)."
   [connectable op sql params]
   (try
@@ -456,8 +416,8 @@
     (catch Throwable e
       (sql-failed! op e))))
 
-(defn- updated-count
-  "The number of rows affected by an `exec-one!` INSERT/UPDATE/DELETE."
+(defn ^:no-doc updated-count
+  "The number of rows affected by an [[exec-one!]] INSERT/UPDATE/DELETE."
   [result]
   (long (or (:next.jdbc/update-count result) 0)))
 
@@ -465,7 +425,7 @@
 ;; JSON and timestamp helpers
 ;; ---------------------------------------------------------------------------
 
-(defn- parse-json
+(defn ^:no-doc parse-json
   "Parse `s` as JSON, keywordizing object keys. Returns `default` for nil or
   blank input."
   [s default]
@@ -473,7 +433,7 @@
     default
     (json/parse-string s true)))
 
-(defn- ->json
+(defn ^:no-doc ->json
   "Serialize `value` as JSON, naming `label` in the error when it cannot be
   serialized."
   [value label]
@@ -484,13 +444,13 @@
                            (util/error-message e))
                       {:label label} e)))))
 
-(defn- now-iso
+(defn ^:no-doc now-iso
   "Current UTC time as an ISO-8601 string, truncated to microseconds so it
   round-trips through a PostgreSQL `timestamptz` unchanged."
   []
   (str (.truncatedTo (Instant/now) ChronoUnit/MICROS)))
 
-(defn- timestamp->iso
+(defn ^:no-doc timestamp->iso
   "Render a JDBC/`java.time` timestamp as an ISO-8601 string."
   [v]
   (cond
@@ -500,7 +460,7 @@
     (instance? Date v) (str (.toInstant ^Date v))
     :else (str v)))
 
-(defn- normalize-name
+(defn ^:no-doc normalize-name
   "Normalize a keyword/string namespace or key to a non-blank string.
   Namespaced keywords keep their namespace (`:a/b` becomes `\"a/b\"`)."
   [x label]
@@ -513,23 +473,12 @@
     s))
 
 ;; ---------------------------------------------------------------------------
-;; Row conversion
+;; Arbitrary data
 ;; ---------------------------------------------------------------------------
 
-(defn- row->summary
-  "Convert a `clai_sessions` row to the session summary shape."
-  [row]
-  {:sessionId (:session-id row)
-   :cwd       (:cwd row)
-   :model     (:model row)
-   :params    (or (parse-json (:params row) nil) {})
-   :createdAt (timestamp->iso (:created-at row))
-   :updatedAt (timestamp->iso (:updated-at row))})
-
-(defn- row->session
-  "Convert a `clai_sessions` row plus its `history` to a session state map."
-  [row history]
-  (assoc (row->summary row) :history history))
+(def ^:private select-data-sql
+  "SELECT namespace, data_key, value::text AS value, created_at, updated_at
+     FROM clai_data")
 
 (defn- row->data-entry
   "Convert a `clai_data` row to a data entry."
@@ -539,365 +488,6 @@
    :value     (parse-json (:value row) nil)
    :createdAt (timestamp->iso (:created-at row))
    :updatedAt (timestamp->iso (:updated-at row))})
-
-;; ---------------------------------------------------------------------------
-;; Session SQL
-;; ---------------------------------------------------------------------------
-
-(def ^:private select-session-sql
-  "SELECT session_id, cwd, model, params::text AS params,
-          created_at, updated_at
-     FROM clai_sessions
-    WHERE session_id = ?")
-
-(def ^:private list-sessions-sql
-  "SELECT session_id, cwd, model, params::text AS params,
-          created_at, updated_at
-     FROM clai_sessions
-    ORDER BY created_at, session_id")
-
-(def ^:private upsert-session-sql
-  "INSERT INTO clai_sessions
-         (session_id, cwd, model, params, created_at, updated_at)
-   VALUES (?, ?, ?, CAST(? AS jsonb),
-           CAST(? AS timestamptz), CAST(? AS timestamptz))
-   ON CONFLICT (session_id) DO UPDATE
-      SET cwd        = EXCLUDED.cwd,
-          model      = EXCLUDED.model,
-          params     = EXCLUDED.params,
-          created_at = EXCLUDED.created_at,
-          updated_at = EXCLUDED.updated_at")
-
-(def ^:private insert-message-sql
-  "INSERT INTO clai_session_messages (session_id, message)
-   VALUES (?, CAST(? AS jsonb))")
-
-(def ^:private select-history-sql
-  "SELECT message::text AS message
-     FROM clai_session_messages
-    WHERE session_id = ?
-    ORDER BY id")
-
-(defn- upsert-session!
-  "Insert or update session metadata. History is managed separately."
-  [connectable state]
-  (exec-one! connectable ::upsert-session upsert-session-sql
-             [(:sessionId state)
-              (:cwd state)
-              (:model state)
-              (->json (or (:params state) {}) "Session params")
-              (:createdAt state)
-              (:updatedAt state)]))
-
-(defn- history-from
-  "Read a session's full message history from `connectable`."
-  [connectable session-id]
-  (mapv (fn [row] (or (parse-json (:message row) nil) {}))
-        (exec! connectable ::load-history select-history-sql [session-id])))
-
-(defn- warn-unknown-session
-  "Log a warning for a mutation targeting a session that does not exist."
-  [op session-id]
-  (tel/log! {:level :warn
-             :id    ::unknown-session
-             :data  {:op op :sessionId session-id}}
-            "Session not found"))
-
-;; ---------------------------------------------------------------------------
-;; Session lifecycle
-;; ---------------------------------------------------------------------------
-
-(defn new-session-id
-  "Generate a fresh random session id (a UUID string)."
-  {:malli/schema [:-> #'non-empty-string]}
-  []
-  (str (UUID/randomUUID)))
-
-(defn save-session
-  "Persist `state` as a session, replacing its message history. Refreshes
-  `:updatedAt` and returns the saved state map."
-  {:malli/schema [:-> #'client-schema #'session #'session]}
-  [client state]
-  (let [state (-> state
-                  (assoc :history (vec (or (:history state) [])))
-                  (update :params #(or % {}))
-                  (cond-> (not (contains? state :model)) (assoc :model nil))
-                  (assoc :updatedAt (now-iso)))]
-    (validate! session state "save-session")
-    (jdbc/with-transaction [tx (:datasource client)]
-      (upsert-session! tx state)
-      (exec! tx ::clear-history
-             "DELETE FROM clai_session_messages WHERE session_id = ?"
-             [(:sessionId state)])
-      (doseq [msg (:history state)]
-        (exec-one! tx ::insert-message insert-message-sql
-                   [(:sessionId state) (->json msg "Session message")])))
-    (tel/log! {:level :debug
-               :id    ::session-saved
-               :data  {:sessionId (:sessionId state)
-                       :messages  (count (:history state))}}
-              "Saved PostgreSQL session")
-    state))
-
-(defn create-session
-  "Create and persist a new session, returning its state map.
-
-  Options:
-
-    :cwd     the working directory for the session (defaults to the JVM's
-             current directory).
-    :model   the model name the session chats with (optional).
-    :params  a map of additional session parameters to store."
-  {:malli/schema [:function
-                  [:=> [:cat #'client-schema] #'session]
-                  [:=> [:cat #'client-schema [:maybe #'create-session-opts]]
-                   #'session]]}
-  ([client] (create-session client nil))
-  ([client {:keys [cwd model params] :or {params {}}}]
-   (let [now     (now-iso)
-         cwd     (cond
-                   (instance? File cwd) (str cwd)
-                   (string? cwd) cwd
-                   :else (str (.getCanonicalFile (io/file "."))))
-         session {:sessionId (new-session-id)
-                  :cwd       cwd
-                  :model     model
-                  :params    (or params {})
-                  :createdAt now
-                  :updatedAt now
-                  :history   []}]
-     (save-session client session)
-     (tel/log! {:level :info
-                :id    ::session-created
-                :data  {:sessionId (:sessionId session)
-                        :cwd       cwd
-                        :model     model}}
-               "Created PostgreSQL session")
-     session)))
-
-(defn register-session
-  "Persist a session under an explicit `id` rather than generating one. Used
-  when a client resumes a session this agent has no record of. Returns the
-  saved state map."
-  {:malli/schema [:-> #'client-schema #'non-empty-string [:maybe :string]
-                  [:maybe [:vector #'message]] #'session]}
-  [client id cwd history]
-  (let [now     (now-iso)
-        session {:sessionId id
-                 :cwd       (or cwd ".")
-                 :model     nil
-                 :params    {}
-                 :createdAt now
-                 :updatedAt now
-                 :history   (vec (or history []))}]
-    (save-session client session)
-    (tel/log! {:level :info
-               :id    ::session-registered
-               :data  {:sessionId id :cwd (:cwd session)}}
-              "Registered PostgreSQL session under an explicit id")
-    session))
-
-(defn load-session
-  "Read and return the state map for `session-id`, or nil when no such session
-  is recorded."
-  {:malli/schema [:-> #'client-schema #'non-empty-string [:maybe #'session]]}
-  [client session-id]
-  (let [datasource (:datasource client)]
-    (when-let [row (exec-one! datasource ::load-session
-                              select-session-sql [session-id])]
-      (row->session row (history-from datasource session-id)))))
-
-(defn lookup-session
-  "Alias for [[load-session]]."
-  {:malli/schema [:-> #'client-schema #'non-empty-string [:maybe #'session]]}
-  [client session-id]
-  (load-session client session-id))
-
-(defn delete-session
-  "Delete `session-id` and its history. Returns true when a session was
-  removed, false otherwise."
-  {:malli/schema [:-> #'client-schema #'non-empty-string boolean?]}
-  [client session-id]
-  (let [result   (exec-one! (:datasource client) ::delete-session
-                            "DELETE FROM clai_sessions WHERE session_id = ?"
-                            [session-id])
-        deleted? (pos? (updated-count result))]
-    (tel/log! {:level :debug
-               :id    ::session-deleted
-               :data  {:sessionId session-id :deleted? deleted?}}
-              "Deleted PostgreSQL session")
-    deleted?))
-
-(defn session-exists?
-  "Return true when `session-id` is recorded."
-  {:malli/schema [:-> #'client-schema #'non-empty-string boolean?]}
-  [client session-id]
-  (some? (exec-one! (:datasource client) ::session-exists
-                    "SELECT 1 AS one FROM clai_sessions WHERE session_id = ?"
-                    [session-id])))
-
-(defn list-sessions
-  "Return every session state map, sorted by `:createdAt` ascending, with full
-  histories. Use [[list-session-summaries]] for metadata only."
-  {:malli/schema [:-> #'client-schema [:vector #'session]]}
-  [client]
-  (let [datasource (:datasource client)
-        sessions   (exec! datasource ::list-sessions list-sessions-sql [])
-        messages   (exec! datasource ::list-messages
-                          "SELECT session_id, message::text AS message
-                             FROM clai_session_messages
-                            ORDER BY id"
-                          [])
-        by-session (reduce (fn [m row]
-                             (update m (:session-id row)
-                                     (fnil conj [])
-                                     (or (parse-json (:message row) nil) {})))
-                           {}
-                           messages)]
-    (mapv (fn [row]
-            (row->session row (get by-session (:session-id row) [])))
-          sessions)))
-
-(defn list-session-summaries
-  "Like [[list-sessions]] but returns only metadata (no histories), suitable
-  for session pickers and ACP `session/list` responses."
-  {:malli/schema [:-> #'client-schema [:vector #'session-summary]]}
-  [client]
-  (mapv row->summary
-        (exec! (:datasource client) ::list-session-summaries
-               list-sessions-sql [])))
-
-;; ---------------------------------------------------------------------------
-;; Session history and parameters
-;; ---------------------------------------------------------------------------
-
-(defn session-history
-  "Return the message history vector for `session-id`, or `[]` when the
-  session is unknown or has no messages."
-  {:malli/schema [:-> #'client-schema #'non-empty-string [:vector #'message]]}
-  [client session-id]
-  (history-from (:datasource client) session-id))
-
-(defn append-history
-  "Append `msg` to session `session-id` and touch its `:updatedAt`. Returns the
-  message that was appended, or nil (with a warning) when the session is
-  unknown."
-  {:malli/schema [:-> #'client-schema #'non-empty-string #'message
-                  [:maybe #'message]]}
-  [client session-id msg]
-  (validate! message msg "append-history")
-  (let [datasource (:datasource client)
-        msg-json   (->json msg "Session message")]
-    (jdbc/with-transaction [tx datasource]
-      (let [result (exec-one! tx ::append-history
-                              "INSERT INTO clai_session_messages (session_id, message)
-                               SELECT ?, CAST(? AS jsonb)
-                                WHERE EXISTS (SELECT 1 FROM clai_sessions
-                                               WHERE session_id = ?)"
-                              [session-id msg-json session-id])]
-        (if (pos? (updated-count result))
-          (do
-            (exec-one! tx ::touch-session
-                       "UPDATE clai_sessions
-                           SET updated_at = CAST(? AS timestamptz)
-                         WHERE session_id = ?"
-                       [(now-iso) session-id])
-            (tel/log! {:level :debug
-                       :id    ::history-appended
-                       :data  {:sessionId session-id :role (:role msg)}}
-                      "Appended message to PostgreSQL session history")
-            msg)
-          (do
-            (warn-unknown-session ::append-history session-id)
-            nil))))))
-
-(defn- mutate-session!
-  "Run an UPDATE that ends in `WHERE session_id = ?`, then return the updated
-  full session state. Returns nil (with a warning) when the session is unknown."
-  [client op session-id update-sql update-params]
-  (jdbc/with-transaction [tx (:datasource client)]
-    (let [result (exec-one! tx op update-sql (conj (vec update-params) session-id))]
-      (if (pos? (updated-count result))
-        (let [row (exec-one! tx ::reload-session
-                             select-session-sql [session-id])]
-          (row->session row (history-from tx session-id)))
-        (do
-          (warn-unknown-session op session-id)
-          nil)))))
-
-(defn set-param
-  "Associate `key` with `value` in the session's `:params` map. `value` must be
-  JSON-serializable. Returns the updated full state map, or nil when the
-  session is unknown."
-  {:malli/schema [:-> #'client-schema #'non-empty-string :any :any
-                  [:maybe #'session]]}
-  [client session-id key value]
-  (let [key*   (normalize-name key "Session parameter key")
-        value* (->json value "Session parameter value")]
-    (mutate-session! client ::set-param session-id
-                     "UPDATE clai_sessions
-                         SET params = jsonb_set(params, ARRAY[?]::text[],
-                                                CAST(? AS jsonb), true),
-                             updated_at = CAST(? AS timestamptz)
-                       WHERE session_id = ?"
-                     [key* value* (now-iso)])))
-
-(defn set-params
-  "Merge `m` into the session's `:params` map. Values must be JSON-serializable.
-  Returns the updated full state map, or nil when the session is unknown."
-  {:malli/schema [:-> #'client-schema #'non-empty-string [:map]
-                  [:maybe #'session]]}
-  [client session-id m]
-  (let [value* (->json m "Session params")]
-    (mutate-session! client ::set-params session-id
-                     "UPDATE clai_sessions
-                         SET params = params || CAST(? AS jsonb),
-                             updated_at = CAST(? AS timestamptz)
-                       WHERE session_id = ?"
-                     [value* (now-iso)])))
-
-(defn set-model
-  "Record the model name used by `session-id`. Returns the updated full state
-  map, or nil when the session is unknown."
-  {:malli/schema [:-> #'client-schema #'non-empty-string [:maybe :string]
-                  [:maybe #'session]]}
-  [client session-id model]
-  (mutate-session! client ::set-model session-id
-                   "UPDATE clai_sessions
-                       SET model = ?,
-                           updated_at = CAST(? AS timestamptz)
-                     WHERE session_id = ?"
-                   [model (now-iso)]))
-
-(defn clear-history
-  "Delete every message in `session-id` and touch its `:updatedAt`. Returns the
-  updated full state map, or nil when the session is unknown."
-  {:malli/schema [:-> #'client-schema #'non-empty-string [:maybe #'session]]}
-  [client session-id]
-  (jdbc/with-transaction [tx (:datasource client)]
-    (let [result (exec-one! tx ::clear-history
-                            "UPDATE clai_sessions
-                                SET updated_at = CAST(? AS timestamptz)
-                              WHERE session_id = ?"
-                            [(now-iso) session-id])]
-      (if (pos? (updated-count result))
-        (let [_   (exec! tx ::delete-history
-                         "DELETE FROM clai_session_messages WHERE session_id = ?"
-                         [session-id])
-              row (exec-one! tx ::reload-session
-                             select-session-sql [session-id])]
-          (row->session row []))
-        (do
-          (warn-unknown-session ::clear-history session-id)
-          nil)))))
-
-;; ---------------------------------------------------------------------------
-;; Arbitrary data
-;; ---------------------------------------------------------------------------
-
-(def ^:private select-data-sql
-  "SELECT namespace, data_key, value::text AS value, created_at, updated_at
-     FROM clai_data")
 
 (defn put-data!
   "Store JSON-serializable `value` under `ns-name`/`data-key`, creating or

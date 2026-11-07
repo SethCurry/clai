@@ -2,7 +2,8 @@
   (:require [clojure.test :refer :all]
             [clai.daemon.postgres :as pg]
             [clai.test-support :refer [quiet-logs]]
-            [next.jdbc :as jdbc]))
+            [next.jdbc :as jdbc])
+  (:import [java.util UUID]))
 
 ;; ---------------------------------------------------------------------------
 ;; Fixtures
@@ -113,62 +114,16 @@
 ;; database. Run them with, for example:
 ;;
 ;;   CLAI_TEST_POSTGRES_URL=jdbc:postgresql://localhost:5432/clai \
-;;     lein test clai.daemon.postgres-test
+;;     lein test clai.daemon.postgres-test clai.daemon.postgres.sessions-test
 
-(deftest postgres-round-trip
+(deftest data-round-trip
   (if-let [url (System/getenv "CLAI_TEST_POSTGRES_URL")]
     (let [client  (pg/open {:url url})
-          session (pg/create-session client {:cwd     "/tmp/clai-test"
-                                             :model   "gemma3"
-                                             :params  {:a 1}
-                                             :history []})
-          id      (:sessionId session)
-          data-ns (str "clai-test-" id)
+          data-ns (str "clai-test-" (UUID/randomUUID))
           data-key "entry"]
       (try
         (is (pg/ping client))
 
-        ;; Sessions
-        (is (= "gemma3" (:model (pg/load-session client id))))
-        (is (= {:a 1} (:params (pg/load-session client id))))
-        (is (= {:role "user" :content "hello"}
-               (pg/append-history client id {:role "user" :content "hello"})))
-        (is (= [{:role "user" :content "hello"}]
-               (pg/session-history client id)))
-        (is (= [1 2]
-               (get-in (pg/set-param client id :b [1 2]) [:params :b])))
-        (is (= 1
-               (get-in (pg/set-params client id {:c 3}) [:params :a])))
-        (is (= "llama" (:model (pg/set-model client id "llama"))))
-        (is (= id (:sessionId (pg/lookup-session client id))))
-        (is (contains? (:params (pg/set-param client id :empty nil)) :empty))
-        (pg/save-session client
-                        (assoc (pg/load-session client id)
-                               :history [{:role "assistant" :content "saved"}]))
-        (is (= [{:role "assistant" :content "saved"}]
-               (:history (pg/load-session client id))))
-        (is (= [] (:history (pg/clear-history client id))))
-        (is (pg/session-exists? client id))
-        (is (some #(= id (:sessionId %)) (pg/list-sessions client)))
-        (is (some #(= id (:sessionId %)) (pg/list-session-summaries client)))
-
-        ;; save-session normalizes and returns the saved state, not the input
-        (let [saved (pg/save-session client {:sessionId id
-                                            :cwd       "/tmp/clai-test"
-                                            :createdAt (:createdAt session)})]
-          (is (some? (:updatedAt saved)))
-          (is (= {} (:params saved)))
-          (is (= [] (:history saved)))
-          (is (= saved (pg/load-session client id))))
-
-        ;; A caller-chosen session id
-        (let [registered-id (str id "-registered")]
-          (is (= registered-id
-                 (:sessionId (pg/register-session client registered-id "/tmp/clai-test" []))))
-          (is (pg/session-exists? client registered-id))
-          (is (true? (pg/delete-session client registered-id))))
-
-        ;; Arbitrary data
         (is (= {:text "hello"}
                (:value (pg/put-data! client data-ns data-key {:text "hello"}))))
         (is (= {:text "hello"} (pg/get-data client data-ns data-key)))
@@ -189,13 +144,17 @@
         (is (true? (pg/delete-data! client data-ns "null")))
         (is (nil? (pg/lookup-data client data-ns "null")))
 
-        ;; Cleanup
-        (is (true? (pg/delete-session client id)))
-        (is (false? (pg/session-exists? client id)))
+        ;; Namespaces and keys may be keywords; keyword names are stored as
+        ;; their printed name, and a keyword namespace is preserved
+        (is (= 1 (:value (pg/put-data! client (keyword data-ns) "count" 1))))
+        (is (= 1 (pg/get-data client data-ns "count")))
+        (is (= 2 (:value (pg/put-data! client :clai-test/nested "count" 2))))
+        (is (= 2 (pg/get-data client "clai-test/nested" "count")))
+
         (finally
           (pg/delete-data! client data-ns data-key)
           (pg/delete-data! client data-ns "null")
-          (pg/delete-session client id)
-          (pg/delete-session client (str id "-registered"))
+          (pg/delete-data! client data-ns "count")
+          (pg/delete-data! client "clai-test/nested" "count")
           (pg/close! client))))
     (is true "CLAI_TEST_POSTGRES_URL is not set; skipping integration test")))

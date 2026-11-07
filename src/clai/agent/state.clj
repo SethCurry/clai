@@ -1,15 +1,16 @@
 (ns clai.agent.state
   "Persistent session storage for `clai`, backed by PostgreSQL.
 
-  Sessions live in the two tables managed by `clai.daemon.postgres`:
+  Sessions live in the two tables managed by
+  `clai.daemon.postgres.sessions`:
 
       clai_sessions          session metadata and `:params`
       clai_session_messages  append-only message history, one JSONB per row
 
   This namespace is the session-storage facade used by the agent. It
   re-exports the storage schemas and delegates every operation to
-  `clai.daemon.postgres` with the caller's client, so each function takes a
-  `clai.daemon.postgres/Client` as its first argument.
+  `clai.daemon.postgres.sessions` with the caller's client, so each function
+  takes a `clai.daemon.postgres/Client` as its first argument.
 
   A client is built once per agent (see `clai.agent/ollama-agent`) from the
   `:postgres` config and passed through to these functions. The tables are
@@ -22,6 +23,7 @@
   Ollama chat API expects. `:params` is a JSON object, so values stored there
   must be JSON-serializable."
   (:require [clai.daemon.postgres :as postgres]
+            [clai.daemon.postgres.sessions :as sessions]
             [clai.util :as util]))
 
 ;; ---------------------------------------------------------------------------
@@ -39,22 +41,22 @@
 (def message
   "A chat message as stored in a session's `:history`, shaped like an Ollama
   chat message."
-  postgres/message)
+  sessions/message)
 
 (def session
   "A session state map, as returned by `create-session`, `load-session`, and
   `list-sessions`, and stored in `clai_sessions` plus
   `clai_session_messages`."
-  postgres/session)
+  sessions/session)
 
 (def session-summary
   "A session state map without `:history`, as returned by
   `list-session-summaries`."
-  postgres/session-summary)
+  sessions/session-summary)
 
 (def create-session-opts
   "Options accepted by `create-session`."
-  postgres/create-session-opts)
+  sessions/create-session-opts)
 
 ;; ---------------------------------------------------------------------------
 ;; Client
@@ -113,7 +115,7 @@
   "Generate a fresh random session id (a UUID string)."
   {:malli/schema [:-> #'non-empty-string]}
   []
-  (postgres/new-session-id))
+  (sessions/new-session-id))
 
 (defn create-session
   "Create and persist a new session, returning its state map.
@@ -133,36 +135,36 @@
                   [:=> [:cat #'client-schema [:maybe #'create-session-opts]]
                    #'session]]}
   ([client]
-   (postgres/create-session (ready client)))
+   (sessions/create-session (ready client)))
   ([client opts]
-   (postgres/create-session (ready client) opts)))
+   (sessions/create-session (ready client) opts)))
 
 (defn load-session
   "Read and return the state map for `session-id`, or nil if no such session
   is recorded."
   {:malli/schema [:-> #'client-schema #'non-empty-string [:maybe #'session]]}
   [client session-id]
-  (postgres/load-session (ready client) session-id))
+  (sessions/load-session (ready client) session-id))
 
 (defn lookup-session
   "Alias for `load-session`, for callers that prefer the `lookup` verb."
   {:malli/schema [:-> #'client-schema #'non-empty-string [:maybe #'session]]}
   [client session-id]
-  (postgres/lookup-session (ready client) session-id))
+  (sessions/lookup-session (ready client) session-id))
 
 (defn save-session
   "Persist `state` (a session map), replacing its message history. Refreshes
   `:updatedAt`. Returns the saved state."
   {:malli/schema [:-> #'client-schema #'session #'session]}
   [client state]
-  (postgres/save-session (ready client) state))
+  (sessions/save-session (ready client) state))
 
 (defn delete-session
   "Delete `session-id` and its history. Returns true if a session was
   removed, false otherwise."
   {:malli/schema [:-> #'client-schema #'non-empty-string boolean?]}
   [client session-id]
-  (postgres/delete-session (ready client) session-id))
+  (sessions/delete-session (ready client) session-id))
 
 (defn register-session
   "Persist a session under an explicit `id`, rather than generating one.
@@ -171,7 +173,7 @@
   {:malli/schema [:-> #'client-schema #'non-empty-string [:maybe :string]
                   [:maybe [:vector #'message]] #'session]}
   [client id cwd history]
-  (postgres/register-session (ready client) id cwd history))
+  (sessions/register-session (ready client) id cwd history))
 
 (defn list-sessions
   "Return a vector of all recorded session state maps, sorted by `:createdAt`
@@ -179,20 +181,20 @@
   `list-session-summaries` for lightweight metadata only."
   {:malli/schema [:-> #'client-schema [:vector #'session]]}
   [client]
-  (postgres/list-sessions (ready client)))
+  (sessions/list-sessions (ready client)))
 
 (defn list-session-summaries
   "Like `list-sessions` but returns only metadata (no `:history`), suitable
   for displaying in a session picker or for ACP `session/list` responses."
   {:malli/schema [:-> #'client-schema [:vector #'session-summary]]}
   [client]
-  (postgres/list-session-summaries (ready client)))
+  (sessions/list-session-summaries (ready client)))
 
 (defn session-exists?
   "Return true if `session-id` is recorded."
   {:malli/schema [:-> #'client-schema #'non-empty-string boolean?]}
   [client session-id]
-  (postgres/session-exists? (ready client) session-id))
+  (sessions/session-exists? (ready client) session-id))
 
 ;; ---------------------------------------------------------------------------
 ;; History & parameter mutation
@@ -207,14 +209,14 @@
   {:malli/schema [:-> #'client-schema #'non-empty-string #'message
                   [:maybe #'message]]}
   [client session-id msg]
-  (postgres/append-history (ready client) session-id msg))
+  (sessions/append-history (ready client) session-id msg))
 
 (defn session-history
   "Return the message history vector for `session-id`, or an empty vector if
   the session is unknown."
   {:malli/schema [:-> #'client-schema #'non-empty-string [:vector #'message]]}
   [client session-id]
-  (postgres/session-history (ready client) session-id))
+  (sessions/session-history (ready client) session-id))
 
 (defn set-param
   "Associate `key` with `value` in the session's `:params` map and persist.
@@ -223,7 +225,7 @@
   {:malli/schema [:-> #'client-schema #'non-empty-string :any :any
                   [:maybe #'session]]}
   [client session-id key value]
-  (postgres/set-param (ready client) session-id key value))
+  (sessions/set-param (ready client) session-id key value))
 
 (defn set-params
   "Merge `m` into the session's `:params` map and persist. Returns the
@@ -231,7 +233,7 @@
   {:malli/schema [:-> #'client-schema #'non-empty-string [:map]
                   [:maybe #'session]]}
   [client session-id m]
-  (postgres/set-params (ready client) session-id m))
+  (sessions/set-params (ready client) session-id m))
 
 (defn set-model
   "Record the model name used by `session-id` and persist. Returns the
@@ -239,11 +241,11 @@
   {:malli/schema [:-> #'client-schema #'non-empty-string [:maybe :string]
                   [:maybe #'session]]}
   [client session-id model]
-  (postgres/set-model (ready client) session-id model))
+  (sessions/set-model (ready client) session-id model))
 
 (defn clear-history
   "Empty the message history for `session-id` and persist. Returns the
   updated full state map, or nil if the session is unknown."
   {:malli/schema [:-> #'client-schema #'non-empty-string [:maybe #'session]]}
   [client session-id]
-  (postgres/clear-history (ready client) session-id))
+  (sessions/clear-history (ready client) session-id))

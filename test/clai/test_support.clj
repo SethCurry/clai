@@ -1,6 +1,7 @@
 (ns clai.test-support
   "Shared helpers for the test suite."
   (:require [clai.daemon.postgres :as pg]
+            [clai.daemon.postgres.sessions :as sessions]
             [clai.instrument :as instrument]
             [clai.log]
             [taoensso.telemere :as tel])
@@ -65,9 +66,10 @@
 ;; In-memory session store
 ;; ---------------------------------------------------------------------------
 ;;
-;; `clai.agent.state` delegates to `clai.daemon.postgres`. Unit tests should not
-;; need a live PostgreSQL server, so the fixture below replaces the session
-;; functions in `clai.daemon.postgres` with an equivalent atom-backed store.
+;; `clai.agent.state` delegates to `clai.daemon.postgres.sessions`. Unit tests
+;; should not need a live PostgreSQL server, so the fixture below replaces the
+;; session functions in `clai.daemon.postgres.sessions` with an equivalent
+;; atom-backed store.
 
 (defn- memory-now
   "Current UTC time as an ISO-8601 string, like the PostgreSQL store writes."
@@ -75,7 +77,8 @@
   (str (Instant/now)))
 
 (defn- memory-normalize-session
-  "Normalize a session the way `clai.daemon.postgres/save-session` does."
+  "Normalize a session the way `clai.daemon.postgres.sessions/save-session`
+  does."
   [state]
   (-> state
       (assoc :history (vec (or (:history state) [])))
@@ -84,8 +87,8 @@
       (assoc :updatedAt (memory-now))))
 
 (defn- memory-create-session
-  ([sessions client] (memory-create-session sessions client nil))
-  ([sessions _client {:keys [cwd model params]}]
+  ([store client] (memory-create-session store client nil))
+  ([store _client {:keys [cwd model params]}]
    (let [created (memory-now)
          session {:sessionId (str (UUID/randomUUID))
                   :cwd       (cond
@@ -97,27 +100,27 @@
                   :createdAt created
                   :updatedAt created
                   :history   []}]
-     (swap! sessions assoc (:sessionId session) session)
+     (swap! store assoc (:sessionId session) session)
      session)))
 
 (defn- memory-load-session
-  [sessions _client session-id]
-  (get @sessions session-id))
+  [store _client session-id]
+  (get @store session-id))
 
 (defn- memory-save-session
-  [sessions _client state]
+  [store _client state]
   (let [saved (memory-normalize-session state)]
-    (swap! sessions assoc (:sessionId saved) saved)
+    (swap! store assoc (:sessionId saved) saved)
     saved))
 
 (defn- memory-delete-session
-  [sessions _client session-id]
-  (let [existed? (contains? @sessions session-id)]
-    (swap! sessions dissoc session-id)
+  [store _client session-id]
+  (let [existed? (contains? @store session-id)]
+    (swap! store dissoc session-id)
     existed?))
 
 (defn- memory-register-session
-  [sessions _client id cwd history]
+  [store _client id cwd history]
   (let [created (memory-now)
         session {:sessionId id
                  :cwd       (or cwd ".")
@@ -126,27 +129,27 @@
                  :createdAt created
                  :updatedAt created
                  :history   (vec (or history []))}]
-    (swap! sessions assoc id session)
+    (swap! store assoc id session)
     session))
 
 (defn- memory-list-sessions
-  [sessions _client]
-  (->> @sessions vals (sort-by :createdAt) vec))
+  [store _client]
+  (->> @store vals (sort-by :createdAt) vec))
 
 (defn- memory-list-session-summaries
-  [sessions _client]
-  (mapv #(dissoc % :history) (memory-list-sessions sessions nil)))
+  [store _client]
+  (mapv #(dissoc % :history) (memory-list-sessions store nil)))
 
 (defn- memory-session-exists?
-  [sessions _client session-id]
-  (contains? @sessions session-id))
+  [store _client session-id]
+  (contains? @store session-id))
 
 (defn- memory-mutate
   "Apply `f` to session `session-id`, refresh `:updatedAt`, and return the
   saved session, or nil when it is unknown."
-  [sessions session-id f]
+  [store session-id f]
   (let [result (atom nil)]
-    (swap! sessions
+    (swap! store
            (fn [all]
              (if-let [session (get all session-id)]
                (let [saved (-> (f session)
@@ -157,52 +160,52 @@
     @result))
 
 (defn- memory-append-history
-  [sessions _client session-id msg]
-  (when (memory-mutate sessions session-id
+  [store _client session-id msg]
+  (when (memory-mutate store session-id
                        #(update % :history (fnil conj []) msg))
     msg))
 
 (defn- memory-session-history
-  [sessions _client session-id]
-  (or (get-in @sessions [session-id :history]) []))
+  [store _client session-id]
+  (or (get-in @store [session-id :history]) []))
 
 (defn- memory-set-param
-  [sessions _client session-id key value]
-  (memory-mutate sessions session-id #(assoc-in % [:params key] value)))
+  [store _client session-id key value]
+  (memory-mutate store session-id #(assoc-in % [:params key] value)))
 
 (defn- memory-set-params
-  [sessions _client session-id m]
-  (memory-mutate sessions session-id #(update % :params (fnil merge {}) m)))
+  [store _client session-id m]
+  (memory-mutate store session-id #(update % :params (fnil merge {}) m)))
 
 (defn- memory-set-model
-  [sessions _client session-id model]
-  (memory-mutate sessions session-id #(assoc % :model model)))
+  [store _client session-id model]
+  (memory-mutate store session-id #(assoc % :model model)))
 
 (defn- memory-clear-history
-  [sessions _client session-id]
-  (memory-mutate sessions session-id #(assoc % :history [])))
+  [store _client session-id]
+  (memory-mutate store session-id #(assoc % :history [])))
 
 (defn memory-session-store
   "Fixture that installs an in-memory session store in place of the
-  `clai.daemon.postgres` session functions, so tests do not need a live
+  `clai.daemon.postgres.sessions` functions, so tests do not need a live
   database. The store is fresh for every test."
   [f]
-  (let [sessions (atom {})
-        bind     (fn [mem-fn] (partial mem-fn sessions))]
-    (with-redefs [pg/ensure-schema!           (constantly nil)
-                  pg/create-session           (bind memory-create-session)
-                  pg/load-session             (bind memory-load-session)
-                  pg/lookup-session           (bind memory-load-session)
-                  pg/save-session             (bind memory-save-session)
-                  pg/delete-session           (bind memory-delete-session)
-                  pg/register-session         (bind memory-register-session)
-                  pg/list-sessions            (bind memory-list-sessions)
-                  pg/list-session-summaries   (bind memory-list-session-summaries)
-                  pg/session-exists?          (bind memory-session-exists?)
-                  pg/append-history           (bind memory-append-history)
-                  pg/session-history          (bind memory-session-history)
-                  pg/set-param                (bind memory-set-param)
-                  pg/set-params               (bind memory-set-params)
-                  pg/set-model                (bind memory-set-model)
-                  pg/clear-history            (bind memory-clear-history)]
+  (let [store (atom {})
+        bind  (fn [mem-fn] (partial mem-fn store))]
+    (with-redefs [pg/ensure-schema!               (constantly nil)
+                  sessions/create-session         (bind memory-create-session)
+                  sessions/load-session           (bind memory-load-session)
+                  sessions/lookup-session         (bind memory-load-session)
+                  sessions/save-session           (bind memory-save-session)
+                  sessions/delete-session         (bind memory-delete-session)
+                  sessions/register-session       (bind memory-register-session)
+                  sessions/list-sessions          (bind memory-list-sessions)
+                  sessions/list-session-summaries (bind memory-list-session-summaries)
+                  sessions/session-exists?        (bind memory-session-exists?)
+                  sessions/append-history         (bind memory-append-history)
+                  sessions/session-history        (bind memory-session-history)
+                  sessions/set-param              (bind memory-set-param)
+                  sessions/set-params             (bind memory-set-params)
+                  sessions/set-model              (bind memory-set-model)
+                  sessions/clear-history          (bind memory-clear-history)]
       (f))))
