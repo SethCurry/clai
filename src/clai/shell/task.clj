@@ -29,11 +29,13 @@
       (run! \"build\" {:dir \"/project\"})
 
   The working directory is virtual and shared with the other CLI helper
-  namespaces. It comes from `:dir`, then `clai.shell.cli/*cwd*`, then the JVM's
-  working directory. It can be set for a single call with the `:dir` option or
-  bound for a series of calls:
+  namespaces. It comes from `:dir`, then the calling namespace's own `*cwd*`
+  (each session namespace created by `clai.repl` has one), then the
+  process-wide `clai.shell.cli/*cwd*`, then the JVM's working directory. It
+  can be set for a single call with the `:dir` option or bound for a series of
+  calls:
 
-      (binding [clai.shell.cli/*cwd* \"/project\"]
+      (binding [*cwd* \"/project\"]        ; in a session namespace
         (task/list))
 
   Common options are accepted in a map, in any position:
@@ -120,7 +122,7 @@
 
   `tasks` may be a task name, a collection of task names, or nil. Options are
   described in the namespace docstring. The virtual working directory is
-  selected from `:dir`, then `clai.shell.cli/*cwd*`, then `user.dir`.
+  selected from `:dir`, then the calling namespace's `*cwd*`, then `user.dir`.
 
   Returns a map with `:command`, `:dir`, `:exit`, `:out`, `:err`, `:success?`,
   and `:timed-out?`. A non-zero exit is not an error; use [[run!]] for that."

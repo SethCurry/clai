@@ -123,6 +123,36 @@
     (is (= "http://example:1234" (:host client)))
     (is (= 42 (:timeout client)))))
 
+(deftest load-config-postgres-submap
+  (let [path (write-cfg
+              (str "{:postgres {:host \"db.example\" :port 6543 "
+                   ":database \"clai\" :user \"alice\" "
+                   ":ssl-mode \"require\"}}"))]
+    (is (= {:host "db.example"
+            :port 6543
+            :database "clai"
+            :user "alice"
+            :ssl-mode "require"}
+           (:postgres (config/load-config path))))))
+
+(deftest make-postgres-client-uses-config
+  (let [client (config/make-postgres-client
+                {:postgres {:host     "db.example"
+                            :port     6543
+                            :database "clai"
+                            :user     "alice"
+                            :password "secret"
+                            :ssl-mode "require"}})]
+    (is (instance? javax.sql.DataSource (:datasource client)))
+    (is (= {:host     "db.example"
+            :port     6543
+            :database "clai"
+            :user     "alice"
+            :password "secret"
+            :ssl-mode "require"}
+           (select-keys (:options client)
+                        [:host :port :database :user :password :ssl-mode])))))
+
 (deftest chat-options-picks-chat-keys
   (is (= {:options {:temperature 0.1} :think true :format "json"}
          (config/chat-options {:model "x"

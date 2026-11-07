@@ -29,12 +29,14 @@
       (commit \"Fix the parser\" {:dir \"/repo\"})
 
   The working directory is virtual: it comes from `:dir`, then [[*dir*]], then
-  the shared `clai.shell.cli/*cwd*`, then the JVM's working directory. It can
-  be set for a single call with the `:dir` option or bound for a series of
-  calls with either git's compatibility var or the shared one:
+  the calling namespace's own `*cwd*` (each session namespace created by
+  `clai.repl` has one), then the process-wide `clai.shell.cli/*cwd*`, then the
+  JVM's working directory. It can be set for a single call with the `:dir`
+  option or bound for a series of calls with either git's compatibility var or
+  the calling namespace's cwd:
 
       (binding [git/*dir* \"/repo\"] (status))
-      (binding [clai.shell.cli/*cwd* \"/repo\"] (status))
+      (binding [*cwd* \"/repo\"] (status))   ; in a session namespace
 
   Commands are non-interactive by default: the pager is disabled, the editor
   is set to `true` (so a missing commit message fails instead of hanging), and
@@ -49,9 +51,9 @@
 ;; ---------------------------------------------------------------------------
 
 (def ^:dynamic *dir*
-  "Deprecated git-specific default working directory. Prefer binding
-  `clai.shell.cli/*cwd*`; when non-nil this still takes precedence for git
-  commands."
+  "Deprecated git-specific default working directory. An explicit `:dir`
+  option still wins; otherwise this takes precedence over the calling
+  namespace's `*cwd*` (see `clai.shell.cli/current-cwd`)."
   nil)
 
 (def ^:dynamic *timeout-ms*
@@ -96,8 +98,8 @@
   symbols; arguments are passed to git verbatim, so no shell quoting or
   escaping is involved. `opts` may contain:
 
-    :dir      working directory (defaults to [[*dir*]], then
-              `clai.shell.cli/*cwd*`, then `user.dir`)
+    :dir      working directory (defaults to [[*dir*]], then the calling
+              namespace's `*cwd*`, then `user.dir`)
     :timeout  milliseconds to wait, or nil to wait forever
     :in       stdin contents (a string, byte array, or InputStream)
     :env      extra environment variables; a nil value removes one

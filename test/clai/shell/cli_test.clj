@@ -154,3 +154,56 @@
       (let [home (System/getProperty "user.home")]
         (is (= (.getCanonicalPath (io/file home)) (cli/cd)))
         (is (= (.getCanonicalPath (io/file home)) (cli/pwd)))))))
+
+(defn- with-namespace-cwd
+  "Run `f` in a fresh namespace that has its own dynamic `*cwd*` Var set to
+  `dir`, the way a session namespace does."
+  [dir f]
+  (let [ns (create-ns (gensym "clai-cli-cwd-test-"))]
+    (try
+      (let [v (intern ns '*cwd* (some-> dir str))]
+        (.setDynamic ^clojure.lang.Var v true)
+        (alter-meta! v assoc :dynamic true))
+      (binding [*ns* ns] (f))
+      (finally
+        (remove-ns (ns-name ns))))))
+
+(deftest a-namespace-cwd-wins-over-the-global-one
+  (with-temp-dir
+    (fn [dir]
+      (let [global (io/file dir "global")]
+        (is (.mkdir global))
+        (with-namespace-cwd (.getAbsolutePath dir)
+          (fn []
+            (binding [cli/*cwd* (.getAbsolutePath global)]
+              (is (= (.getAbsolutePath dir) (cli/pwd)))
+              (is (= (.getAbsolutePath dir)
+                     (str/trim (:out (cli/run "pwd" []))))))))))))
+
+(deftest cd-updates-only-the-namespace-cwd
+  (with-temp-dir
+    (fn [dir]
+      (let [sub (io/file dir "sub")]
+        (is (.mkdir sub))
+        (with-root-cwd
+          nil
+          (fn []
+            (with-namespace-cwd (.getAbsolutePath dir)
+              (fn []
+                (is (= (.getCanonicalPath sub) (cli/cd "sub")))
+                (is (= (.getCanonicalPath sub) (cli/pwd)))
+                (is (= (.getCanonicalPath sub)
+                       (str/trim (:out (cli/run "pwd" [])))))))
+            (is (nil? cli/*cwd*))))))))
+
+(deftest an-unset-namespace-cwd-falls-back-to-the-global-one
+  (with-temp-dir
+    (fn [dir]
+      (with-root-cwd
+        (.getAbsolutePath dir)
+        (fn []
+          (with-namespace-cwd nil
+            (fn []
+              (is (= (.getAbsolutePath dir) (cli/pwd)))
+              (is (= (.getAbsolutePath dir)
+                     (str/trim (:out (cli/run "pwd" []))))))))))))

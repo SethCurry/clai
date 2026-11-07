@@ -35,7 +35,8 @@
 
     :browser   command string used to open the URL
     :wait?     true to wait for the browser process (default false)
-    :dir       working directory (defaults to `clai.shell.cli/*cwd*`)
+    :dir       working directory (defaults to the calling namespace's
+               `*cwd*`, then `user.dir`)
     :timeout   milliseconds to wait in `:wait?` mode; nil waits forever
     :env       extra environment variables; a nil value removes one
 

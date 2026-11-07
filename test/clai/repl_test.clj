@@ -7,7 +7,9 @@
   (:require [acp.agent :as acp]
             [acp.errors :as acp-errors]
             [clai.repl :as repl]
+            [clai.shell.cli :as cli]
             [clai.test-support :refer [instrument quiet-logs]]
+            [clojure.java.io :as io]
             [clojure.string :as str]
             [clojure.test :refer :all])
   (:import [java.io StringWriter]))
@@ -217,6 +219,31 @@
     (binding [*ns* (the-ns (repl/session-ns "older"))]
       (is (= "older" (repl/current-session-id))))
     (is (= "stub-session" (repl/current-session-id)))))
+
+(deftest session-namespaces-have-their-own-cwd
+  (binding [*ns* (the-ns 'user)]
+    (repl/resume! {:sessionId "older" :cwd "/tmp"})
+    (repl/new! {:cwd "/"})
+    (let [older  (find-ns (repl/session-ns "older"))
+          newer  (find-ns (repl/session-ns "stub-session"))
+          cwd-of (fn [ns] (get (ns-interns ns) '*cwd*))]
+      (is (= "/tmp" (var-get (cwd-of older))))
+      (is (= "/" (var-get (cwd-of newer))))
+      (is (:dynamic (meta (cwd-of older))))
+      (is (.isDynamic ^clojure.lang.Var (cwd-of older)))
+      ;; The Var is dynamic, so a `binding` can shadow it per call.
+      (is (= "/usr"
+             (binding [*ns* older]
+               (eval '(binding [*cwd* "/usr"] (clai.shell.cli/pwd))))))
+      ;; Shell helpers read the cwd of the namespace they are called from.
+      (is (= (.getAbsolutePath (io/file "/tmp"))
+             (binding [*ns* older] (cli/pwd))))
+      (is (= (.getAbsolutePath (io/file "/"))
+             (binding [*ns* newer] (cli/pwd))))
+      ;; Changing one session's cwd leaves the other session alone.
+      (binding [*ns* older] (cli/cd "/usr"))
+      (is (= "/usr" (var-get (cwd-of older))))
+      (is (= "/" (var-get (cwd-of newer)))))))
 
 ;; ---------------------------------------------------------------------------
 ;; prompt!

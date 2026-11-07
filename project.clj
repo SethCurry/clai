@@ -8,6 +8,8 @@
                  [cheshire "5.13.0"]
                  [com.taoensso/telemere "1.2.1"]
                  [metosin/malli "0.17.0"]
+                 [com.github.seancorfield/next.jdbc "1.3.1118"]
+                 [org.postgresql/postgresql "42.7.8"]
                  [reply/reply "0.5.1"]
                  [nrepl/nrepl "1.0.0"]
                  [com.datomic/local "1.0.301"]

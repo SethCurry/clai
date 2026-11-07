@@ -28,6 +28,20 @@
                   :api-key  "sk-..."
                   :timeout  600000}           ; milliseconds
 
+ ;; PostgreSQL storage for sessions and arbitrary data. Omitted keys fall back
+ ;; to CLAI_POSTGRES_* / PG* environment variables and then localhost:5432/clai.
+ ;; :url may be used instead of :host/:port/:database for a full JDBC URL.
+ ;; Creating the client is lazy; call clai.daemon.postgres/ensure-schema! (or
+ ;; clai.daemon.postgres/open) before using it.
+ :postgres       {:host     "localhost"
+                  :port     5432
+                  :database "clai"
+                  :user     "clai"
+                  :password "secret"
+                  :ssl-mode "prefer"       ; disable/allow/prefer/require/...
+                  :connect-timeout 10      ; seconds
+                  :socket-timeout  30}
+
  ;; Which built-in tools to expose to the model, in this order. Unknown ids
  ;; are skipped. Omit the key entirely to enable every built-in tool; set it
  ;; to [] to disable tools entirely.

@@ -33,11 +33,12 @@
           :state)
 
   The working directory is virtual and shared with the other CLI helper
-  namespaces. It comes from `:dir`, then `clai.shell.cli/*cwd*`, then the JVM's
-  working directory, so it matters for relative bind mounts, build contexts,
-  and compose files:
+  namespaces. It comes from `:dir`, then the calling namespace's own `*cwd*`
+  (each session namespace created by `clai.repl` has one), then the
+  process-wide `clai.shell.cli/*cwd*`, then the JVM's working directory, so it
+  matters for relative bind mounts, build contexts, and compose files:
 
-      (binding [clai.shell.cli/*cwd* \"/project\"]
+      (binding [*cwd* \"/project\"]        ; in a session namespace
         (build \".\" {:tag \"my-app:dev\"}))
 
   Commands are kept non-interactive by default: CLI hints are disabled,
@@ -236,8 +237,8 @@
   symbols; arguments are passed to docker verbatim, so no shell quoting or
   escaping is involved. `opts` may contain:
 
-    :dir        working directory (defaults to `clai.shell.cli/*cwd*`, then
-                `user.dir`)
+    :dir        working directory (defaults to the calling namespace's
+                `*cwd*`, then `user.dir`)
     :timeout    milliseconds to wait, or nil to wait forever
     :in         stdin contents (a string, byte array, or InputStream)
     :env        process environment variables; a nil value removes one

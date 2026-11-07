@@ -18,6 +18,7 @@
             [clai.agent.tools.invoke]
             [clai.agent.tools.registry]
             [clai.config]
+            [clai.daemon.postgres]
             [clai.log]
             [clai.util]
             [clojure.string :as str]

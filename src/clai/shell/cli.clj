@@ -18,18 +18,22 @@
       ;;     :timed-out? false}
 
   The working directory is virtual: it is chosen from the `:dir` option (or
-  its `:cwd` alias), then [[*cwd*]], then the JVM's working directory. The
-  child process sees that directory as its current directory, so relative
-  paths passed as arguments are resolved by the program itself. Bind [[*cwd*]]
-  to share a working directory across a series of calls:
+  its `:cwd` alias), then the calling namespace's own `*cwd*` Var, then the
+  process-wide [[*cwd*]], then the JVM's working directory. Every session
+  namespace created by `clai.repl` has its own `*cwd*`, so helpers called
+  there default to that session's directory without affecting other sessions.
+  The child process sees that directory as its current directory, so relative
+  paths passed as arguments are resolved by the program itself. Bind the
+  namespace's `*cwd*` to share a working directory across a series of calls:
 
-      (binding [cli/*cwd* \"/repo\"] (git/status) (task/list))
+      (binding [*cwd* \"/repo\"] (git/status) (task/list))
 
   [[check!]] turns a failed result into an `ex-info`; [[echo-result!]] prints
   a result the way the underlying program would; [[run!]] combines them.
 
-  [[cd]] changes that default for the rest of the JVM's life rather than for a
-  single `binding` form, and [[pwd]] reports the directory it set.
+  [[cd]] changes that default for later commands in the calling namespace
+  rather than for a single `binding` form, and [[pwd]] reports the directory
+  it set.
 
   Commands are non-interactive only insofar as the caller's environment
   defaults make them so. Pass `:env` to add or remove environment variables
@@ -46,10 +50,19 @@
 ;; ---------------------------------------------------------------------------
 
 (def ^:dynamic *cwd*
-  "Default virtual working directory for CLI commands. When nil, the JVM's
+  "Process-wide fallback virtual working directory for CLI commands.
+
+  Commands use this only when the calling namespace has no `*cwd*` Var of its
+  own; a session namespace created by `clai.repl` has one, so its commands
+  default to that session's directory instead. When neither is set, the JVM's
   working directory (`user.dir`) is used. Bind this to share a working
-  directory between commands and between program-specific helper namespaces."
+  directory between commands and between program-specific helper namespaces
+  that are not running in a session namespace."
   nil)
+
+(def ^:private cwd-var-name
+  "Name of the Var a session namespace interns for its own working directory."
+  '*cwd*)
 
 (def ^:dynamic *timeout-ms*
   "Default number of milliseconds to wait for a command before killing it.
@@ -78,14 +91,35 @@
     (sequential? args) (mapv arg->string args)
     :else              [(arg->string args)]))
 
+(defn- namespace-cwd-var
+  "The `*cwd*` Var interned in the calling namespace, or nil.
+
+  Session namespaces have their own `*cwd*`. The shared `clai.shell.cli` Var
+  of the same name is the process-wide fallback, not a namespace cwd, so it
+  is excluded even when this is called from that namespace."
+  []
+  (let [v (get (ns-interns *ns*) cwd-var-name)]
+    (when (and (var? v) (not (identical? v #'*cwd*)))
+      v)))
+
+(defn current-cwd
+  "The virtual working directory used by commands without an explicit `:dir`.
+
+  The calling namespace's own `*cwd*` wins, so each session namespace keeps
+  its own directory; otherwise the process-wide [[*cwd*]] is used, and when
+  that is nil the JVM's working directory (`user.dir`)."
+  []
+  (or (some-> (namespace-cwd-var) var-get)
+      *cwd*
+      (System/getProperty "user.dir")))
+
 (defn resolve-dir
   "Resolve the virtual working directory for a command, verifying that it
-  exists. Uses `:dir`, then `:cwd`, then [[*cwd*]], then `user.dir`."
+  exists. Uses `:dir`, then `:cwd`, then [[current-cwd]]."
   [opts]
   (let [dir (io/file (arg->string (or (:dir opts)
                                       (:cwd opts)
-                                      *cwd*
-                                      (System/getProperty "user.dir"))))]
+                                      (current-cwd))))]
     (when-not (.isDirectory dir)
       (throw (ex-info (str "Not a working directory: " (.getPath dir))
                       {:dir     (.getAbsolutePath dir)
@@ -100,45 +134,49 @@
     path))
 
 (defn pwd
-  "Return the current virtual working directory as an absolute path: the value
-  of [[*cwd*]], or the JVM's working directory when that is nil."
+  "Return the current virtual working directory as an absolute path.
+
+  This is [[current-cwd]], so it reports a session namespace's own directory
+  when it has one and the process-wide [[*cwd*]] otherwise."
   []
-  (.getAbsolutePath
-   (io/file (arg->string (or *cwd* (System/getProperty "user.dir"))))))
+  (.getAbsolutePath (io/file (arg->string (current-cwd)))))
 
 (defn cd
   "Change the default virtual working directory used by later commands.
 
+  In a session namespace this changes that namespace's own `*cwd*`, leaving
+  the other sessions alone; elsewhere it changes the process-wide [[*cwd*]].
+
   `path` is resolved against the current virtual working directory (see
-  [[*cwd*]]), a leading `~` expands to the user's home directory, and the
-  result is canonicalized. The target must exist, so a typo throws an
+  [[current-cwd]]), a leading `~` expands to the user's home directory, and
+  the result is canonicalized. The target must exist, so a typo throws an
   `ex-info` -- carrying `:dir` and `:cli/dir` -- instead of silently changing
   the directory.
 
-  Unlike `binding`, the change is written to the root of [[*cwd*]] and so
-  persists for later commands in this JVM, including the program-specific
-  namespaces such as `clai.shell.git`. A `binding` around the call still
-  shadows the new root until it is popped. With no argument the directory
-  changes to the user's home directory. Returns the new working directory as
-  an absolute path.
+  Unlike `binding`, the change is written to the root of the selected `*cwd*`
+  Var and so persists for later commands in this namespace, including the
+  program-specific namespaces such as `clai.shell.git`. A `binding` around the
+  call still shadows the new root until it is popped. With no argument the
+  directory changes to the user's home directory. Returns the new working
+  directory as an absolute path.
 
       (cd \"/repo\")   ;=> \"/repo\"
       (cd \"src\")     ;=> \"/repo/src\"
       (cd)            ;=> the user's home directory"
   ([] (cd (System/getProperty "user.home")))
   ([path]
-   (let [path (expand-home (arg->string path))
-         base (io/file (arg->string (or *cwd*
-                                       (System/getProperty "user.dir"))))
-         dir  (let [dir (io/file path)]
-                (if (.isAbsolute dir) dir (io/file base path)))
-         dir  (.getCanonicalFile dir)]
+   (let [path   (expand-home (arg->string path))
+         base   (io/file (arg->string (current-cwd)))
+         dir    (let [dir (io/file path)]
+                  (if (.isAbsolute dir) dir (io/file base path)))
+         dir    (.getCanonicalFile dir)
+         target (or (namespace-cwd-var) #'*cwd*)]
      (when-not (.isDirectory dir)
        (throw (ex-info (str "Not a working directory: " (.getPath dir))
                        {:dir     (.getAbsolutePath dir)
                         :cli/dir (.getAbsolutePath dir)})))
      (let [path (.getAbsolutePath dir)]
-       (alter-var-root #'*cwd* (constantly path))
+       (alter-var-root target (constantly path))
        path))))
 
 ;; ---------------------------------------------------------------------------
@@ -200,7 +238,7 @@
   passed verbatim, so no shell quoting or escaping is involved. `opts` may
   contain:
 
-    :dir      working directory (defaults to [[*cwd*]] or `user.dir`)
+    :dir      working directory (defaults to [[current-cwd]])
     :cwd      alias for `:dir`
     :timeout  milliseconds to wait, or nil to wait forever
     :in       stdin contents (a string, byte array, or InputStream)

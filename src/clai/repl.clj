@@ -27,8 +27,9 @@
   Every session gets its own namespace, `sessions.<session-id>`. [[new!]] and
   [[resume!]] create or reuse that namespace, seed it with the Vars and
   aliases of `user`, and move the REPL into it with `in-ns`. The namespace
-  also gets its own `current-session` Var, so returning to it keeps the
-  helpers pointed at its session.
+  also gets its own `current-session` and `*cwd*` Vars, so returning to it
+  keeps the helpers pointed at its session and its shell commands pointed at
+  its working directory.
 
   [[current-session]] and [[current-agent]] are vars rather than atoms so a
   REPL can rebind or redefine them: `(with-redefs [current-agent my-agent]
@@ -460,15 +461,28 @@
       (.refer ^clojure.lang.Namespace ns sym v)))
   ns)
 
+(defn- intern-session-var!
+  "Intern `sym` with `value` in session namespace `ns` and return the Var.
+
+  `seed-session-ns!` refers the `user` Vars, including any that happen to
+  share these names; drop such a refer first so the namespace gets its own
+  Var instead of the \"already refers to\" warning a replacing `refer` prints."
+  [ns sym value]
+  (when-let [existing (get (ns-map ns) sym)]
+    (when-not (and (var? existing)
+                   (identical? ns (.ns ^clojure.lang.Var existing)))
+      (ns-unmap ns sym)))
+  (intern ns sym value))
+
 (defn- select-session!
   "Make `session` current and move the REPL into its namespace.
 
   The namespace `sessions.<id>` is created and seeded on first use; a
   namespace that already exists (because the session was visited earlier in
   this JVM) keeps the definitions made in it. Either way, its
-  `current-session` Var is set to `session` and `*ns*` is switched there with
-  `in-ns`, so the prompt and subsequent evaluations run in the session's
-  namespace."
+  `current-session` Var is set to `session`, its `*cwd*` Var is set to the
+  session's working directory, and `*ns*` is switched there with `in-ns`, so
+  the prompt and subsequent evaluations run in the session's namespace."
   [session]
   (alter-var-root #'current-session (constantly session))
   (let [ns-sym (session-ns session)
@@ -480,16 +494,19 @@
       (alter-meta! ns assoc
                    :doc (str "REPL namespace for clai session "
                              (session-id session) ".")))
-    ;; `seed-session-ns!` refers `current-session` along with the other
-    ;; `user` Vars; drop that refer so the namespace gets its own Var
-    ;; without the "already refers to" warning a replacing `refer` prints.
-    (when-let [existing (get (ns-map ns) 'current-session)]
-      (when-not (and (var? existing)
-                     (identical? ns (.ns ^clojure.lang.Var existing)))
-        (ns-unmap ns 'current-session)))
-    (let [v (intern ns 'current-session session)]
+    (let [v (intern-session-var! ns 'current-session session)]
       (alter-meta! v assoc
                    :doc (str "The clai session selected in this namespace ("
+                             (session-id session) ").")))
+    (let [cwd (str (or (:cwd session) (default-cwd)))
+          v   (intern-session-var! ns '*cwd* cwd)]
+      ;; Clojure 1.12 keeps dynamic-ness on the Var itself, so mark it there
+      ;; as well as in the metadata (`def ^:dynamic` does both).
+      (.setDynamic ^clojure.lang.Var v true)
+      (alter-meta! v assoc
+                   :dynamic true
+                   :doc (str "Working directory for shell helpers called in "
+                             "this clai session namespace ("
                              (session-id session) ").")))
     (in-ns ns-sym)
     session))

@@ -3,8 +3,8 @@
 
   The config file is plain EDN (https://github.com/edn-format/edn) and may
   contain any subset of the recognized keys; anything omitted falls back to
-  the usual environment variables / defaults documented in this namespace
-  and `clai.agent.providers.ollama`.
+  the usual environment variables / defaults documented in this namespace,
+  `clai.agent.providers.ollama`, and `clai.daemon.postgres`.
 
   ## Recognized keys
 
@@ -17,6 +17,12 @@
        :ollama         {:host     \"http://localhost:11434\"
                         :api-key  \"sk-...\"
                         :timeout  600000}    ; ms
+       :postgres       {:host     \"localhost\"
+                        :port     5432
+                        :database \"clai\"
+                        :user     \"clai\"
+                        :password \"...\"
+                        :ssl-mode \"prefer\"}
        :tools          [\"read_file\" \"write_file\" ...]}
 
   `:tools` is a vector of tool ids (see `clai.agent.tools/built-in-tools`) to
@@ -35,6 +41,7 @@
   as it did before config-file support (env vars + defaults)."
   (:require [clai.agent.providers.ollama :as ollama]
             [clai.agent.tools :as tools]
+            [clai.daemon.postgres :as postgres]
             [clai.log]
             [clai.util :as util]
             [clojure.java.io :as io]
@@ -61,6 +68,22 @@
    [:api-key {:optional true} [:maybe :string]]
    [:timeout {:optional true} pos-int?]])
 
+(def postgres-config
+  "The `:postgres` sub-map of a config file, forwarded to
+  `clai.daemon.postgres/make-client`."
+  [:map
+   [:url {:optional true} non-empty-string]
+   [:host {:optional true} non-empty-string]
+   [:port {:optional true} [:int {:min 1 :max 65535}]]
+   [:database {:optional true} non-empty-string]
+   [:user {:optional true} [:maybe :string]]
+   [:password {:optional true} [:maybe :string]]
+   [:ssl-mode {:optional true}
+    [:enum "disable" "allow" "prefer" "require" "verify-ca" "verify-full"]]
+   [:connect-timeout {:optional true} pos-int?]
+   [:socket-timeout {:optional true} pos-int?]
+   [:application-name {:optional true} non-empty-string]])
+
 (def config
   "An agent config map as returned by `load-config`. Every key is optional
   (omitted keys fall back to environment variables and defaults), and unknown
@@ -73,6 +96,7 @@
    [:options {:optional true} [:map]]
    [:format {:optional true} [:or :string [:map]]]
    [:ollama {:optional true} ollama-config]
+   [:postgres {:optional true} postgres-config]
    [:tools {:optional true} [:sequential :string]]])
 
 ;; ---------------------------------------------------------------------------
@@ -223,6 +247,23 @@
   [cfg]
   (ollama/make-client (util/select-present (:ollama cfg)
                                            [:host :api-key :timeout])))
+
+(defn make-postgres-client
+  "Build the PostgreSQL client described by `cfg`. The `:postgres` sub-map
+  (with connection keys such as `:host`, `:port`, `:database`, `:user`,
+  `:password`, and `:ssl-mode`) is forwarded to
+  `clai.daemon.postgres/make-client`. Omitted keys fall back to the
+  `CLAI_POSTGRES_*` / `PG*` environment variables and then the client defaults.
+
+  Creating a client does not open a connection; callers should call
+  `clai.daemon.postgres/ensure-schema!` (or use `clai.daemon.postgres/open`)
+  before relying on the storage tables."
+  {:malli/schema [:-> #'config #'postgres/client-schema]}
+  [cfg]
+  (postgres/make-client
+   (util/select-present (:postgres cfg)
+                        [:url :host :port :database :user :password :ssl-mode
+                         :connect-timeout :socket-timeout :application-name])))
 
 (defn chat-options
   "Return the Ollama `/api/chat` request options carried by `cfg` (only the
