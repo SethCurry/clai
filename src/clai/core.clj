@@ -17,6 +17,7 @@
             [clai.instrument :as instrument]
             [clai.log]
             [clojure.java.io :as io]
+            [clojure.pprint :as pprint]
             [clojure.string :as str]
             [taoensso.telemere :as tel])
   (:gen-class))
@@ -157,14 +158,49 @@
   helpers a `lein repl` session does."
   '(require 'user))
 
-(defn- with-clai-init
-  "Add [[repl-init]] to REPLY `options`, preserving a user-provided `--init`."
+(def ^:private nrepl-print-options
+  "Options that ask an nREPL server to pretty-print evaluated values.
+
+  REPLY receives each value from the server already printed, so the server is
+  the only place where the default single-line `pr` output can be changed.
+  Pointing the printing middleware at `nrepl.util.print/pprint` wraps long
+  and nested results at the pretty printer's right margin."
+  {:nrepl.middleware.print/print 'nrepl.util.print/pprint})
+
+(defn- pprint-value
+  "Pretty-print `value` to a string, for REPLY's standalone mode."
+  [value]
+  (pprint/write value :stream nil))
+
+(defn- with-pprint-values
+  "Make REPLY pretty-print returned values instead of using `pr`'s single line.
+
+  In nREPL mode the printing happens on the server, so the options REPLY
+  merges into every `eval` request are extended. In standalone mode REPLY
+  prints locally, so the default `--value-to-string` (`pr-str`) is replaced
+  with [[pprint-value]]. An explicitly configured printer wins, since the
+  existing entries of `:nrepl-context` and a non-default `:value-to-string`
+  are kept."
   [options]
-  (update options :custom-init
-          (fn [custom]
-            (if custom
-              `(do ~repl-init ~custom)
-              repl-init))))
+  (cond-> (update options :nrepl-context
+                  (fn [context]
+                    (update (or context {}) :interactive-eval
+                            #(merge nrepl-print-options %))))
+    (and (:standalone options)
+         (contains? #{"pr-str" nil} (:value-to-string options)))
+    (assoc :value-to-string pprint-value)))
+
+(defn- with-clai-init
+  "Add [[repl-init]] to REPLY `options`, preserving a user-provided `--init`,
+  and pretty-print returned values (see [[with-pprint-values]])."
+  [options]
+  (-> options
+      (update :custom-init
+              (fn [custom]
+                (if custom
+                  `(do ~repl-init ~custom)
+                  repl-init)))
+      with-pprint-values))
 
 (defn- attach-to-server
   "Point REPLY `options` at the server advertised by [[port-file]].
@@ -193,7 +229,8 @@
   `--color`/`--history-file` configure the REPL; run `clai shell --help` to
   see them all. Whatever is passed, the REPL loads the `clai` bootstrap
   ([[repl-init]]) before the first prompt, and an explicit `--init` form runs
-  after it.
+  after it. Returned values are pretty-printed by default, so long and nested
+  results wrap instead of running together on one line.
 
   Returns an exit status: 0 after the REPL exits, or 1 when no nREPL server
   is running and REPLY was not asked to start or find one itself."

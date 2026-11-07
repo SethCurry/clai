@@ -143,6 +143,38 @@
                       (is (str/blank? out))))))
     (is (false? @launched))))
 
+(deftest launch-repl-pretty-prints-returned-values
+  (let [launched (atom nil)]
+    (stub-reply (fn [_] [{} [] ""])
+                (fn [options] (reset! launched options))
+                #(is (zero? (core/launch-repl []))))
+    (is (= 'nrepl.util.print/pprint
+           (get-in @launched [:nrepl-context :interactive-eval
+                              :nrepl.middleware.print/print]))))
+  ;; Standalone mode prints locally, so it gets a value->string function.
+  (let [launched (atom nil)]
+    (stub-reply (fn [_] [{:standalone true} [] ""])
+                (fn [options] (reset! launched options))
+                #(is (zero? (core/launch-repl ["--standalone"]))))
+    (is (fn? (:value-to-string @launched)))
+    (is (str/includes? ((:value-to-string @launched) (vec (range 40)))
+                       "\n"))))
+
+(deftest launch-repl-keeps-an-explicit-value-printer
+  (let [launched (atom nil)
+        value-fn '(fn [value] (str value))
+        nrepl-fn 'my.ns/print-value]
+    (stub-reply (fn [_] [{:value-to-string value-fn
+                          :nrepl-context
+                          {:interactive-eval
+                           {:nrepl.middleware.print/print nrepl-fn}}} [] ""])
+                (fn [options] (reset! launched options))
+                #(is (zero? (core/launch-repl []))))
+    (is (= value-fn (:value-to-string @launched)))
+    (is (= nrepl-fn
+           (get-in @launched [:nrepl-context :interactive-eval
+                              :nrepl.middleware.print/print])))))
+
 (deftest launch-repl-keeps-a-user-init-form
   (let [launched  (atom nil)
         user-init '(println "user init")]
