@@ -15,3 +15,7 @@ pom.xml.asc
 .lsp
 .task
 /.cljdoc
+
+# Local development data (docker-compose.yml's PostgreSQL volume)
+/local/*
+!/local/.gitkeep

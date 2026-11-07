@@ -1,0 +1,71 @@
+# Local PostgreSQL for clai.
+#
+# The container is configured to match clai's documented connection defaults
+# (see `postgres-config` in src/clai/config.clj and config.example.edn):
+#
+#   host     localhost
+#   port     5432
+#   database clai
+#   user     clai
+#   password secret
+#
+# There is no TLS in this container, so leave :ssl-mode unset (the driver
+# default) or use "prefer"/"disable"; "require" would fail.
+#
+# Usage:
+#
+#   docker compose up -d      # start Postgres and ensure the schema
+#   lein run                  # clai connects to localhost:5432/clai
+#   docker compose down       # stop; data stays in ./local/postgres
+#
+# The data directory is the bind mount ./local/postgres, so removing the
+# containers (or the whole compose project) does not lose sessions. Delete
+# that directory to start over with a fresh database.
+#
+# Every `docker compose up` also runs the one-shot `schema` service, which
+# applies the idempotent DDL in docker/postgres/clai-schema.sql. That creates
+# the storage tables when they are missing, even in an existing data
+# directory, and is a no-op once they exist.
+
+name: clai
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${CLAI_POSTGRES_DATABASE:-clai}
+      # These only apply when the data directory is first initialized.
+      # Changing them later has no effect; remove ./local/postgres (or use
+      # ALTER ROLE / ALTER DATABASE) to change the existing credentials.
+      POSTGRES_USER: ${CLAI_POSTGRES_USER:-clai}
+      POSTGRES_PASSWORD: ${CLAI_POSTGRES_PASSWORD:-secret}
+    ports:
+      # Bound to loopback only: this database is for local development.
+      - "127.0.0.1:${CLAI_POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - ./local/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  schema:
+    image: postgres:17-alpine
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: ${CLAI_POSTGRES_PASSWORD:-secret}
+    volumes:
+      - ./docker/postgres/clai-schema.sql:/clai-schema.sql:ro
+    command:
+      - psql
+      - --host=postgres
+      - --username=${CLAI_POSTGRES_USER:-clai}
+      - --dbname=${CLAI_POSTGRES_DATABASE:-clai}
+      - --set=ON_ERROR_STOP=1
+      - --file=/clai-schema.sql
+    restart: "no"

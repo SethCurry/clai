@@ -8,13 +8,14 @@
             [clai.agent :as agent]
             [clai.agent.providers.ollama :as ollama]
             [clai.agent.state :as state]
-            [clai.test-support :refer [quiet-logs instrument]]
+            [clai.test-support :refer [quiet-logs instrument memory-session-store]]
             [clojure.string :as str]
             [clojure.test :refer :all])
   (:import [java.io File]))
 
 (use-fixtures :once quiet-logs)
 (use-fixtures :once instrument)
+(use-fixtures :each memory-session-store)
 
 (def ^:private test-client
   (ollama/make-client {:host "http://localhost:11434" :timeout 1000}))
@@ -99,7 +100,8 @@
          (let [{:keys [sessionId]} (acp/handle-session-new
                                     handler nil {:cwd (.getPath dir)})]
            (is (= [{:role "system" :content "base prompt\n\nProject rules."}]
-                  (take 1 (:history (state/load-session sessionId))))
+                  (take 1 (:history (state/load-session (:postgres handler)
+                                                       sessionId))))
                "AGENTS.md is appended to the configured system prompt")
            (acp/handle-session-prompt
             handler nil
@@ -123,7 +125,8 @@
          (let [{:keys [sessionId]} (acp/handle-session-new
                                     handler nil {:cwd (.getPath dir)})]
            (is (= [{:role "system" :content "Only project rules."}]
-                  (take 1 (:history (state/load-session sessionId)))))
+                  (take 1 (:history (state/load-session (:postgres handler)
+                                                       sessionId)))))
            (acp/handle-session-prompt
             handler nil
             {:sessionId sessionId
@@ -149,7 +152,8 @@
             {:sessionId sessionId
              :prompt    [{:type "text" :text "ping"}]})
            (is (= [{:role "user" :content "ping"}]
-                  (take 1 (:history (state/load-session sessionId))))
+                  (take 1 (:history (state/load-session (:postgres handler)
+                                                       sessionId))))
                "a blank AGENTS.md adds no system message"))))
       (finally
         (.delete agents)
@@ -173,7 +177,8 @@
        (is (= "pong"
               (get-in (second @updates) [1 :content :text])))
        (is (= "let me think about this"
-              (:thinking (last (:history (state/load-session sessionId)))))
+              (:thinking (last (:history (state/load-session
+                                          (:postgres handler) sessionId)))))
            "thinking is persisted so session/load can replay it")))))
 
 (deftest session-prompt-accumulates-history

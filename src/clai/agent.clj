@@ -3,8 +3,8 @@
 
   `ollama-agent` builds an `acp/AgentHandler` that answers `session/prompt`
   requests with a `clai.agent.providers.ollama` chat model, persists sessions
-  via `clai.agent.state`, and executes model tool calls via its own per-agent
-  tool registry from `clai.agent.tools`.
+  in PostgreSQL via `clai.agent.state`, and executes model tool calls via its
+  own per-agent tool registry from `clai.agent.tools`.
 
   Supporting pieces live in sibling namespaces under `clai.agent.*`:
 
@@ -14,7 +14,8 @@
                                               conversion and history replay.
     * `clai.agent.resources`               -- ACP resource blocks rendered as
                                               text for the model.
-    * `clai.agent.state`                   -- persistent session storage.
+    * `clai.agent.state`                   -- PostgreSQL-backed session
+                                              storage.
     * `clai.agent.tools`                   -- per-agent tool registries and
                                               invocation.
     * `clai.config`                        -- config/env resolution for the
@@ -118,9 +119,9 @@
 (defn- sync-session-cwd
   "Return `session` with `:cwd` replaced by `cwd` -- persisting the change --
   when the client supplied a different working directory."
-  [session cwd]
+  [postgres session cwd]
   (if (and (some? cwd) (not= (str cwd) (:cwd session)))
-    (state/save-session (assoc session :cwd (str cwd)))
+    (state/save-session postgres (assoc session :cwd (str cwd)))
     session))
 
 (defn- system-history
@@ -173,11 +174,11 @@
 (defn- load-session!
   "Handle the `session/load` extension request: restore the persisted session,
   replay its conversation history to the client, and return an empty result."
-  [conn {:keys [sessionId cwd]}]
+  [postgres conn {:keys [sessionId cwd]}]
   (if (str/blank? (str sessionId))
     (acp-errors/acp-error acp-errors/err-params "Missing sessionId")
-    (if-let [session (state/load-session sessionId)]
-      (let [session (sync-session-cwd session cwd)
+    (if-let [session (state/load-session postgres sessionId)]
+      (let [session (sync-session-cwd postgres session cwd)
             history (:history session [])]
         (tel/log! {:level :info
                    :id    ::session-loaded
@@ -192,16 +193,16 @@
 (defn new-session!
   "Handle `session/new`: create a session with the configured model and
   record its system prompt (configured prompt plus any `AGENTS.md`)."
-  [sys-prompt model {:keys [cwd]}]
-  (let [session (state/create-session {:cwd cwd :model model})]
-    (run! #(state/append-history (:sessionId session) %)
+  [postgres sys-prompt model {:keys [cwd]}]
+  (let [session (state/create-session postgres {:cwd cwd :model model})]
+    (run! #(state/append-history postgres (:sessionId session) %)
           (system-history sys-prompt (:cwd session)))
     {:sessionId (:sessionId session)}))
 
 (defn- list-sessions!
   "Handle `session/list`, optionally filtered to a working directory."
-  [{:keys [cwd]}]
-  (let [sessions (cond->> (state/list-session-summaries)
+  [postgres {:keys [cwd]}]
+  (let [sessions (cond->> (state/list-session-summaries postgres)
                    (some? cwd) (filter #(= cwd (:cwd %))))]
     (tel/log! {:level :debug
                :id    ::session-list
@@ -211,8 +212,8 @@
 
 (defn- delete-session!
   "Handle `session/delete`: drop the persisted session."
-  [{:keys [sessionId]}]
-  (state/delete-session sessionId)
+  [postgres {:keys [sessionId]}]
+  (state/delete-session postgres sessionId)
   (tel/log! {:level :debug
              :id    ::session-dropped
              :data  {:sessionId sessionId}}
@@ -225,15 +226,15 @@
   An unknown session is registered under the requested id (with the
   configured system prompt plus any `AGENTS.md` in `cwd`) so resume degrades
   to new rather than erroring."
-  [sys-prompt {:keys [sessionId cwd]}]
-  (if-let [session (state/load-session sessionId)]
+  [postgres sys-prompt {:keys [sessionId cwd]}]
+  (if-let [session (state/load-session postgres sessionId)]
     (do
-      (sync-session-cwd session cwd)
+      (sync-session-cwd postgres session cwd)
       (tel/log! {:level :debug
                  :id    ::session-resumed
                  :data  {:sessionId sessionId}}
                 "Resumed existing session"))
-    (state/register-session sessionId cwd
+    (state/register-session postgres sessionId cwd
                             (system-history
                              sys-prompt (str (or cwd ".")))))
   {:sessionId sessionId})
@@ -270,11 +271,12 @@
   final reply. Passing `:cwd` to the prompt converter lets it read local
   resource links relative to the session's working directory."
   [agent conn {:keys [sessionId prompt]}]
-  (let [message-id (str (UUID/randomUUID))]
-    (if-let [session (state/load-session sessionId)]
+  (let [message-id (str (UUID/randomUUID))
+        postgres   (:postgres agent)]
+    (if-let [session (state/load-session postgres sessionId)]
       (let [incoming (ollama-acp/acp-prompt->ollama-messages
                       prompt {:cwd (:cwd session)})]
-        (run! #(state/append-history sessionId %) incoming)
+        (run! #(state/append-history postgres sessionId %) incoming)
         (tel/log! {:level :info
                    :id    ::prompt-received
                    :data  {:sessionId sessionId
@@ -303,10 +305,11 @@
 
 ;; The configured agent handler. Its fields are the per-agent state the
 ;; request handlers need: the resolved config, the Ollama client, the model,
-;; the tool registry and the specs derived from it, the tool-round cap, and
-;; the system prompt.
+;; the tool registry and the specs derived from it, the tool-round cap, the
+;; system prompt, and the PostgreSQL session client.
 (defrecord ClaiAgent
-  [cfg client model tool-registry tool-specs max-rounds sys-prompt chat-opts]
+  [cfg client model tool-registry tool-specs max-rounds sys-prompt chat-opts
+   postgres]
   acp/AgentHandler
   (handle-initialize [_ _conn {:keys [protocolVersion]}]
     (initialize-response protocolVersion))
@@ -318,16 +321,16 @@
     (acp-errors/acp-error acp-errors/err-method))
 
   (handle-session-new [_ _conn params]
-    (new-session! sys-prompt model params))
+    (new-session! postgres sys-prompt model params))
 
   (handle-session-list [_ _conn params]
-    (list-sessions! params))
+    (list-sessions! postgres params))
 
   (handle-session-delete [_ _conn params]
-    (delete-session! params))
+    (delete-session! postgres params))
 
   (handle-session-resume [_ _conn params]
-    (resume-session! sys-prompt params))
+    (resume-session! postgres sys-prompt params))
 
   (handle-session-close [_ _conn params]
     (close-session! params))
@@ -363,7 +366,7 @@
 
   (on-ext-request [_ conn method params]
     (case method
-      "session/load" (load-session! conn params)
+      "session/load" (load-session! postgres conn params)
       (do
         (tel/log! {:level :debug
                    :id    ::extension-request
@@ -389,6 +392,10 @@
                     fresh built-in registry, so each agent owns its tools. The
                     `:tools` key is accepted as an alias. `cfg`'s `:tools`
                     vector further selects ids.
+    :postgres       the `clai.daemon.postgres/Client` used for session storage.
+                    Defaults to one built from `cfg`'s `:postgres` sub-map and
+                    the environment. The storage schema is created lazily on
+                    the first session operation.
 
   A new session's system prompt is the configured `:system-prompt` followed by
   the contents of an `AGENTS.md` in the session's `cwd`, if one exists."
@@ -396,6 +403,8 @@
   ([opts]
    (let [cfg           (or (:cfg opts) (config/load-config))
          client        (or (:client opts) (config/make-ollama-client cfg))
+         postgres      (or (:postgres opts)
+                           (config/make-postgres-client cfg))
          model         (or (:model opts) (config/resolve-model cfg))
          tool-registry (resolve-tool-registry cfg opts)
          tool-specs    (tools/specs tool-registry)
@@ -412,6 +421,7 @@
                "Configured clai agent")
      (map->ClaiAgent {:cfg           cfg
                       :client        client
+                      :postgres      postgres
                       :model         model
                       :tool-registry tool-registry
                       :tool-specs    tool-specs

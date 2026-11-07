@@ -12,6 +12,7 @@
                  [org.postgresql/postgresql "42.7.8"]
                  [reply/reply "0.5.1"]
                  [nrepl/nrepl "1.0.0"]
+                 [hiccup/hiccup "2.0.0"]
                  [com.datomic/local "1.0.301"]
                  [io.scurry/acp "0.1.0-SNAPSHOT"]]
   :main clai.core

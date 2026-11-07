@@ -37,8 +37,8 @@
       clai_session_messages  append-only message history, one JSONB per row
       clai_data              arbitrary namespaced key/value data
 
-  The session tables mirror the shape used by `clai.agent.state`, so the
-  session functions can replace the EDN-file store without changing callers.
+  The session tables mirror the shape used by `clai.agent.state`; that
+  namespace is a thin facade over the session functions here.
 
   ## Example
 

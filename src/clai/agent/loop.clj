@@ -25,9 +25,9 @@
   "Build the context map handed to tool functions for `session-id`. Besides
   the `:cwd`, it carries the loop's live client, model, registry, and limits so
   tools like `spawn_agent` can run their own conversations."
-  [session-id {:keys [client model tool-registry chat-opts max-rounds
+  [session-id {:keys [postgres client model tool-registry chat-opts max-rounds
                       agent-depth]}]
-  {:cwd           (:cwd (state/load-session session-id))
+  {:cwd           (:cwd (state/load-session postgres session-id))
    :session-id    session-id
    :client        client
    :model         model
@@ -177,19 +177,20 @@
   chats again with the new history."
   [conn session-id msg opts]
   (let [tool-calls (:tool_calls msg)
+        postgres   (:postgres opts)
         ctx        (session-tool-ctx session-id opts)]
     ;; Record the assistant message (with its tool_calls) verbatim so the
     ;; model sees its own request in the next round.
-    (state/append-history session-id msg)
+    (state/append-history postgres session-id msg)
     (doseq [call tool-calls]
-      (state/append-history session-id
+      (state/append-history postgres session-id
                             (execute-tool-call conn session-id ctx call)))
     (tel/log! {:level :debug
                :id    ::tool-round-complete
                :data  {:sessionId session-id
                        :results   (count tool-calls)}}
               "Tool round complete")
-    (state/session-history session-id)))
+    (state/session-history postgres session-id)))
 
 ;; ---------------------------------------------------------------------------
 ;; Agent loop
@@ -229,10 +230,10 @@
 (defn- finish-reply
   "Record the assistant's final `msg` in the session history and return its
   text."
-  [session-id msg round]
+  [postgres session-id msg round]
   (let [content  (or (:content msg) "")
         thinking (:thinking msg)]
-    (state/append-history session-id
+    (state/append-history postgres session-id
                           (cond-> {:role "assistant" :content content}
                             (not (str/blank? (str thinking)))
                             (assoc :thinking (str thinking))))
@@ -265,6 +266,7 @@
 
   `opts` keys:
 
+    :postgres       the `clai.daemon.postgres/Client` holding session state.
     :client         the `clai.agent.providers.ollama` client to chat with.
     :model          the model name sent to `/api/chat`.
     :tool-registry  this agent's `{id tool}` registry, used to execute calls.
@@ -277,12 +279,13 @@
 
   On error (HTTP failure or hitting the round cap) returns a descriptive
   string rather than throwing, so the caller can relay it to the client."
-  [conn session-id {:keys [tool-registry tool-specs max-rounds] :as opts}]
+  [conn session-id {:keys [postgres tool-registry tool-specs max-rounds]
+                    :as opts}]
   (let [opts (assoc opts :tool-specs (or tool-specs (tools/specs tool-registry)))]
     (loop [round 0]
       (if (>= round max-rounds)
         (tool-round-cap-reply session-id max-rounds)
-        (let [history                 (state/session-history session-id)
+        (let [history                 (state/session-history postgres session-id)
               {:keys [message error]} (chat-once session-id opts history round)]
           (if error
             error
@@ -291,4 +294,4 @@
               (if (ollama/has-tool-calls? message)
                 (do (run-tool-round conn session-id message opts)
                     (recur (inc round)))
-                (finish-reply session-id message round)))))))))
+                (finish-reply postgres session-id message round)))))))))

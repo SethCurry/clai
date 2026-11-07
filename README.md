@@ -25,6 +25,23 @@ Be extremely careful. You should _not_ run this outside of Docker, a VM, somethi
 Also, _the entire repo is vibecoded_. This is mostly a toy, I'm not reviewing what goes on in here
 for the most part. There could be cryptominers in here, I have no idea, and I make no promises.
 
+## Development database
+
+Sessions are stored in PostgreSQL. `docker-compose.yml` runs a local instance
+tuned to the `:postgres` settings documented in `src/clai/config.clj` and
+`config.example.edn` (`localhost:5432`, database `clai`, user `clai`,
+password `secret`), keeps its data in `./local/postgres`, and applies the
+storage schema on startup when the tables are missing:
+
+```sh
+docker compose up -d
+```
+
+Copy `config.example.edn` to `./clai.edn` (or export the corresponding
+`CLAI_POSTGRES_*` variables) so clai connects with those credentials. The
+data directory is owned by the container's `postgres` user; to reset it, run
+`docker compose down` and remove `./local/postgres` as root.
+
 ## cljdocs
 
 You can get a local copy by running `task cljd` and navigating
