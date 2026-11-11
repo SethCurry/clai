@@ -1,9 +1,11 @@
 (ns clai.daemon.postgres-test
-  (:require [clojure.test :refer :all]
-            [clai.daemon.postgres :as pg]
+  (:require [clai.daemon.postgres :as pg]
             [clai.test-support :refer [quiet-logs]]
-            [next.jdbc :as jdbc])
-  (:import [java.util UUID]))
+            [clojure.java.io :as io]
+            [clojure.test :refer :all]
+            [next.jdbc :as jdbc]
+            [next.jdbc.result-set :as rs]))
+
 
 ;; ---------------------------------------------------------------------------
 ;; Fixtures
@@ -107,7 +109,42 @@
   (is (nil? (pg/close! (pg/make-client {:host "localhost"})))))
 
 ;; ---------------------------------------------------------------------------
-;; Optional integration test
+;; Schema
+;; ---------------------------------------------------------------------------
+
+(deftest schema-sql-is-read-from-the-classpath
+  (let [statements (pg/sql-statements (slurp (io/resource pg/schema-resource)))]
+    (is (seq statements))
+    (is (some #(re-find #"(?is)^CREATE TABLE IF NOT EXISTS agent_session\b" %)
+              statements))
+    (is (some #(re-find #"(?is)^CREATE TABLE IF NOT EXISTS agent_session_event\b" %)
+              statements))
+    (is (some #(re-find #"agent_session_event_type_t" %) statements)
+        "the event-type enum is declared")))
+
+(deftest sql-statements-splits-a-script
+  (is (= ["CREATE TABLE IF NOT EXISTS a (id INT)"
+          "CREATE INDEX IF NOT EXISTS a_idx ON a (id)"]
+         (pg/sql-statements
+          (str "-- leading comment\n"
+               "BEGIN;\n"
+               "CREATE TABLE IF NOT EXISTS a (id INT); -- trailing comment\n"
+               "\n"
+               "CREATE INDEX IF NOT EXISTS a_idx ON a (id);\n"
+               "COMMIT;\n")))))
+
+(deftest sql-statements-keeps-quoted-semicolons
+  (is (= ["SELECT 'a;b'"
+          "DO $$ BEGIN PERFORM 1; END $$"
+          "SELECT \"x;y\""]
+         (pg/sql-statements
+          (str "SELECT 'a;b';\n"
+               "-- $$ not a comment start, ; not a separator\n"
+               "DO $$ BEGIN PERFORM 1; END $$;\n"
+               "SELECT \"x;y\";\n")))))
+
+;; ---------------------------------------------------------------------------
+;; Optional integration tests
 ;; ---------------------------------------------------------------------------
 ;;
 ;; These tests only run when CLAI_TEST_POSTGRES_URL points at a disposable
@@ -116,45 +153,29 @@
 ;;   CLAI_TEST_POSTGRES_URL=jdbc:postgresql://localhost:5432/clai \
 ;;     lein test clai.daemon.postgres-test clai.daemon.postgres.sessions-test
 
-(deftest data-round-trip
+(defn- relation-exists?
+  "True when the table or type named `relation` exists in the connection's
+  current schema."
+  [client relation]
+  (some? (:oid (jdbc/execute-one! (:datasource client)
+                                  ["SELECT COALESCE(to_regclass(CAST(? AS text))::text,
+                                                    to_regtype(CAST(? AS text))::text) AS oid"
+                                   relation relation]
+                                  {:builder-fn rs/as-unqualified-kebab-maps}))))
+
+(deftest ensure-schema-creates-the-declared-tables
   (if-let [url (System/getenv "CLAI_TEST_POSTGRES_URL")]
-    (let [client  (pg/open {:url url})
-          data-ns (str "clai-test-" (UUID/randomUUID))
-          data-key "entry"]
+    (let [client (pg/open {:url url})]
       (try
         (is (pg/ping client))
+        (is (relation-exists? client "agent_session"))
+        (is (relation-exists? client "agent_session_event"))
+        (is (relation-exists? client "agent_session_event_type_t"))
 
-        (is (= {:text "hello"}
-               (:value (pg/put-data! client data-ns data-key {:text "hello"}))))
-        (is (= {:text "hello"} (pg/get-data client data-ns data-key)))
-        (is (pg/data-exists? client data-ns data-key))
-        (is (= 1 (count (pg/list-data client data-ns))))
-        (is (= "hello"
-               (get-in (pg/put-data! client data-ns data-key {:text "hello"
-                                                              :n 2})
-                       [:value :text])))
-        (is (= 2 (get-in (pg/lookup-data client data-ns data-key) [:value :n])))
-        (is (true? (pg/delete-data! client data-ns data-key)))
-        (is (false? (pg/data-exists? client data-ns data-key)))
-
-        ;; JSON null is a stored value, distinct from a missing entry
-        (is (nil? (get-in (pg/put-data! client data-ns "null" nil) [:value])))
-        (is (nil? (pg/get-data client data-ns "null")))
-        (is (some? (pg/lookup-data client data-ns "null")))
-        (is (true? (pg/delete-data! client data-ns "null")))
-        (is (nil? (pg/lookup-data client data-ns "null")))
-
-        ;; Namespaces and keys may be keywords; keyword names are stored as
-        ;; their printed name, and a keyword namespace is preserved
-        (is (= 1 (:value (pg/put-data! client (keyword data-ns) "count" 1))))
-        (is (= 1 (pg/get-data client data-ns "count")))
-        (is (= 2 (:value (pg/put-data! client :clai-test/nested "count" 2))))
-        (is (= 2 (pg/get-data client "clai-test/nested" "count")))
+        ;; The DDL is idempotent, so applying it again is a no-op
+        (is (nil? (pg/ensure-schema! client)))
+        (is (relation-exists? client "agent_session"))
 
         (finally
-          (pg/delete-data! client data-ns data-key)
-          (pg/delete-data! client data-ns "null")
-          (pg/delete-data! client data-ns "count")
-          (pg/delete-data! client "clai-test/nested" "count")
           (pg/close! client))))
     (is true "CLAI_TEST_POSTGRES_URL is not set; skipping integration test")))

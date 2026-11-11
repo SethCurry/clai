@@ -7,7 +7,7 @@
             [acp.schema.core :as schemas]
             [clai.agent :as agent]
             [clai.agent.providers.ollama :as ollama]
-            [clai.agent.state :as state]
+            [clai.daemon.postgres.sessions :as sessions]
             [clai.test-support :refer [quiet-logs instrument memory-session-store]]
             [clojure.string :as str]
             [clojure.test :refer :all])
@@ -100,7 +100,7 @@
          (let [{:keys [sessionId]} (acp/handle-session-new
                                     handler nil {:cwd (.getPath dir)})]
            (is (= [{:role "system" :content "base prompt\n\nProject rules."}]
-                  (take 1 (:history (state/load-session (:postgres handler)
+                  (take 1 (:history (sessions/load-session (:postgres handler)
                                                        sessionId))))
                "AGENTS.md is appended to the configured system prompt")
            (acp/handle-session-prompt
@@ -125,7 +125,7 @@
          (let [{:keys [sessionId]} (acp/handle-session-new
                                     handler nil {:cwd (.getPath dir)})]
            (is (= [{:role "system" :content "Only project rules."}]
-                  (take 1 (:history (state/load-session (:postgres handler)
+                  (take 1 (:history (sessions/load-session (:postgres handler)
                                                        sessionId)))))
            (acp/handle-session-prompt
             handler nil
@@ -152,7 +152,7 @@
             {:sessionId sessionId
              :prompt    [{:type "text" :text "ping"}]})
            (is (= [{:role "user" :content "ping"}]
-                  (take 1 (:history (state/load-session (:postgres handler)
+                  (take 1 (:history (sessions/load-session (:postgres handler)
                                                        sessionId))))
                "a blank AGENTS.md adds no system message"))))
       (finally
@@ -177,7 +177,7 @@
        (is (= "pong"
               (get-in (second @updates) [1 :content :text])))
        (is (= "let me think about this"
-              (:thinking (last (:history (state/load-session
+              (:thinking (last (:history (sessions/load-session
                                           (:postgres handler) sessionId)))))
            "thinking is persisted so session/load can replay it")))))
 

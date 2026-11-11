@@ -23,9 +23,10 @@
 # that directory to start over with a fresh database.
 #
 # Every `docker compose up` also runs the one-shot `schema` service, which
-# applies the idempotent DDL in docker/postgres/clai-schema.sql. That creates
-# the storage tables when they are missing, even in an existing data
-# directory, and is a no-op once they exist.
+# applies the idempotent DDL in schema/schema.sql (the same file
+# `clai.daemon.postgres/ensure-schema!` applies). That creates the storage
+# tables when they are missing, even in an existing data directory, and is a
+# no-op once they exist.
 
 name: clai
 
@@ -60,12 +61,12 @@ services:
     environment:
       PGPASSWORD: ${CLAI_POSTGRES_PASSWORD:-secret}
     volumes:
-      - ./docker/postgres/clai-schema.sql:/clai-schema.sql:ro
+      - ./schema/schema.sql:/schema.sql:ro
     command:
       - psql
       - --host=postgres
       - --username=${CLAI_POSTGRES_USER:-clai}
       - --dbname=${CLAI_POSTGRES_DATABASE:-clai}
       - --set=ON_ERROR_STOP=1
-      - --file=/clai-schema.sql
+      - --file=/schema.sql
     restart: "no"

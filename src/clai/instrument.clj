@@ -13,7 +13,6 @@
   (:require [clai.agent.providers.ollama]
             [clai.agent.providers.ollama.image]
             [clai.agent.providers.ollama.messages]
-            [clai.agent.state]
             [clai.agent.tools.builtin]
             [clai.agent.tools.invoke]
             [clai.agent.tools.registry]

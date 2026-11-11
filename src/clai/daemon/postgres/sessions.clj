@@ -1,21 +1,37 @@
 (ns clai.daemon.postgres.sessions
-  "Session storage on PostgreSQL for `clai`'s daemon.
+  "Agent session storage on PostgreSQL for `clai`'s daemon.
 
-  Sessions live in the two tables created by
-  `clai.daemon.postgres/ensure-schema!`:
+  Sessions live in the two tables declared in `schema/schema.sql` and created
+  by `clai.daemon.postgres/ensure-schema!`:
 
-      clai_sessions          session metadata and `:params`
-      clai_session_messages  append-only message history, one JSONB per row
+      agent_session        id, working_directory, created_at
+      agent_session_event  append-only event log, one typed JSONB per row
 
   Every function here takes a `clai.daemon.postgres/Client` as its first
-  argument. Build one with `clai.daemon.postgres/open` (which also creates the
-  tables), or with `clai.daemon.postgres/make-client` plus an explicit
-  `clai.daemon.postgres/ensure-schema!` call.
+  argument. Build one with `clai.daemon.postgres/open` (which applies the
+  schema immediately), or with `clai.daemon.postgres/make-client`; either way
+  the first storage operation ensures the schema (once per client, see
+  [[ready]]), so a `make-client` client needs no explicit
+  `clai.daemon.postgres/ensure-schema!` call. Because a session is database
+  rows, mutations are transactional and a session is visible to every process
+  sharing the database.
 
-  `clai.agent.state` is the thin facade the agent uses, so those functions
-  take a client too. Because a session is database rows, mutations are
-  transactional and a session is visible to every process sharing the
-  database.
+  ## Sessions and events
+
+  A session is one `agent_session` row: a database-assigned id (exposed as a
+  string, so it fits the ACP `sessionId` shape) plus the session's working
+  directory. Its conversation is the ordered `agent_session_event` rows that
+  reference it.
+
+  The event log is message-granular: `append-history` derives the event's
+  `event_type` from the chat message's role (`user`/`system` -> `user_prompt`,
+  a plain `assistant` message -> `agent_message`, an assistant message
+  carrying `:thinking` -> `agent_thought`, an assistant message with
+  `:tool_calls` or a `tool` result -> `tool_call`) and stores the whole message
+  map in the event's `content`. Reading a history therefore needs only
+  `content`, which keeps the Ollama chat request exactly as it was written;
+  `event_type` makes the log queryable. `clojure_form` is reserved for
+  recording evaluated Clojure forms as events of their own.
 
   ## Example
 
@@ -27,8 +43,7 @@
                             :user \"clai\"
                             :password \"secret\"}))
 
-      (def session (sessions/create-session client {:cwd \"/tmp/project\"
-                                                    :model \"gemma3\"}))
+      (def session (sessions/create-session client {:cwd \"/tmp/project\"}))
       (sessions/append-history client (:sessionId session)
                                {:role \"user\" :content \"hello\"})
       (sessions/load-session client (:sessionId session))"
@@ -36,8 +51,7 @@
             [clojure.java.io :as io]
             [next.jdbc :as jdbc]
             [taoensso.telemere :as tel])
-  (:import [java.io File]
-           [java.util UUID]))
+  (:import [java.io File]))
 
 ;; ---------------------------------------------------------------------------
 ;; Schemas
@@ -48,8 +62,8 @@
   postgres/non-empty-string)
 
 (def message
-  "A chat message stored in a session's `:history`, shaped like an Ollama
-  chat message."
+  "A chat message stored in a session's history, shaped like an Ollama chat
+  message."
   [:map
    [:role non-empty-string]
    [:content {:optional true} [:or :string [:sequential [:map]]]]
@@ -63,10 +77,7 @@
   [:map
    [:sessionId non-empty-string]
    [:cwd :string]
-   [:model {:optional true} [:maybe :string]]
-   [:params {:optional true} [:map]]
-   [:createdAt :string]
-   [:updatedAt {:optional true} [:maybe :string]]
+   [:createdAt {:optional true} [:maybe :string]]
    [:history {:optional true} [:vector message]]])
 
 (def session-summary
@@ -74,98 +85,159 @@
   [:map
    [:sessionId non-empty-string]
    [:cwd :string]
-   [:model {:optional true} [:maybe :string]]
-   [:params {:optional true} [:map]]
-   [:createdAt :string]
-   [:updatedAt {:optional true} [:maybe :string]]])
+   [:createdAt {:optional true} [:maybe :string]]])
 
 (def create-session-opts
   "Options accepted by [[create-session]]."
   [:map
-   [:cwd {:optional true} [:or :string [:fn #(instance? File %)]]]
-   [:model {:optional true} [:maybe :string]]
-   [:params {:optional true} [:map]]])
+   [:cwd {:optional true} [:or :string [:fn #(instance? File %)]]]])
+
+(def save-session-state
+  "A session map accepted by [[save-session]]: the history is replaced and a
+  missing `:sessionId` creates a new session."
+  [:map
+   [:sessionId {:optional true} [:maybe [:or non-empty-string :int]]]
+   [:cwd [:or :string [:fn #(instance? File %)]]]
+   [:createdAt {:optional true} [:maybe :string]]
+   [:history {:optional true} [:vector message]]])
+
+;; ---------------------------------------------------------------------------
+;; Schema readiness
+;; ---------------------------------------------------------------------------
+
+(defonce ^:private schema-ready
+  ;; Clients whose storage tables have already been ensured. Keeping this here
+  ;; lets callers build a client (and even an agent) without touching the
+  ;; database; the schema is created on the first storage operation.
+  (atom #{}))
+
+(defn- ready
+  "Ensure the storage tables exist for `client` (once per client) and return
+  it."
+  [client]
+  (when-not (contains? @schema-ready client)
+    (locking schema-ready
+      (when-not (contains? @schema-ready client)
+        (postgres/ensure-schema! client)
+        (swap! schema-ready conj client))))
+  client)
 
 ;; ---------------------------------------------------------------------------
 ;; Row conversion
 ;; ---------------------------------------------------------------------------
 
 (defn- row->summary
-  "Convert a `clai_sessions` row to the session summary shape."
+  "Convert an `agent_session` row to the session summary shape."
   [row]
-  {:sessionId (:session-id row)
-   :cwd       (:cwd row)
-   :model     (:model row)
-   :params    (or (postgres/parse-json (:params row) nil) {})
-   :createdAt (postgres/timestamp->iso (:created-at row))
-   :updatedAt (postgres/timestamp->iso (:updated-at row))})
+  {:sessionId (str (:id row))
+   :cwd       (:working-directory row)
+   :createdAt (postgres/timestamp->iso (:created-at row))})
 
 (defn- row->session
-  "Convert a `clai_sessions` row plus its `history` to a session state map."
+  "Convert an `agent_session` row plus its `history` to a session state map."
   [row history]
   (assoc (row->summary row) :history history))
+
+(defn- row->message
+  "The chat message stored in an `agent_session_event` row."
+  [row]
+  (or (postgres/parse-json (:content row) nil) {}))
+
+(defn ^:no-doc session-key
+  "`id` as the `agent_session.id` key it names, or nil when it does not name a
+  row.
+
+  Session ids are exposed as strings, and `INSERT` returns the numeric key, so
+  both are accepted. Anything non-numeric (for example a UUID minted by an ACP
+  client) returns nil instead of throwing."
+  [id]
+  (when (some? id)
+    (when-let [n (if (number? id) id (parse-long (str id)))]
+      (when (pos? n) n))))
+
+(defn ^:no-doc message->event-type
+  "The `agent_session_event_type_t` value recorded for chat `message`."
+  [message]
+  (let [role (:role message)]
+    (cond
+      (= role "assistant") (cond
+                             (seq (:tool_calls message)) "tool_call"
+                             (some? (:thinking message)) "agent_thought"
+                             :else                       "agent_message")
+      (= role "tool")      "tool_call"
+      ;; User turns, and the internal system prompt that opens a session.
+      :else                "user_prompt")))
 
 ;; ---------------------------------------------------------------------------
 ;; Session SQL
 ;; ---------------------------------------------------------------------------
 
 (def ^:private select-session-sql
-  "SELECT session_id, cwd, model, params::text AS params,
-          created_at, updated_at
-     FROM clai_sessions
-    WHERE session_id = ?")
+  "SELECT id, working_directory, created_at
+     FROM agent_session
+    WHERE id = ?")
 
 (def ^:private list-sessions-sql
-  "SELECT session_id, cwd, model, params::text AS params,
-          created_at, updated_at
-     FROM clai_sessions
-    ORDER BY created_at, session_id")
+  "SELECT id, working_directory, created_at
+     FROM agent_session
+    ORDER BY created_at, id")
 
-(def ^:private upsert-session-sql
-  "INSERT INTO clai_sessions
-         (session_id, cwd, model, params, created_at, updated_at)
-   VALUES (?, ?, ?, CAST(? AS jsonb),
-           CAST(? AS timestamptz), CAST(? AS timestamptz))
-   ON CONFLICT (session_id) DO UPDATE
-      SET cwd        = EXCLUDED.cwd,
-          model      = EXCLUDED.model,
-          params     = EXCLUDED.params,
-          created_at = EXCLUDED.created_at,
-          updated_at = EXCLUDED.updated_at")
+(def ^:private insert-session-sql
+  "INSERT INTO agent_session (working_directory)
+   VALUES (?)
+   RETURNING id, working_directory, created_at")
 
-(def ^:private insert-message-sql
-  "INSERT INTO clai_session_messages (session_id, message)
-   VALUES (?, CAST(? AS jsonb))")
+(def ^:private update-session-sql
+  "UPDATE agent_session
+      SET working_directory = ?
+    WHERE id = ?")
 
 (def ^:private select-history-sql
-  "SELECT message::text AS message
-     FROM clai_session_messages
-    WHERE session_id = ?
+  "SELECT content::text AS content
+     FROM agent_session_event
+    WHERE agent_session_id = ?
     ORDER BY id")
 
-(defn- upsert-session!
-  "Insert or update session metadata. History is managed separately."
-  [connectable state]
-  (postgres/exec-one! connectable ::upsert-session upsert-session-sql
-                      [(:sessionId state)
-                       (:cwd state)
-                       (:model state)
-                       (postgres/->json (or (:params state) {})
-                                        "Session params")
-                       (:createdAt state)
-                       (:updatedAt state)]))
+(def ^:private insert-event-sql
+  "INSERT INTO agent_session_event (agent_session_id, event_type, content)
+   VALUES (?, CAST(? AS agent_session_event_type_t), CAST(? AS jsonb))")
 
-(defn- row->message
-  "Parse the JSON message of a `clai_session_messages` row."
-  [row]
-  (or (postgres/parse-json (:message row) nil) {}))
+(def ^:private insert-event-if-session-sql
+  "INSERT INTO agent_session_event (agent_session_id, event_type, content)
+   SELECT ?, CAST(? AS agent_session_event_type_t), CAST(? AS jsonb)
+    WHERE EXISTS (SELECT 1 FROM agent_session WHERE id = ?)")
+
+(defn- canonical-cwd
+  "The working directory recorded for a session: `File`s and strings are used
+  as given, anything else falls back to the JVM's current directory."
+  [cwd]
+  (cond
+    (instance? File cwd) (str cwd)
+    (string? cwd)        cwd
+    :else                (str (.getCanonicalFile (io/file ".")))))
 
 (defn- history-from
   "Read a session's full message history from `connectable`."
-  [connectable session-id]
+  [connectable id]
   (mapv row->message
-        (postgres/exec! connectable ::load-history select-history-sql
-                        [session-id])))
+        (postgres/exec! connectable ::load-history select-history-sql [id])))
+
+(defn- insert-event!
+  "Append `message` to session `id`'s event log."
+  [connectable id message]
+  (postgres/exec-one! connectable ::insert-event insert-event-sql
+                      [id
+                       (message->event-type message)
+                       (postgres/->json message "Session message")]))
+
+(defn- replace-history!
+  "Replace session `id`'s event log with `history`."
+  [connectable id history]
+  (postgres/exec! connectable ::clear-history
+                  "DELETE FROM agent_session_event WHERE agent_session_id = ?"
+                  [id])
+  (doseq [message history]
+    (insert-event! connectable id message)))
 
 (defn- warn-unknown-session
   "Log a warning for a mutation targeting a session that does not exist."
@@ -179,100 +251,71 @@
 ;; Session lifecycle
 ;; ---------------------------------------------------------------------------
 
-(defn new-session-id
-  "Generate a fresh random session id (a UUID string)."
-  {:malli/schema [:-> #'non-empty-string]}
-  []
-  (str (UUID/randomUUID)))
-
 (defn save-session
-  "Persist `state` as a session, replacing its message history. Refreshes
-  `:updatedAt` and returns the saved state map."
-  {:malli/schema [:-> #'postgres/client-schema #'session #'session]}
+  "Persist `state` as a session, replacing its message history.
+
+  A `state` without `:sessionId` creates a new session row and returns the
+  saved state (including the database-assigned `:sessionId`). A `:sessionId`
+  that does not name a row (including an id that is not a database key, such
+  as a UUID) returns nil with a warning instead of creating a caller-named
+  row."
+  {:malli/schema [:-> #'postgres/client-schema #'save-session-state
+                  [:maybe #'session]]}
   [client state]
-  (let [state (-> state
-                  (assoc :history (vec (or (:history state) [])))
-                  (update :params #(or % {}))
-                  (cond-> (not (contains? state :model)) (assoc :model nil))
-                  (assoc :updatedAt (postgres/now-iso)))]
-    (postgres/validate! session state "save-session")
+  (let [client  (ready client)
+        state   (-> state
+                    (assoc :cwd (canonical-cwd (:cwd state)))
+                    (assoc :history (vec (or (:history state) []))))
+        _       (postgres/validate! save-session-state state "save-session")
+        given   (:sessionId state)
+        id      (session-key given)
+        history (:history state)]
     (jdbc/with-transaction [tx (:datasource client)]
-      (upsert-session! tx state)
-      (postgres/exec! tx ::clear-history
-                      "DELETE FROM clai_session_messages WHERE session_id = ?"
-                      [(:sessionId state)])
-      (doseq [msg (:history state)]
-        (postgres/exec-one! tx ::insert-message insert-message-sql
-                            [(:sessionId state)
-                             (postgres/->json msg "Session message")])))
-    (tel/log! {:level :debug
-               :id    ::session-saved
-               :data  {:sessionId (:sessionId state)
-                       :messages  (count (:history state))}}
-              "Saved PostgreSQL session")
-    state))
+      (if-let [row (cond
+                     (nil? given)
+                     (postgres/exec-one! tx ::create-session
+                                         insert-session-sql [(:cwd state)])
+
+                     id
+                     (let [result (postgres/exec-one! tx ::save-session
+                                                      update-session-sql
+                                                      [(:cwd state) id])]
+                       (when (pos? (postgres/updated-count result))
+                         (postgres/exec-one! tx ::reload-session
+                                             select-session-sql [id]))))]
+        (let [saved (do (replace-history! tx (:id row) history)
+                        (row->session row history))]
+          (tel/log! {:level :debug
+                     :id    ::session-saved
+                     :data  {:sessionId (:sessionId saved)
+                             :messages  (count history)}}
+                    "Saved PostgreSQL session")
+          saved)
+        (do
+          (warn-unknown-session ::save-session given)
+          nil)))))
 
 (defn create-session
   "Create and persist a new session, returning its state map.
 
   Options:
 
-    :cwd     the working directory for the session (defaults to the JVM's
-             current directory).
-    :model   the model name the session chats with (optional).
-    :params  a map of additional session parameters to store."
+    :cwd  the working directory for the session (defaults to the JVM's
+          current directory). The agent also reads `<cwd>/AGENTS.md` for
+          project instructions."
   {:malli/schema [:function
                   [:=> [:cat #'postgres/client-schema] #'session]
                   [:=> [:cat #'postgres/client-schema
                          [:maybe #'create-session-opts]]
                    #'session]]}
   ([client] (create-session client nil))
-  ([client {:keys [cwd model params] :or {params {}}}]
-   (let [now     (postgres/now-iso)
-         cwd     (cond
-                   (instance? File cwd) (str cwd)
-                   (string? cwd) cwd
-                   :else (str (.getCanonicalFile (io/file "."))))
-         session {:sessionId (new-session-id)
-                  :cwd       cwd
-                  :model     model
-                  :params    (or params {})
-                  :createdAt now
-                  :updatedAt now
-                  :history   []}]
-     (save-session client session)
+  ([client {:keys [cwd]}]
+   (let [session (save-session client {:cwd (canonical-cwd cwd) :history []})]
      (tel/log! {:level :info
                 :id    ::session-created
-                :data  {:sessionId (:sessionId session)
-                        :cwd       cwd
-                        :model     model}}
+                :data  {:sessionId (:sessionId session) :cwd (:cwd session)}}
                "Created PostgreSQL session")
      session)))
-
-(defn register-session
-  "Persist a session under an explicit `id` rather than generating one. Used
-  when a client resumes a session this agent has no record of. Returns the
-  saved state map."
-  {:malli/schema [:-> #'postgres/client-schema
-                  #'non-empty-string
-                  [:maybe :string]
-                  [:maybe [:vector #'message]]
-                  #'session]}
-  [client id cwd history]
-  (let [now     (postgres/now-iso)
-        session {:sessionId id
-                 :cwd       (or cwd ".")
-                 :model     nil
-                 :params    {}
-                 :createdAt now
-                 :updatedAt now
-                 :history   (vec (or history []))}]
-    (save-session client session)
-    (tel/log! {:level :info
-               :id    ::session-registered
-               :data  {:sessionId id :cwd (:cwd session)}}
-              "Registered PostgreSQL session under an explicit id")
-    session))
 
 (defn load-session
   "Read and return the state map for `session-id`, or nil when no such session
@@ -280,10 +323,12 @@
   {:malli/schema [:-> #'postgres/client-schema #'non-empty-string
                   [:maybe #'session]]}
   [client session-id]
-  (let [datasource (:datasource client)]
-    (when-let [row (postgres/exec-one! datasource ::load-session
-                                       select-session-sql [session-id])]
-      (row->session row (history-from datasource session-id)))))
+  (let [client (ready client)]
+    (when-let [id (session-key session-id)]
+      (let [datasource (:datasource client)]
+        (when-let [row (postgres/exec-one! datasource ::load-session
+                                          select-session-sql [id])]
+          (row->session row (history-from datasource id)))))))
 
 (defn lookup-session
   "Alias for [[load-session]]."
@@ -293,14 +338,16 @@
   (load-session client session-id))
 
 (defn delete-session
-  "Delete `session-id` and its history. Returns true when a session was
+  "Delete `session-id` and its event log. Returns true when a session was
   removed, false otherwise."
   {:malli/schema [:-> #'postgres/client-schema #'non-empty-string boolean?]}
   [client session-id]
-  (let [result   (postgres/exec-one! (:datasource client) ::delete-session
-                                     "DELETE FROM clai_sessions
-                                       WHERE session_id = ?"
-                                     [session-id])
+  (let [client   (ready client)
+        id       (session-key session-id)
+        result   (when id
+                   (postgres/exec-one! (:datasource client) ::delete-session
+                                       "DELETE FROM agent_session WHERE id = ?"
+                                       [id]))
         deleted? (pos? (postgres/updated-count result))]
     (tel/log! {:level :debug
                :id    ::session-deleted
@@ -312,32 +359,34 @@
   "Return true when `session-id` is recorded."
   {:malli/schema [:-> #'postgres/client-schema #'non-empty-string boolean?]}
   [client session-id]
-  (some? (postgres/exec-one! (:datasource client) ::session-exists
-                             "SELECT 1 AS one FROM clai_sessions
-                               WHERE session_id = ?"
-                             [session-id])))
+  (let [client (ready client)]
+    (boolean
+     (when-let [id (session-key session-id)]
+       (postgres/exec-one! (:datasource client) ::session-exists
+                           "SELECT 1 AS one FROM agent_session WHERE id = ?"
+                           [id])))))
 
 (defn list-sessions
   "Return every session state map, sorted by `:createdAt` ascending, with full
   histories. Use [[list-session-summaries]] for metadata only."
   {:malli/schema [:-> #'postgres/client-schema [:vector #'session]]}
   [client]
-  (let [datasource (:datasource client)
+  (let [datasource (:datasource (ready client))
         rows       (postgres/exec! datasource ::list-sessions
                                    list-sessions-sql [])
-        messages   (postgres/exec! datasource ::list-messages
-                                   "SELECT session_id, message::text AS message
-                                      FROM clai_session_messages
-                                     ORDER BY id"
+        events     (postgres/exec! datasource ::list-messages
+                                   "SELECT agent_session_id, content::text AS content
+                                      FROM agent_session_event
+                                     ORDER BY agent_session_id, id"
                                    [])
         by-session (reduce (fn [m row]
-                             (update m (:session-id row)
+                             (update m (:agent-session-id row)
                                      (fnil conj [])
                                      (row->message row)))
                            {}
-                           messages)]
+                           events)]
     (mapv (fn [row]
-            (row->session row (get by-session (:session-id row) [])))
+            (row->session row (get by-session (:id row) [])))
           rows)))
 
 (defn list-session-summaries
@@ -346,137 +395,70 @@
   {:malli/schema [:-> #'postgres/client-schema [:vector #'session-summary]]}
   [client]
   (mapv row->summary
-        (postgres/exec! (:datasource client) ::list-session-summaries
+        (postgres/exec! (:datasource (ready client)) ::list-session-summaries
                         list-sessions-sql [])))
 
 ;; ---------------------------------------------------------------------------
-;; Session history and parameters
+;; Session history
 ;; ---------------------------------------------------------------------------
 
 (defn session-history
   "Return the message history vector for `session-id`, or `[]` when the
-  session is unknown or has no messages."
+  session is unknown or has no events."
   {:malli/schema [:-> #'postgres/client-schema #'non-empty-string
                   [:vector #'message]]}
   [client session-id]
-  (history-from (:datasource client) session-id))
+  (if-let [id (session-key session-id)]
+    (history-from (:datasource (ready client)) id)
+    []))
 
 (defn append-history
-  "Append `msg` to session `session-id` and touch its `:updatedAt`. Returns the
-  message that was appended, or nil (with a warning) when the session is
-  unknown."
+  "Append `msg` to session `session-id`'s event log. Returns the message that
+  was appended, or nil (with a warning) when the session is unknown."
   {:malli/schema [:-> #'postgres/client-schema #'non-empty-string #'message
                   [:maybe #'message]]}
   [client session-id msg]
   (postgres/validate! message msg "append-history")
-  (let [datasource (:datasource client)
-        msg-json   (postgres/->json msg "Session message")]
-    (jdbc/with-transaction [tx datasource]
-      (let [result (postgres/exec-one! tx ::append-history
-                                       "INSERT INTO clai_session_messages
-                                          (session_id, message)
-                                        SELECT ?, CAST(? AS jsonb)
-                                         WHERE EXISTS (SELECT 1
-                                                         FROM clai_sessions
-                                                        WHERE session_id = ?)"
-                                       [session-id msg-json session-id])]
-        (if (pos? (postgres/updated-count result))
-          (do
-            (postgres/exec-one! tx ::touch-session
-                                "UPDATE clai_sessions
-                                    SET updated_at = CAST(? AS timestamptz)
-                                  WHERE session_id = ?"
-                                [(postgres/now-iso) session-id])
-            (tel/log! {:level :debug
-                       :id    ::history-appended
-                       :data  {:sessionId session-id :role (:role msg)}}
-                      "Appended message to PostgreSQL session history")
-            msg)
-          (do
-            (warn-unknown-session ::append-history session-id)
-            nil))))))
-
-(defn- mutate-session!
-  "Run an UPDATE that ends in `WHERE session_id = ?`, then return the updated
-  full session state. Returns nil (with a warning) when the session is unknown."
-  [client op session-id update-sql update-params]
-  (jdbc/with-transaction [tx (:datasource client)]
-    (let [result (postgres/exec-one! tx op update-sql
-                                     (conj (vec update-params) session-id))]
-      (if (pos? (postgres/updated-count result))
-        (let [row (postgres/exec-one! tx ::reload-session
-                                      select-session-sql [session-id])]
-          (row->session row (history-from tx session-id)))
-        (do
-          (warn-unknown-session op session-id)
-          nil)))))
-
-(defn set-param
-  "Associate `key` with `value` in the session's `:params` map. `value` must be
-  JSON-serializable. Returns the updated full state map, or nil when the
-  session is unknown."
-  {:malli/schema [:-> #'postgres/client-schema #'non-empty-string :any :any
-                  [:maybe #'session]]}
-  [client session-id key value]
-  (let [key*   (postgres/normalize-name key "Session parameter key")
-        value* (postgres/->json value "Session parameter value")]
-    (mutate-session! client ::set-param session-id
-                     "UPDATE clai_sessions
-                         SET params = jsonb_set(params, ARRAY[?]::text[],
-                                                CAST(? AS jsonb), true),
-                             updated_at = CAST(? AS timestamptz)
-                       WHERE session_id = ?"
-                     [key* value* (postgres/now-iso)])))
-
-(defn set-params
-  "Merge `m` into the session's `:params` map. Values must be JSON-serializable.
-  Returns the updated full state map, or nil when the session is unknown."
-  {:malli/schema [:-> #'postgres/client-schema #'non-empty-string [:map]
-                  [:maybe #'session]]}
-  [client session-id m]
-  (let [value* (postgres/->json m "Session params")]
-    (mutate-session! client ::set-params session-id
-                     "UPDATE clai_sessions
-                         SET params = params || CAST(? AS jsonb),
-                             updated_at = CAST(? AS timestamptz)
-                       WHERE session_id = ?"
-                     [value* (postgres/now-iso)])))
-
-(defn set-model
-  "Record the model name used by `session-id`. Returns the updated full state
-  map, or nil when the session is unknown."
-  {:malli/schema [:-> #'postgres/client-schema
-                  #'non-empty-string
-                  [:maybe :string]
-                  [:maybe #'session]]}
-  [client session-id model]
-  (mutate-session! client ::set-model session-id
-                   "UPDATE clai_sessions
-                       SET model = ?,
-                           updated_at = CAST(? AS timestamptz)
-                     WHERE session_id = ?"
-                   [model (postgres/now-iso)]))
+  (let [client (ready client)
+        result (when-let [id (session-key session-id)]
+                 (postgres/exec-one!
+                  (:datasource client) ::append-history
+                  insert-event-if-session-sql
+                  [id
+                   (message->event-type msg)
+                   (postgres/->json msg "Session message")
+                   id]))]
+    (if (pos? (postgres/updated-count result))
+      (do
+        (tel/log! {:level :debug
+                   :id    ::history-appended
+                   :data  {:sessionId session-id :role (:role msg)}}
+                  "Appended message to PostgreSQL session history")
+        msg)
+      (do
+        (warn-unknown-session ::append-history session-id)
+        nil))))
 
 (defn clear-history
-  "Delete every message in `session-id` and touch its `:updatedAt`. Returns the
-  updated full state map, or nil when the session is unknown."
+  "Delete every event in `session-id` and return the updated state map, or nil
+  when the session is unknown."
   {:malli/schema [:-> #'postgres/client-schema #'non-empty-string
                   [:maybe #'session]]}
   [client session-id]
-  (jdbc/with-transaction [tx (:datasource client)]
-    (let [result (postgres/exec-one! tx ::clear-history
-                                     "UPDATE clai_sessions
-                                         SET updated_at = CAST(? AS timestamptz)
-                                       WHERE session_id = ?"
-                                     [(postgres/now-iso) session-id])]
-      (if (pos? (postgres/updated-count result))
-        (let [_   (postgres/exec! tx ::delete-history
-                                  "DELETE FROM clai_session_messages
-                                    WHERE session_id = ?"
-                                  [session-id])
-              row (postgres/exec-one! tx ::reload-session
-                                      select-session-sql [session-id])]
-          (row->session row []))
-        (do
-          (warn-unknown-session ::clear-history session-id)
-          nil)))))
+  (let [client (ready client)]
+    (if-let [id (session-key session-id)]
+      (jdbc/with-transaction [tx (:datasource client)]
+        (if-let [row (postgres/exec-one! tx ::load-session
+                                        select-session-sql [id])]
+          (do
+            (postgres/exec! tx ::clear-history
+                            "DELETE FROM agent_session_event
+                            WHERE agent_session_id = ?"
+                            [id])
+            (row->session row []))
+          (do
+            (warn-unknown-session ::clear-history session-id)
+            nil)))
+      (do
+        (warn-unknown-session ::clear-history session-id)
+        nil))))

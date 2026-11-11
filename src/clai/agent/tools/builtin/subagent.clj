@@ -4,10 +4,10 @@
   A sub-agent is a fresh chat conversation with its own system prompt, model,
   and tool selection. It shares the parent's Ollama client and working
   directory, but its history is transient: it is not written to the parent
-  session (or to `clai.agent.state` at all), and only its final reply is returned as
-  the tool result. This keeps the parent's context small and lets it delegate a
-  focused task -- exploring a directory, drafting a file, running a command --
-  to a narrower agent.
+  session (or to `clai.daemon.postgres.sessions` at all), and only its final
+  reply is returned as the tool result. This keeps the parent's context small
+  and lets it delegate a focused task -- exploring a directory, drafting a
+  file, running a command -- to a narrower agent.
 
   Tool selection is drawn from the parent's registry, so a sub-agent can use
   the tools the parent has access to (including custom tools) but cannot

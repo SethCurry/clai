@@ -10,8 +10,8 @@
   streamed as `agent_thought_chunk` updates."
   (:require [acp.agent.helpers :as helpers]
             [clai.agent.providers.ollama :as ollama]
-            [clai.agent.state :as state]
             [clai.agent.tools :as tools]
+            [clai.daemon.postgres.sessions :as sessions]
             [clai.log]
             [clai.util :as util]
             [clojure.string :as str]
@@ -27,7 +27,7 @@
   tools like `spawn_agent` can run their own conversations."
   [session-id {:keys [postgres client model tool-registry chat-opts max-rounds
                       agent-depth]}]
-  {:cwd           (:cwd (state/load-session postgres session-id))
+  {:cwd           (:cwd (sessions/load-session postgres session-id))
    :session-id    session-id
    :client        client
    :model         model
@@ -181,16 +181,16 @@
         ctx        (session-tool-ctx session-id opts)]
     ;; Record the assistant message (with its tool_calls) verbatim so the
     ;; model sees its own request in the next round.
-    (state/append-history postgres session-id msg)
+    (sessions/append-history postgres session-id msg)
     (doseq [call tool-calls]
-      (state/append-history postgres session-id
-                            (execute-tool-call conn session-id ctx call)))
+      (sessions/append-history postgres session-id
+                               (execute-tool-call conn session-id ctx call)))
     (tel/log! {:level :debug
                :id    ::tool-round-complete
                :data  {:sessionId session-id
                        :results   (count tool-calls)}}
               "Tool round complete")
-    (state/session-history postgres session-id)))
+    (sessions/session-history postgres session-id)))
 
 ;; ---------------------------------------------------------------------------
 ;; Agent loop
@@ -233,10 +233,10 @@
   [postgres session-id msg round]
   (let [content  (or (:content msg) "")
         thinking (:thinking msg)]
-    (state/append-history postgres session-id
-                          (cond-> {:role "assistant" :content content}
-                            (not (str/blank? (str thinking)))
-                            (assoc :thinking (str thinking))))
+    (sessions/append-history postgres session-id
+                             (cond-> {:role "assistant" :content content}
+                               (not (str/blank? (str thinking)))
+                               (assoc :thinking (str thinking))))
     (tel/log! {:level :debug
                :id    ::chat-response
                :data  {:sessionId session-id
@@ -285,7 +285,7 @@
     (loop [round 0]
       (if (>= round max-rounds)
         (tool-round-cap-reply session-id max-rounds)
-        (let [history                 (state/session-history postgres session-id)
+        (let [history                 (sessions/session-history postgres session-id)
               {:keys [message error]} (chat-once session-id opts history round)]
           (if error
             error

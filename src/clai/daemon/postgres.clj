@@ -1,5 +1,5 @@
 (ns clai.daemon.postgres
-  "A PostgreSQL client for `clai`'s daemon, plus an arbitrary-data store.
+  "A PostgreSQL client for `clai`'s daemon, plus storage helpers.
 
   The client owns no global connection or mutable state: requiring this
   namespace has no side effects. Call [[make-client]] (or [[open]]) to build a
@@ -31,16 +31,16 @@
 
   ## Schema
 
-  Call [[ensure-schema!]] once ([[open]] does it for you) before using the
-  storage functions. It creates three idempotent tables:
+  The DDL is not written here. `schema/schema.sql` is the single source of
+  truth; it is read from the classpath and applied by [[ensure-schema!]],
+  which [[open]] calls for you. It declares:
 
-      clai_sessions          session metadata and `:params`
-      clai_session_messages  append-only message history, one JSONB per row
-      clai_data              arbitrary namespaced key/value data
+      agent_session                one row per agent session
+      agent_session_event          events belonging to a session
+      agent_session_event_content  JSONB content attached to an event
 
-  Sessions are read and written by `clai.daemon.postgres.sessions` (and, one
-  level up, by `clai.agent.state`). The data table backs the functions at the
-  end of this namespace.
+  Every statement in that file is idempotent, so applying it on every process
+  start (or from the container's `psql` init step) is safe.
 
   ## Example
 
@@ -51,12 +51,12 @@
                             :user \"clai\"
                             :password \"secret\"}))
 
-      (pg/put-data! client \"notes\" \"todo\" {:text \"write the docs\"})
-      (pg/get-data client \"notes\" \"todo\")
-      ;; => {:text \"write the docs\"}"
+      (pg/exec! (:datasource client) ::insert-session
+                \"INSERT INTO agent_session DEFAULT VALUES RETURNING id\" [])"
   (:require [cheshire.core :as json]
             [clai.log]
             [clai.util :as util]
+            [clojure.java.io :as io]
             [clojure.string :as str]
             [malli.core :as m]
             [malli.error :as me]
@@ -99,19 +99,6 @@
   [:map
    [:datasource [:fn #(instance? DataSource %)]]
    [:options client-options]])
-
-(def data-entry
-  "A value returned by the arbitrary-data store."
-  [:map
-   [:namespace non-empty-string]
-   [:key non-empty-string]
-   [:value :any]
-   [:createdAt :string]
-   [:updatedAt {:optional true} [:maybe :string]]])
-
-(def data-name
-  "A namespace or key accepted by the arbitrary-data store."
-  [:or non-empty-string :keyword])
 
 ;; ---------------------------------------------------------------------------
 ;; Defaults and validation
@@ -334,47 +321,136 @@
 ;; Schema
 ;; ---------------------------------------------------------------------------
 
-(def ^:private schema-ddl
-  ["CREATE TABLE IF NOT EXISTS clai_sessions (
-      session_id text PRIMARY KEY,
-      cwd        text NOT NULL,
-      model      text,
-      params     jsonb NOT NULL DEFAULT '{}'::jsonb,
-      created_at timestamptz NOT NULL,
-      updated_at timestamptz NOT NULL
-    )"
+(def schema-resource
+  "Classpath location of the canonical storage DDL.
 
-   "CREATE TABLE IF NOT EXISTS clai_session_messages (
-      id         bigserial PRIMARY KEY,
-      session_id text NOT NULL
-                 REFERENCES clai_sessions(session_id) ON DELETE CASCADE,
-      message    jsonb NOT NULL,
-      created_at timestamptz NOT NULL DEFAULT now()
-    )"
+  The file lives at `schema/schema.sql` in the repository; `project.clj` adds
+  the `schema` directory to `:resource-paths`, so on the classpath it is
+  plain `schema.sql`."
+  "schema.sql")
 
-   "CREATE INDEX IF NOT EXISTS clai_session_messages_session_idx
-      ON clai_session_messages (session_id, id)"
+(defn ^:private schema-sql
+  "Read the canonical DDL from [[schema-resource]] on the classpath."
+  []
+  (if-let [resource (io/resource schema-resource)]
+    (slurp resource)
+    (throw (ex-info (str "PostgreSQL schema not found on the classpath: "
+                         schema-resource)
+                    {:resource schema-resource}))))
 
-   "CREATE TABLE IF NOT EXISTS clai_data (
-      namespace  text NOT NULL,
-      data_key   text NOT NULL,
-      value      jsonb NOT NULL,
-      created_at timestamptz NOT NULL,
-      updated_at timestamptz NOT NULL,
-      PRIMARY KEY (namespace, data_key)
-    )"])
+(def ^:private transaction-statement?
+  "True when `statement` is SQL transaction control, which [[ensure-schema!]]
+  supplies itself."
+  (let [re #"(?i)^(begin|commit|rollback|start\s+transaction)\b"]
+    (fn [statement] (boolean (re-find re statement)))))
+
+(defn ^:private skip-sql-quoted
+  "Index just past the quoted SQL region starting at `i`, where `quote` is
+  either `'` (a string literal) or `\"` (a quoted identifier).
+
+  Doubled quotes escape the quote character. Backslash escapes are also
+  honoured inside string literals, for databases running with
+  `standard_conforming_strings` off."
+  [^String sql ^long i quote]
+  (let [n   (.length sql)
+        esc? (= quote \')]
+    (loop [j (inc (int i))]
+      (if (>= j n)
+        n
+        (let [c (.charAt sql (int j))]
+          (cond
+            (and esc? (= c \\)) (recur (+ j 2))
+            (= c quote)
+            (if (and (< (inc j) n) (= quote (.charAt sql (int (inc j)))))
+              (recur (+ j 2))
+              (inc j))
+            :else (recur (inc j))))))))
+
+(defn ^:private dollar-tag-at
+  "The dollar-quote tag (`$$` or `$name$`) starting at `i` in `sql`, or nil."
+  [^String sql ^long i]
+  (when (= \$ (.charAt sql (int i)))
+    (re-find #"^\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$"
+             (subs sql (int i) (min (.length sql) (+ (int i) 65))))))
+
+(defn ^:no-doc sql-statements
+  "Split a SQL script into executable statements.
+
+  Semicolons inside string literals, quoted identifiers, and dollar-quoted
+  blocks (for example `DO $$ ... $$` bodies) do not end a statement, and `--`
+  comments are dropped. Blank statements and transaction control (`BEGIN`, `COMMIT`,
+  `ROLLBACK`, `START TRANSACTION`) are omitted because [[ensure-schema!]]
+  supplies its own transaction. Exposed for tests."
+  [sql]
+  (let [^String sql (str sql)
+        n (.length sql)
+        sb (StringBuilder.)]
+    (loop [i 0 acc []]
+      (if (>= i n)
+        (->> (conj acc (str/trim (.toString sb)))
+             (remove str/blank?)
+             (remove transaction-statement?)
+             vec)
+        (let [c (.charAt sql (int i))]
+          (cond
+            ;; `--` line comment: replace it with a space so tokens either
+            ;; side of the comment cannot run together.
+            (and (= c \-) (< (inc i) n) (= \- (.charAt sql (int (inc i)))))
+            (let [j (.indexOf sql "\n" (int i))]
+              (.append sb \space)
+              (recur (if (neg? j) n (inc j)) acc))
+
+            ;; String literal or quoted identifier, copied verbatim.
+            (or (= c \') (= c \"))
+            (let [end (skip-sql-quoted sql i c)]
+              (.append sb (subs sql (int i) (int end)))
+              (recur end acc))
+
+            ;; Dollar-quoted block, copied verbatim.
+            (= c \$)
+            (if-let [tag (dollar-tag-at sql i)]
+              (let [tag-length (.length ^String tag)
+                    body       (+ (int i) tag-length)
+                    end        (.indexOf sql ^String tag (int body))]
+                (if (neg? end)
+                  (do (.append sb (subs sql (int i)))
+                      (recur n acc))
+                  (let [after (+ end tag-length)]
+                    (.append sb (subs sql (int i) (int after)))
+                    (recur after acc))))
+              (do (.append sb c)
+                  (recur (inc i) acc)))
+
+            ;; Statement separator.
+            (= c \;)
+            (let [statement (str/trim (.toString sb))]
+              (.setLength sb 0)
+              (recur (inc i) (if (str/blank? statement)
+                               acc
+                               (conj acc statement))))
+
+            :else
+            (do (.append sb c)
+                (recur (inc i) acc))))))))
 
 (defn ensure-schema!
-  "Create the session and arbitrary-data tables if they do not exist.
-  Idempotent and safe to call on every process start. Returns nil."
+  "Apply the DDL in [[schema-resource]] (`schema/schema.sql`) to the database.
+
+  Every statement there is idempotent, so this is safe to call on every
+  process start and against a database that already has the tables. Returns
+  nil."
   {:malli/schema [:-> #'client-schema :nil]}
   [client]
-  (jdbc/with-transaction [tx (:datasource client)]
-    (doseq [ddl schema-ddl]
-      (exec! tx ::ensure-schema ddl [])))
-  (tel/log! {:level :info :id ::schema-ensured}
-            "Ensured PostgreSQL storage schema")
-  nil)
+  (let [statements (sql-statements (schema-sql))]
+    (jdbc/with-transaction [tx (:datasource client)]
+      (doseq [statement statements]
+        (exec! tx ::ensure-schema statement [])))
+    (tel/log! {:level :info
+               :id    ::schema-ensured
+               :data  {:resource   schema-resource
+                       :statements (count statements)}}
+              "Ensured PostgreSQL storage schema")
+    nil))
 
 ;; ---------------------------------------------------------------------------
 ;; SQL helpers
@@ -459,131 +535,3 @@
     (instance? OffsetDateTime v) (str (.toInstant ^OffsetDateTime v))
     (instance? Date v) (str (.toInstant ^Date v))
     :else (str v)))
-
-(defn ^:no-doc normalize-name
-  "Normalize a keyword/string namespace or key to a non-blank string.
-  Namespaced keywords keep their namespace (`:a/b` becomes `\"a/b\"`)."
-  [x label]
-  (let [s (cond
-            (keyword? x) (if-let [ns (namespace x)] (str ns "/" (name x)) (name x))
-            (string? x) x
-            :else (str x))]
-    (when (str/blank? s)
-      (throw (ex-info (str label " must not be blank") {:value x})))
-    s))
-
-;; ---------------------------------------------------------------------------
-;; Arbitrary data
-;; ---------------------------------------------------------------------------
-
-(def ^:private select-data-sql
-  "SELECT namespace, data_key, value::text AS value, created_at, updated_at
-     FROM clai_data")
-
-(defn- row->data-entry
-  "Convert a `clai_data` row to a data entry."
-  [row]
-  {:namespace (:namespace row)
-   :key       (:data-key row)
-   :value     (parse-json (:value row) nil)
-   :createdAt (timestamp->iso (:created-at row))
-   :updatedAt (timestamp->iso (:updated-at row))})
-
-(defn put-data!
-  "Store JSON-serializable `value` under `ns-name`/`data-key`, creating or
-  replacing it. Returns the stored data entry.
-
-  Namespaces and keys may be strings or keywords. Keyword keys are stored as
-  their printed name (preserving a keyword namespace, so `:a/b` is stored as
-  `\"a/b\"`)."
-  {:malli/schema [:-> #'client-schema #'data-name #'data-name :any
-                  #'data-entry]}
-  [client ns-name data-key value]
-  (let [ns*    (normalize-name ns-name "Data namespace")
-        key*   (normalize-name data-key "Data key")
-        value* (->json value "Data value")
-        now    (now-iso)
-        row    (exec-one! (:datasource client) ::put-data
-                          "INSERT INTO clai_data
-                                 (namespace, data_key, value, created_at, updated_at)
-                           VALUES (?, ?, CAST(? AS jsonb),
-                                   CAST(? AS timestamptz), CAST(? AS timestamptz))
-                           ON CONFLICT (namespace, data_key) DO UPDATE
-                              SET value      = EXCLUDED.value,
-                                  updated_at = EXCLUDED.updated_at
-                           RETURNING namespace, data_key, value::text AS value,
-                                     created_at, updated_at"
-                          [ns* key* value* now now])]
-    (tel/log! {:level :debug
-               :id    ::data-put
-               :data  {:namespace ns* :key key*}}
-              "Stored PostgreSQL data entry")
-    (row->data-entry row)))
-
-(defn lookup-data
-  "Return the full data entry stored under `ns-name`/`data-key`, or nil when it
-  does not exist. Unlike [[get-data]] this can distinguish a missing entry from
-  a stored JSON `null`."
-  {:malli/schema [:-> #'client-schema #'data-name #'data-name
-                  [:maybe #'data-entry]]}
-  [client ns-name data-key]
-  (let [ns*  (normalize-name ns-name "Data namespace")
-        key* (normalize-name data-key "Data key")]
-    (when-let [row (exec-one! (:datasource client) ::lookup-data
-                              (str select-data-sql
-                                   " WHERE namespace = ? AND data_key = ?")
-                              [ns* key*])]
-      (row->data-entry row))))
-
-(defn get-data
-  "Return the value stored under `ns-name`/`data-key`, or nil when no such
-  entry exists. Use [[lookup-data]] when a stored JSON `null` must be
-  distinguished from a missing entry."
-  {:malli/schema [:-> #'client-schema #'data-name #'data-name :any]}
-  [client ns-name data-key]
-  (:value (lookup-data client ns-name data-key)))
-
-(defn data-exists?
-  "Return true when an entry exists under `ns-name`/`data-key`."
-  {:malli/schema [:-> #'client-schema #'data-name #'data-name boolean?]}
-  [client ns-name data-key]
-  (let [ns*  (normalize-name ns-name "Data namespace")
-        key* (normalize-name data-key "Data key")]
-    (some? (exec-one! (:datasource client) ::data-exists
-                      "SELECT 1 AS one FROM clai_data
-                        WHERE namespace = ? AND data_key = ?"
-                      [ns* key*]))))
-
-(defn delete-data!
-  "Delete the entry stored under `ns-name`/`data-key`. Returns true when an
-  entry was removed, false otherwise."
-  {:malli/schema [:-> #'client-schema #'data-name #'data-name boolean?]}
-  [client ns-name data-key]
-  (let [ns*    (normalize-name ns-name "Data namespace")
-        key*   (normalize-name data-key "Data key")
-        result (exec-one! (:datasource client) ::delete-data
-                          "DELETE FROM clai_data
-                            WHERE namespace = ? AND data_key = ?"
-                          [ns* key*])]
-    (pos? (updated-count result))))
-
-(defn list-data
-  "Return stored data entries. With no namespace, every entry is returned
-  ordered by namespace and key; with `ns-name`, only that namespace's entries
-  are returned."
-  {:malli/schema [:function
-                  [:=> [:cat #'client-schema] [:vector #'data-entry]]
-                  [:=> [:cat #'client-schema #'data-name]
-                   [:vector #'data-entry]]]}
-  ([client]
-   (mapv row->data-entry
-         (exec! (:datasource client) ::list-data
-                (str select-data-sql " ORDER BY namespace, data_key")
-                [])))
-  ([client ns-name]
-   (let [ns* (normalize-name ns-name "Data namespace")]
-     (mapv row->data-entry
-           (exec! (:datasource client) ::list-data
-                  (str select-data-sql
-                       " WHERE namespace = ? ORDER BY data_key")
-                  [ns*])))))

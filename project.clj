@@ -16,6 +16,9 @@
                  [com.datomic/local "1.0.301"]
                  [io.scurry/acp "0.1.0-SNAPSHOT"]]
   :main clai.core
+  ;; `schema/` holds the canonical storage DDL, which `clai.daemon.postgres`
+  ;; loads from the classpath at runtime (and the uberjar must carry).
+  :resource-paths ["resources" "schema"]
   :target-path "target/%s"
   :repl-options {:init-ns user}
   :profiles

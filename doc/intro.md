@@ -4,5 +4,5 @@ TODO: write [great documentation](https://jacobian.org/writing/what-to-write/)
 
 ## Further reading
 
-* [Session storage](state.md) — the PostgreSQL tables `clai.agent.state`
-  uses for ACP sessions.
+* [Session storage](state.md) — the PostgreSQL tables
+  `clai.daemon.postgres.sessions` uses for agent sessions and their event logs.

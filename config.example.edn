@@ -28,12 +28,12 @@
                   :api-key  "sk-..."
                   :timeout  600000}           ; milliseconds
 
- ;; PostgreSQL storage for sessions and arbitrary data. Omitted keys fall back
- ;; to CLAI_POSTGRES_* / PG* environment variables and then localhost:5432/clai.
- ;; :url may be used instead of :host/:port/:database for a full JDBC URL.
- ;; The agent connects lazily and creates the storage tables on the first
- ;; session operation; call clai.agent.state/ensure-schema! to fail fast at
- ;; startup instead.
+ ;; PostgreSQL storage for agent sessions and their event logs. Omitted keys
+ ;; fall back to CLAI_POSTGRES_* / PG* environment variables and then
+ ;; localhost:5432/clai. :url may be used instead of :host/:port/:database for
+ ;; a full JDBC URL. The agent connects lazily and applies schema/schema.sql on
+ ;; the first session operation; call clai.daemon.postgres/ensure-schema! to fail
+ ;; fast at startup instead.
  :postgres       {:host     "localhost"
                   :port     5432
                   :database "clai"

@@ -3,8 +3,8 @@
 
   `ollama-agent` builds an `acp/AgentHandler` that answers `session/prompt`
   requests with a `clai.agent.providers.ollama` chat model, persists sessions
-  in PostgreSQL via `clai.agent.state`, and executes model tool calls via its
-  own per-agent tool registry from `clai.agent.tools`.
+  in PostgreSQL via `clai.daemon.postgres.sessions`, and executes model tool
+  calls via its own per-agent tool registry from `clai.agent.tools`.
 
   Supporting pieces live in sibling namespaces under `clai.agent.*`:
 
@@ -14,7 +14,7 @@
                                               conversion and history replay.
     * `clai.agent.resources`               -- ACP resource blocks rendered as
                                               text for the model.
-    * `clai.agent.state`                   -- PostgreSQL-backed session
+    * `clai.daemon.postgres.sessions`      -- PostgreSQL-backed session
                                               storage.
     * `clai.agent.tools`                   -- per-agent tool registries and
                                               invocation.
@@ -25,9 +25,9 @@
             [acp.errors :as acp-errors]
             [clai.agent.loop :as agent-loop]
             [clai.agent.providers.ollama.acp :as ollama-acp]
-            [clai.agent.state :as state]
             [clai.agent.tools :as tools]
             [clai.config :as config]
+            [clai.daemon.postgres.sessions :as sessions]
             [clai.log]
             [clai.util :as util]
             [clojure.java.io :as io]
@@ -121,7 +121,7 @@
   when the client supplied a different working directory."
   [postgres session cwd]
   (if (and (some? cwd) (not= (str cwd) (:cwd session)))
-    (state/save-session postgres (assoc session :cwd (str cwd)))
+    (sessions/save-session postgres (assoc session :cwd (str cwd)))
     session))
 
 (defn- system-history
@@ -134,11 +134,14 @@
     []))
 
 (defn- session-summary
-  "Shape one `state/list-session-summaries` entry as an ACP session summary."
-  [{:keys [sessionId cwd updatedAt]}]
+  "Shape one `sessions/list-session-summaries` entry as an ACP session summary.
+
+  Sessions no longer carry an `updatedAt`, so the ACP summary reports
+  `createdAt` in that field."
+  [{:keys [sessionId cwd createdAt]}]
   (cond-> {:sessionId sessionId
            :cwd       (or cwd "")}
-    (some? updatedAt) (assoc :updatedAt updatedAt)))
+    (some? createdAt) (assoc :updatedAt createdAt)))
 
 ;; ---------------------------------------------------------------------------
 ;; Agent tools
@@ -177,7 +180,7 @@
   [postgres conn {:keys [sessionId cwd]}]
   (if (str/blank? (str sessionId))
     (acp-errors/acp-error acp-errors/err-params "Missing sessionId")
-    (if-let [session (state/load-session postgres sessionId)]
+    (if-let [session (sessions/load-session postgres sessionId)]
       (let [session (sync-session-cwd postgres session cwd)
             history (:history session [])]
         (tel/log! {:level :info
@@ -191,29 +194,29 @@
       {})))
 
 (defn new-session!
-  "Handle `session/new`: create a session with the configured model and
-  record its system prompt (configured prompt plus any `AGENTS.md`)."
-  [postgres sys-prompt model {:keys [cwd]}]
-  (let [session (state/create-session postgres {:cwd cwd :model model})]
-    (run! #(state/append-history postgres (:sessionId session) %)
+  "Handle `session/new`: create a session and record its system prompt
+  (configured prompt plus any `AGENTS.md`)."
+  [postgres sys-prompt {:keys [cwd]}]
+  (let [session (sessions/create-session postgres {:cwd cwd})]
+    (run! #(sessions/append-history postgres (:sessionId session) %)
           (system-history sys-prompt (:cwd session)))
     {:sessionId (:sessionId session)}))
 
 (defn- list-sessions!
   "Handle `session/list`, optionally filtered to a working directory."
   [postgres {:keys [cwd]}]
-  (let [sessions (cond->> (state/list-session-summaries postgres)
-                   (some? cwd) (filter #(= cwd (:cwd %))))]
+  (let [summaries (cond->> (sessions/list-session-summaries postgres)
+                    (some? cwd) (filter #(= cwd (:cwd %))))]
     (tel/log! {:level :debug
                :id    ::session-list
-               :data  {:count (count sessions)}}
+               :data  {:count (count summaries)}}
               "Listed sessions")
-    {:sessions (mapv session-summary sessions)}))
+    {:sessions (mapv session-summary summaries)}))
 
 (defn- delete-session!
   "Handle `session/delete`: drop the persisted session."
   [postgres {:keys [sessionId]}]
-  (state/delete-session postgres sessionId)
+  (sessions/delete-session postgres sessionId)
   (tel/log! {:level :debug
              :id    ::session-dropped
              :data  {:sessionId sessionId}}
@@ -223,21 +226,20 @@
 (defn- resume-session!
   "Handle `session/resume`.
 
-  An unknown session is registered under the requested id (with the
-  configured system prompt plus any `AGENTS.md` in `cwd`) so resume degrades
-  to new rather than erroring."
+  Session ids are assigned by the database, so a requested id that is not
+  recorded cannot be reused: an unknown session degrades to a new session
+  (with the configured system prompt plus any `AGENTS.md` in `cwd`) and the
+  reply carries the new id."
   [postgres sys-prompt {:keys [sessionId cwd]}]
-  (if-let [session (state/load-session postgres sessionId)]
+  (if-let [session (sessions/load-session postgres sessionId)]
     (do
       (sync-session-cwd postgres session cwd)
       (tel/log! {:level :debug
                  :id    ::session-resumed
                  :data  {:sessionId sessionId}}
-                "Resumed existing session"))
-    (state/register-session postgres sessionId cwd
-                            (system-history
-                             sys-prompt (str (or cwd ".")))))
-  {:sessionId sessionId})
+                "Resumed existing session")
+      {:sessionId sessionId})
+    {:sessionId (:sessionId (new-session! postgres sys-prompt {:cwd cwd}))}))
 
 (defn- close-session!
   "Handle `session/close`.
@@ -273,10 +275,10 @@
   [agent conn {:keys [sessionId prompt]}]
   (let [message-id (str (UUID/randomUUID))
         postgres   (:postgres agent)]
-    (if-let [session (state/load-session postgres sessionId)]
+    (if-let [session (sessions/load-session postgres sessionId)]
       (let [incoming (ollama-acp/acp-prompt->ollama-messages
                       prompt {:cwd (:cwd session)})]
-        (run! #(state/append-history postgres sessionId %) incoming)
+        (run! #(sessions/append-history postgres sessionId %) incoming)
         (tel/log! {:level :info
                    :id    ::prompt-received
                    :data  {:sessionId sessionId
@@ -321,7 +323,7 @@
     (acp-errors/acp-error acp-errors/err-method))
 
   (handle-session-new [_ _conn params]
-    (new-session! postgres sys-prompt model params))
+    (new-session! postgres sys-prompt params))
 
   (handle-session-list [_ _conn params]
     (list-sessions! postgres params))
@@ -395,7 +397,8 @@
     :postgres       the `clai.daemon.postgres/Client` used for session storage.
                     Defaults to one built from `cfg`'s `:postgres` sub-map and
                     the environment. The storage schema is created lazily on
-                    the first session operation.
+                    the first session operation (`clai.daemon.postgres.sessions`
+                    ensures it).
 
   A new session's system prompt is the configured `:system-prompt` followed by
   the contents of an `AGENTS.md` in the session's `cwd`, if one exists."
