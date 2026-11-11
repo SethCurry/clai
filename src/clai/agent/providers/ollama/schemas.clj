@@ -1,12 +1,33 @@
 (ns clai.agent.providers.ollama.schemas
   "Malli schemas and request validation for the Ollama client."
-  (:require [clai.log]
+  (:require [clai.events.schema :as events]
+            [clai.log]
             [clai.util :as util]
             [malli.core :as m]
             [malli.error :as me]
             [taoensso.telemere :as tel])
   (:import [java.io InputStream]
            [java.net URL]))
+
+;; ---------------------------------------------------------------------------
+;; Shared event types
+;; ---------------------------------------------------------------------------
+
+;; The session event schema is the canonical representation of message
+;; content and tool activity. The Ollama client accepts and exposes these
+;; types where its wire format overlaps with them, so callers can move values
+;; between the provider and the agent event log without a second schema.
+
+(def TextContent events/TextContent)
+(def ContentList events/ContentList)
+(def ToolCallContent events/ToolCallContent)
+(def AgentMessageEvent events/AgentMessageEvent)
+(def AgentThoughtEvent events/AgentThoughtEvent)
+(def ToolCallEvent events/ToolCallEvent)
+(def ClojureFormEvent events/ClojureFormEvent)
+(def UserPromptEvent events/UserPromptEvent)
+(def AgentSessionEvent events/AgentSessionEvent)
+(def AgentSession events/AgentSession)
 
 ;; ---------------------------------------------------------------------------
 ;; Schemas
@@ -56,14 +77,30 @@
    [:top_logprobs {:optional true} pos-int?]
    [:stream {:optional true} boolean?]])
 
+(def OllamaToolCall
+  "One entry of an Ollama `tool_calls` vector. Both the nested
+  `{:function {:name ... :arguments ...}}` and flattened `{:name ...}` shapes
+  are accepted, so this schema is intentionally open."
+  [:map])
+
+(def tool-call
+  "Tool activity: either the canonical `clai.events.schema/ToolCallContent`
+  recorded in the event log, or a raw Ollama `tool_calls` entry."
+  [:or #'events/ToolCallContent #'OllamaToolCall])
+
+(def ChatContent
+  "Chat message content: either Ollama's wire-format string or the canonical
+  event content list (`clai.events.schema/ContentList`)."
+  [:or string? #'events/ContentList])
+
 (def chat-message
   "A single chat message in `:messages`."
   [:map
    [:role non-empty-string]
-   [:content {:optional true} [:or string? [:sequential [:map]]]]
+   [:content {:optional true} #'ChatContent]
    [:thinking {:optional true} [:maybe string?]]
    [:images {:optional true} [:sequential string?]]
-   [:tool_calls {:optional true} [:sequential [:map]]]])
+   [:tool_calls {:optional true} [:sequential #'tool-call]]])
 
 (def chat-request
   "Request body for `POST /api/chat`."
@@ -201,16 +238,10 @@
   "The normalized assistant message returned by `assistant-message`."
   [:map
    [:role string?]
-   [:content {:optional true} [:or string? [:sequential [:map]]]]
+   [:content {:optional true} #'ChatContent]
    [:thinking {:optional true} [:maybe string?]]
    [:images {:optional true} [:sequential string?]]
-   [:tool_calls {:optional true} [:sequential [:map]]]])
-
-(def tool-call
-  "One entry of an Ollama `tool_calls` vector. Both the nested
-  `{:function {:name ... :arguments ...}}` and flattened `{:name ...}` shapes
-  are accepted, so this schema is intentionally open."
-  [:map])
+   [:tool_calls {:optional true} [:sequential #'tool-call]]])
 
 (defn validate!
   "Validate `value` against `schema`, returning `value` when valid or throwing

@@ -24,15 +24,22 @@
   (or (:id call) (str (UUID/randomUUID))))
 
 (defn tool-call-name
-  "Extract the function name from an Ollama `tool_calls` entry."
+  "Extract the function name from an Ollama `tool_calls` entry.
+
+  Canonical `clai.events.schema/ToolCallContent` values have no function name,
+  so this returns nil for them."
   {:malli/schema [:-> #'schemas/tool-call [:maybe string?]]}
   [call]
-  (let [f (or (:function call) call)]
-    (:name f)))
+  (or (get-in call [:function :name]) (:name call)))
 
 (defn tool-call-title
-  "Render a short human-readable title for an Ollama tool call."
+  "Render a short human-readable title for a tool call.
+
+  Handles both raw Ollama `tool_calls` entries and canonical event
+  `ToolCallContent` maps, using `:input` as the arguments for the latter."
   {:malli/schema [:-> #'schemas/tool-call string?]}
   [call]
   (str (or (tool-call-name call) "?")
-       " " (pr-str (:arguments (or (:function call) call)))))
+       " " (pr-str (or (get-in call [:function :arguments])
+                       (:arguments call)
+                       (:input call)))))

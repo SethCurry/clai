@@ -2,8 +2,13 @@
 
 Before saying that you are done, run the unit tests with `lein test` and fix any issues that arise.
 
-Malli schema types should start with an upper case letter.
+Malli schema types should start with an upper case letter, and all functions should have a malli validator.
 
-## Related Libraries
+All def's and defn's should have comments explaining what they do.
 
-The source code for the `acp` library is in `./checkouts/acp-clj` if you need to look at or change any part of it.
+## Functionality Locations
+
+| Functionality | Location |
+| ------------- | -------- |
+| Ollama API client | ./src/clai/agent/providers/ollama.clj |
+| Logging | ./src/clai/log.clj |

@@ -37,25 +37,12 @@
     ;; after upgrading one of these dependencies.
     :aot [#"^clai\..*" #"^user$"
 
-          ;; io.scurry/acp
+          ;; io.scurry/acp transport. Schema types come from clai.events.schema,
+          ;; so none of the acp.schema.* namespaces need AOT compilation.
           acp.agent
           acp.agent.helpers
           acp.errors
           acp.jsonrpc
-          acp.schema-runtime
-          acp.schema-tools
-          acp.schema.auth
-          acp.schema.common
-          acp.schema.content
-          acp.schema.core
-          acp.schema.elicitation
-          acp.schema.fs
-          acp.schema.initialize
-          acp.schema.mcp
-          acp.schema.protocol
-          acp.schema.session
-          acp.schema.terminal
-          acp.schema.tool
 
           ;; com.taoensso/telemere, plus the namespaces it loads at runtime
           taoensso.encore

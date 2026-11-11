@@ -1,16 +1,17 @@
 (ns clai.agent-test
   "Tests for the ACP agent handler in `clai.agent`, in particular that a
-  `session/prompt` actually reaches the model and that the reply validates as
-  an ACP `session/update`."
+  `session/prompt` actually reaches the model and that the reply validates
+  against the canonical session event schema."
   (:require [acp.agent :as acp]
             [acp.agent.helpers :as helpers]
-            [acp.schema.core :as schemas]
             [clai.agent :as agent]
             [clai.agent.providers.ollama :as ollama]
             [clai.daemon.postgres.sessions :as sessions]
+            [clai.events.schema :as events]
             [clai.test-support :refer [quiet-logs instrument memory-session-store]]
             [clojure.string :as str]
-            [clojure.test :refer :all])
+            [clojure.test :refer :all]
+            [malli.core :as m])
   (:import [java.io File]))
 
 (use-fixtures :once quiet-logs)
@@ -19,6 +20,28 @@
 
 (def ^:private test-client
   (ollama/make-client {:host "http://localhost:11434" :timeout 1000}))
+
+(def ^:private session-update->event
+  "Maps a streamed text update to the event type and schema it represents."
+  {"user_message_chunk"  ["user_prompt" #'events/UserPromptEvent]
+   "agent_message_chunk" ["agent_message" #'events/AgentMessageEvent]
+   "agent_thought_chunk" ["agent_thought" #'events/AgentThoughtEvent]})
+
+(defn- validate-update!
+  "Validate the persisted event content represented by ACP `update`."
+  [update]
+  (when-let [[event-type schema] (session-update->event (:sessionUpdate update))]
+    (let [event {:id               0
+                 :agent_session_id 0
+                 :type             event-type
+                 :content          [{:type    "text"
+                                     :content (get-in update [:content :text])}]}]
+      (when-not (m/validate schema event)
+        (throw (ex-info "Invalid session event content"
+                        {:update update
+                         :event  event
+                         :errors (m/explain schema event)})))))
+  update)
 
 ;; ---------------------------------------------------------------------------
 ;; session/prompt end to end (Ollama stubbed)
@@ -44,13 +67,13 @@
                                 {:role "assistant" :content reply})})
                   acp/send-session-update
                   (fn [_conn sid update]
-                    ;; Validate exactly as the real sender would, so a
-                    ;; malformed update fails the test.
-                    (schemas/->SessionUpdate update)
+                    ;; Validate the event content represented by the update,
+                    ;; so a malformed update fails the test.
+                    (validate-update! update)
                     (swap! updates conj [sid update]))
                   helpers/send-session-update
                   (fn [_conn sid update]
-                    (schemas/->SessionUpdate update)
+                    (validate-update! update)
                     (swap! updates conj [sid update]))]
       (let [handler (agent/ollama-agent
                      (merge {:cfg    {}
@@ -224,11 +247,11 @@
                       {:message {:role "assistant" :content "done"}}))
                   acp/send-session-update
                   (fn [_conn sid update]
-                    (schemas/->SessionUpdate update)
+                    (validate-update! update)
                     (swap! updates conj [sid update]))
                   helpers/send-session-update
                   (fn [_conn sid update]
-                    (schemas/->SessionUpdate update)
+                    (validate-update! update)
                     (swap! updates conj [sid update]))]
       (let [handler (agent/ollama-agent {:cfg           {:tools ["echo"]}
                                          :client        test-client
@@ -280,11 +303,11 @@
                       {:message {:role "assistant" :content "done"}}))
                   acp/send-session-update
                   (fn [_conn sid update]
-                    (schemas/->SessionUpdate update)
+                    (validate-update! update)
                     (swap! updates conj [sid update]))
                   helpers/send-session-update
                   (fn [_conn sid update]
-                    (schemas/->SessionUpdate update)
+                    (validate-update! update)
                     (swap! updates conj [sid update]))]
       (let [handler (agent/ollama-agent {:cfg           {}
                                          :client        test-client
