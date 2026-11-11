@@ -25,6 +25,7 @@
     (is (str/includes? out "Usage: clai [command]"))
     (is (str/includes? out "nrepl"))
     (is (str/includes? out "shell"))
+    (is (str/includes? out "web"))
     (is (str/blank? err))))
 
 (deftest repl-forwards-its-arguments
@@ -75,16 +76,80 @@
   (let [{:keys [err]} (capture #(is (= 1 (core/run ["nrepl" "1" "2"]))))]
     (is (str/includes? err "Usage: clai nrepl"))))
 
+;; ---------------------------------------------------------------------------
+;; Web daemon
+;; ---------------------------------------------------------------------------
+
+(deftest web-starts-nrepl-and-http
+  (let [nrepl-started (atom [])
+        http-started  (atom nil)
+        stopped       (atom [])]
+    (with-redefs [core/start-nrepl! (fn [port]
+                                      (swap! nrepl-started conj port)
+                                      {:port 51234})
+                  core/start-http-server! (fn [opts]
+                                            (reset! http-started opts)
+                                            {:port 8080})
+                  core/stop-nrepl! (fn [server] (swap! stopped conj server))
+                  core/await-shutdown (fn [] nil)
+                  core/web-root (constantly "web/dist")]
+      (let [{:keys [out err]} (capture #(is (zero? (core/run ["web"]))))
+            expected {:port       8080
+                      :nrepl-port 51234
+                      :root       "web/dist"}]
+        (is (= [nil] @nrepl-started))
+        (is (= expected @http-started))
+        (is (str/includes? out "51234"))
+        (is (str/includes? out "http://127.0.0.1:8080"))
+        (is (str/blank? err))
+        (is (empty? @stopped))))))
+
+(deftest web-forwards-an-explicit-port
+  (let [http-started (atom nil)]
+    (with-redefs [core/start-nrepl! (constantly {:port 51234})
+                  core/start-http-server! (fn [opts]
+                                            (reset! http-started opts)
+                                            {:port 3000})
+                  core/await-shutdown (fn [] nil)]
+      (capture #(is (zero? (core/run ["web" "3000"]))))
+      (is (= 3000 (:port @http-started))))))
+
+(deftest web-rejects-bad-ports-without-starting-anything
+  (let [started (atom false)]
+    (with-redefs [core/start-nrepl! (fn [_] (reset! started true))
+                  core/start-http-server! (fn [_] (reset! started true))]
+      (let [{:keys [out err]} (capture #(is (= 1 (core/run ["web" "nope"]))))]
+        (is (str/includes? err "Invalid web port"))
+        (is (str/blank? out))
+        (is (false? @started)))
+      (let [{:keys [err]} (capture #(is (= 1 (core/run ["web" "1" "2"]))))]
+        (is (str/includes? err "Usage: clai web"))))))
+
+(deftest web-stops-nrepl-when-http-fails
+  (let [stopped (atom [])]
+    (with-redefs [core/start-nrepl! (constantly {:port 51234})
+                  core/start-http-server! (fn [_]
+                                            (throw (ex-info "boom" {})))
+                  core/stop-nrepl! (fn [server] (swap! stopped conj server))]
+      (let [{:keys [out err]} (capture #(is (= 1 (core/run ["web"]))))]
+        (is (= [{:port 51234}] @stopped))
+        (is (str/includes? err "boom"))
+        (is (str/blank? out))))))
+
 (deftest nrepl-port-file-round-trips
-  (let [file (java.io.File/createTempFile "clai-nrepl" ".port")]
+  (let [file (java.io.File/createTempFile "clai-nrepl" ".port")
+        seen (atom nil)]
     (try
       (with-redefs [core/port-file (.getPath file)
                     clojure.core/requiring-resolve
                     (fn [sym]
                       (when (= sym 'nrepl.server/start-server)
-                        (fn [& _] {:port 7888})))]
+                        (fn [& args]
+                          (reset! seen args)
+                          {:port 7888})))]
         (is (= 7888 (:port (core/start-nrepl! nil))))
-        (is (= 7888 (core/running-nrepl-port))))
+        (is (= 7888 (core/running-nrepl-port)))
+        (is (= [:port 0 :bind "127.0.0.1"] @seen)))
       (finally
         (.delete file)))))
 

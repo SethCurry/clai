@@ -1,0 +1,290 @@
+import { useCallback, useEffect, useRef, useState } from 'react'
+
+// Reconnect quickly at first, then back off so a daemon restart is picked up
+// without hammering it.
+const RECONNECT_DELAYS = [500, 1000, 2000, 5000, 10000]
+
+/**
+ * Merge one streamed agent update into the timeline. Tool calls arrive in
+ * pieces: a `running` event starts the card, output events carry only the id
+ * and incremental text, and a terminal event marks it completed or failed.
+ */
+function applyUpdate(updates, update) {
+  if (update.type === 'tool_call' && update.id) {
+    const index = updates.findIndex(
+      (item) => item.type === 'tool_call' && item.id === update.id,
+    )
+    if (index === -1) return [...updates, update]
+    const next = updates.slice()
+    next[index] = { ...next[index], ...update }
+    return next
+  }
+  return [...updates, update]
+}
+
+function errorId() {
+  return `${Date.now()}-${Math.random().toString(16).slice(2)}`
+}
+
+/**
+ * Own the browser's connection to the clai daemon. All agent and REPL traffic
+ * goes over the same WebSocket; this hook turns the daemon's messages into
+ * state the components can render.
+ */
+export function useClaiSocket() {
+  const [status, setStatus] = useState('connecting')
+  const [sessionInfo, setSessionInfo] = useState({
+    model: null,
+    nreplPort: null,
+  })
+  const [sessions, setSessions] = useState([])
+  const [currentSession, setCurrentSession] = useState(null)
+  const [updates, setUpdates] = useState([])
+  const [promptRunning, setPromptRunning] = useState(false)
+  const [replEntries, setReplEntries] = useState([])
+  const [evalRunning, setEvalRunning] = useState(false)
+  const [errors, setErrors] = useState([])
+
+  const socketRef = useRef(null)
+  const reconnectTimer = useRef(null)
+  const reconnectAttempt = useRef(0)
+  const requestCounter = useRef(0)
+  const activeSession = useRef(null)
+
+  const pushError = useCallback((message) => {
+    setErrors((previous) => [
+      ...previous.slice(-4),
+      { id: errorId(), message: String(message) },
+    ])
+  }, [])
+
+  const dismissError = useCallback((id) => {
+    setErrors((previous) => previous.filter((error) => error.id !== id))
+  }, [])
+
+  const send = useCallback(
+    (message) => {
+      const socket = socketRef.current
+      if (!socket || socket.readyState !== WebSocket.OPEN) {
+        pushError('The daemon is not connected yet.')
+        return null
+      }
+      const requestId = message.requestId ?? String(++requestCounter.current)
+      socket.send(JSON.stringify({ ...message, requestId }))
+      return requestId
+    },
+    [pushError],
+  )
+
+  useEffect(() => {
+    let closedByUs = false
+
+    function connect() {
+      setStatus('connecting')
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+      const socket = new WebSocket(`${protocol}//${window.location.host}/ws`)
+      socketRef.current = socket
+
+      socket.onopen = () => {
+        reconnectAttempt.current = 0
+        setStatus('connected')
+        setPromptRunning(false)
+        setEvalRunning(false)
+        send({ type: 'list_sessions' })
+        // After a reconnect, replay the active conversation. The prompt may
+        // have finished while the socket was down.
+        if (activeSession.current) {
+          send({ type: 'load_session', sessionId: activeSession.current })
+        }
+      }
+
+      socket.onmessage = (event) => {
+        let message
+        try {
+          message = JSON.parse(event.data)
+        } catch {
+          pushError('The daemon sent a message that was not valid JSON.')
+          return
+        }
+
+        switch (message.type) {
+          case 'hello':
+            setSessionInfo({
+              model: message.model ?? null,
+              nreplPort: message.nreplPort ?? null,
+            })
+            break
+
+          case 'sessions':
+            setSessions(message.sessions ?? [])
+            break
+
+          case 'session': {
+            const session = message.session
+            if (!session?.sessionId) break
+            activeSession.current = session.sessionId
+            setCurrentSession({
+              sessionId: session.sessionId,
+              cwd: session.cwd,
+              createdAt: session.createdAt,
+            })
+            setUpdates(session.updates ?? [])
+            setPromptRunning(false)
+            // A new session is not in the sidebar until the list is refreshed.
+            send({ type: 'list_sessions' })
+            break
+          }
+
+          case 'update':
+            if (message.sessionId === activeSession.current) {
+              setUpdates((previous) => applyUpdate(previous, message.update))
+            }
+            break
+
+          case 'prompt_done':
+            setPromptRunning(false)
+            break
+
+          case 'deleted':
+            setSessions((previous) =>
+              previous.filter(
+                (session) => session.sessionId !== message.sessionId,
+              ),
+            )
+            if (message.sessionId === activeSession.current) {
+              activeSession.current = null
+              setCurrentSession(null)
+              setUpdates([])
+            }
+            break
+
+          case 'eval':
+            setReplEntries((previous) => [
+              ...previous,
+              {
+                id: errorId(),
+                requestId: message.requestId,
+                response: message.response,
+              },
+            ])
+            break
+
+          case 'eval_done':
+            setEvalRunning(false)
+            break
+
+          case 'error':
+            pushError(message.message || 'The daemon reported an error.')
+            setPromptRunning(false)
+            setEvalRunning(false)
+            break
+
+          default:
+            pushError(`Unknown daemon message type: ${message.type}`)
+        }
+      }
+
+      socket.onclose = () => {
+        if (closedByUs) return
+        if (socketRef.current !== socket) return
+        setStatus('disconnected')
+        setPromptRunning(false)
+        setEvalRunning(false)
+        const delay =
+          RECONNECT_DELAYS[
+            Math.min(reconnectAttempt.current, RECONNECT_DELAYS.length - 1)
+          ]
+        reconnectAttempt.current += 1
+        reconnectTimer.current = window.setTimeout(connect, delay)
+      }
+
+      socket.onerror = () => {
+        setStatus('error')
+      }
+    }
+
+    connect()
+
+    return () => {
+      closedByUs = true
+      if (reconnectTimer.current) window.clearTimeout(reconnectTimer.current)
+      socketRef.current?.close()
+      socketRef.current = null
+    }
+  }, [pushError, send])
+
+  const newSession = useCallback(() => send({ type: 'new_session' }), [send])
+
+  const refreshSessions = useCallback(
+    () => send({ type: 'list_sessions' }),
+    [send],
+  )
+
+  const loadSession = useCallback(
+    (sessionId) => send({ type: 'load_session', sessionId }),
+    [send],
+  )
+
+  const deleteSession = useCallback(
+    (sessionId) => send({ type: 'delete_session', sessionId }),
+    [send],
+  )
+
+  const runPrompt = useCallback(
+    (prompt) => {
+      if (!currentSession || !prompt.trim()) return false
+      setPromptRunning(true)
+      const requestId = send({
+        type: 'prompt',
+        sessionId: currentSession.sessionId,
+        prompt,
+      })
+      if (!requestId) {
+        setPromptRunning(false)
+        return false
+      }
+      return true
+    },
+    [currentSession, send],
+  )
+
+  const evalForm = useCallback(
+    (code, namespace) => {
+      if (!code.trim()) return false
+      setEvalRunning(true)
+      const requestId = send({
+        type: 'eval',
+        code,
+        ns: namespace?.trim() || 'user',
+      })
+      if (!requestId) {
+        setEvalRunning(false)
+        return false
+      }
+      return true
+    },
+    [send],
+  )
+
+  const clearRepl = useCallback(() => setReplEntries([]), [])
+
+  return {
+    status,
+    sessionInfo,
+    sessions,
+    currentSession,
+    updates,
+    promptRunning,
+    replEntries,
+    evalRunning,
+    errors,
+    newSession,
+    refreshSessions,
+    loadSession,
+    deleteSession,
+    runPrompt,
+    evalForm,
+    clearRepl,
+    dismissError,
+  }
+}

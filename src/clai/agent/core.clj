@@ -1,27 +1,36 @@
-(ns clai.agent
-  "The in-process `clai` agent.
+(ns clai.agent.core
+  "The in-process `clai` agent: its configuration, sessions, and chat loop.
 
   `ollama-agent` builds a plain configuration map that answers prompts with a
   `clai.agent.providers.ollama` chat model, persists sessions in PostgreSQL via
-  `clai.daemon.postgres.sessions`, and executes model tool calls via its own
+  `clai.daemon.postgres.sessions`, and executes model tool calls through its own
   per-agent tool registry from `clai.agent.tools.registry`.
+
+  A prompt runs through [[run-prompt!]], which appends it to the session and
+  drives [[run-agent-loop]]: the session history is sent to Ollama's
+  `/api/chat`, any tool calls the model requests are executed against the
+  agent's registry and recorded, and the loop repeats until the model produces
+  a final text reply (or the configured tool-round cap is reached). Tool
+  activity and model reasoning stream to the caller as event-shaped maps from
+  `clai.events.schema`.
 
   Supporting pieces live in sibling namespaces under `clai.agent.*`:
 
-    * `clai.agent.loop`                -- the tool-calling chat loop.
-    * `clai.agent.providers.ollama`    -- the Ollama HTTP client.
+    * `clai.agent.providers.ollama`        -- the Ollama HTTP client.
     * `clai.agent.providers.ollama.prompt` -- prompt/history conversion.
-    * `clai.agent.resources`           -- resource blocks rendered as text for
-                                          the model.
-    * `clai.daemon.postgres.sessions`  -- PostgreSQL-backed session storage.
-    * `clai.agent.tools.registry`      -- immutable tool registries.
-    * `clai.agent.tools.builtin`       -- the default built-in tools.
-    * `clai.config`                    -- config/env resolution for the
-                                          agent's model, client, tools, and
-                                          chat options."
-  (:require [clai.agent.loop :as agent-loop]
+    * `clai.agent.resources`               -- resource blocks rendered as text
+                                              for the model.
+    * `clai.daemon.postgres.sessions`      -- PostgreSQL-backed session storage.
+    * `clai.agent.tools.registry`          -- immutable tool registries.
+    * `clai.agent.tools.builtin`           -- the default built-in tools.
+    * `clai.agent.tools.invoke`            -- running one Ollama tool call.
+    * `clai.config`                        -- config/env resolution for the
+                                              agent's model, client, tools, and
+                                              chat options."
+  (:require [clai.agent.providers.ollama :as ollama]
             [clai.agent.providers.ollama.prompt :as ollama-prompt]
             [clai.agent.tools.builtin :as tools-builtin]
+            [clai.agent.tools.invoke :as tool-invoke]
             [clai.agent.tools.registry :as tools-registry]
             [clai.config :as config]
             [clai.daemon.postgres.sessions :as sessions]
@@ -30,7 +39,8 @@
             [clai.util :as util]
             [clojure.java.io :as io]
             [clojure.string :as str]
-            [taoensso.telemere :as tel]))
+            [taoensso.telemere :as tel])
+  (:import [java.time Instant]))
 
 ;; ---------------------------------------------------------------------------
 ;; Project instructions
@@ -203,7 +213,7 @@
   reply carries the new id."
   {:malli/schema [:-> :map [:map [:sessionId {:optional true} [:maybe :string]]
                             [:cwd {:optional true} [:maybe :string]]] :map]}
-  [agent {:keys [sessionId cwd] :as opts}]
+  [agent {:keys [cwd] :as opts}]
   (if-let [session (load-session! agent opts)]
     (do
       (tel/log! {:level :debug
@@ -212,6 +222,231 @@
                 "Resumed existing session")
       {:sessionId (:sessionId session)})
     {:sessionId (:sessionId (new-session! agent {:cwd cwd}))}))
+
+;; ---------------------------------------------------------------------------
+;; Streaming updates
+;; ---------------------------------------------------------------------------
+
+(defn- emit!
+  "Send `update` to the caller's `:on-update` callback when one is present."
+  [on-update update]
+  (when on-update
+    (on-update update))
+  update)
+
+(defn- send-tool-call-started
+  "Emit a running `tool_call` event announcing that `call` has started with
+  parsed `args`. Returns the id used for the event."
+  [on-update call args]
+  (let [id (ollama/tool-call-id call)]
+    (emit! on-update
+           {:type       "tool_call"
+            :id         id
+            :start_time (Instant/now)
+            :input      args
+            :name       (ollama/tool-call-name call)
+            :title      (ollama/tool-call-title call)
+            :status     "running"})
+    id))
+
+(defn- send-tool-call-output
+  "Emit a running `tool_call` event carrying the output produced so far."
+  [on-update id output]
+  (emit! on-update {:type "tool_call" :id id :output (str output)}))
+
+(defn- send-tool-call-finished
+  "Emit the terminal `tool_call` event carrying the full result and a status
+  of `completed` or `failed`."
+  [on-update id result]
+  (emit! on-update
+         {:type   "tool_call"
+          :id     id
+          :output (str result)
+          :status (if (str/starts-with? (str result) "Error:")
+                    "failed"
+                    "completed")}))
+
+(defn- send-thought
+  "Relay the model's reasoning text in `msg` as an `agent_thought` event.
+  Messages without non-blank thinking are ignored."
+  [on-update msg]
+  (let [thinking (:thinking msg)]
+    (when-not (str/blank? (str thinking))
+      (emit! on-update
+             (events/text-event "agent_thought" (str thinking))))))
+
+;; ---------------------------------------------------------------------------
+;; Tool rounds
+;; ---------------------------------------------------------------------------
+
+(defn- session-tool-ctx
+  "Build the context map handed to tool functions for `session-id`. Besides
+  the `:cwd`, it carries the loop's live client, model, registry, and limits so
+  tools like `spawn_agent` can run their own conversations."
+  [session-id {:keys [postgres client model tool-registry chat-opts max-rounds
+                      agent-depth]}]
+  {:cwd           (:cwd (sessions/load-session postgres session-id))
+   :session-id    session-id
+   :client        client
+   :model         model
+   :tool-registry tool-registry
+   :chat-opts     chat-opts
+   :max-rounds    max-rounds
+   :agent-depth   (long (or agent-depth 0))})
+
+(defn- call-tool-ctx
+  "Build the context for one tool call: the session context plus an
+  `:on-output` callback that relays a tool's incremental output as running
+  `tool_call` events.
+
+  Tools that ignore `:on-output` -- every built-in but `run_command` -- are
+  unaffected. The callback is omitted when there is nowhere to stream."
+  [on-update call-id ctx]
+  (if (and on-update call-id)
+    (assoc ctx :on-output
+           (fn [output]
+             (send-tool-call-output on-update call-id output)))
+    ctx))
+
+(defn- execute-tool-call
+  "Run one Ollama tool call, streaming its activity to the caller, and return
+  the `tool`-role history message recording its result."
+  [on-update session-id ctx call]
+  (let [tool-name (or (ollama/tool-call-name call) "?")
+        [id args] (tool-invoke/tool-call->id+args call)
+        tool-id   (or id tool-name)
+        call-id   (send-tool-call-started on-update call args)]
+    (tel/log! {:level :info
+               :id    ::tool-call
+               :data  {:sessionId session-id
+                       :tool      tool-name}}
+              "Executing tool call")
+    (let [result (tool-invoke/invoke (:tool-registry ctx)
+                                     tool-id
+                                     args
+                                     (call-tool-ctx on-update call-id ctx))]
+      (send-tool-call-finished on-update call-id result)
+      (tool-invoke/tool-result-message call tool-id result))))
+
+(defn- run-tool-round
+  "Execute the tool calls in `msg` against the loop's tool registry, append the
+  assistant message and each `tool`-role result to the session history, and
+  return the updated history.
+
+  Emits a running `tool_call` event as each call starts, incremental output
+  events while it runs, and a terminal event when it completes. Does not call
+  Ollama; the caller chats again with the new history."
+  [session-id msg {:keys [postgres on-update] :as opts}]
+  (let [tool-calls (:tool_calls msg)
+        ctx        (session-tool-ctx session-id opts)]
+    ;; Record the assistant message (with its tool_calls) verbatim so the
+    ;; model sees its own request in the next round.
+    (sessions/append-history postgres session-id msg)
+    (doseq [call tool-calls]
+      (sessions/append-history postgres session-id
+                               (execute-tool-call on-update session-id ctx call)))
+    (tel/log! {:level :debug
+               :id    ::tool-round-complete
+               :data  {:sessionId session-id
+                       :results   (count tool-calls)}}
+              "Tool round complete")
+    (sessions/session-history postgres session-id)))
+
+;; ---------------------------------------------------------------------------
+;; Agent loop
+;; ---------------------------------------------------------------------------
+
+(defn- chat-once
+  "Send one non-streaming `/api/chat` request for `history`.
+
+  Returns `{:message <assistant message>}` on success or `{:error <text>}` on
+  failure, so the loop can relay the failure to the caller instead of
+  throwing."
+  [session-id {:keys [client model tool-specs chat-opts]} history round]
+  (tel/log! {:level :debug
+             :id    ::chat-request
+             :data  {:sessionId session-id
+                     :round     round
+                     :model     model
+                     :messages  (count history)
+                     :tools     (count tool-specs)}}
+            "Sending Ollama chat request")
+  (try
+    {:message (ollama/assistant-message
+               (ollama/chat client
+                            (merge {:model    model
+                                    :messages history
+                                    :tools    tool-specs
+                                    :stream   false}
+                                   chat-opts)))}
+    (catch Throwable e
+      (tel/error! {:id   ::chat-request-failed
+                   :data {:sessionId session-id
+                          :round     round
+                          :model     model}}
+                  e)
+      {:error (str "Ollama request failed: " (util/error-message e))})))
+
+(defn- finish-reply
+  "Record the assistant's final `msg` in the session history and return its
+  text."
+  [postgres session-id msg round]
+  (let [content  (or (:content msg) "")
+        thinking (:thinking msg)]
+    (sessions/append-history postgres session-id
+                             (cond-> {:role "assistant" :content content}
+                               (not (str/blank? (str thinking)))
+                               (assoc :thinking (str thinking))))
+    (tel/log! {:level :debug
+               :id    ::chat-response
+               :data  {:sessionId session-id
+                       :round     round
+                       :chars     (count content)}}
+              "Received Ollama chat response")
+    content))
+
+(defn- tool-round-cap-reply
+  "Log that the loop hit its tool-round cap and return the text to relay."
+  [session-id max-rounds]
+  (tel/log! {:level :warn
+             :id    ::tool-round-cap
+             :data  {:sessionId session-id
+                     :maxRounds max-rounds}}
+            "Stopped after tool round cap without a final reply")
+  (str "Stopped after " max-rounds
+       " tool rounds without a final reply."))
+
+(defn- run-agent-loop
+  "Drive the Ollama chat conversation for `session-id` to completion.
+
+  Starts from the current session history, sends it to `/api/chat` with the
+  agent's tool definitions, and loops: while the reply contains `tool_calls`,
+  execute them against `:tool-registry`, append the results, and chat again.
+  When the model replies with a plain message, record and return its content.
+
+  `opts` is the agent map from [[ollama-agent]] (`:postgres`, `:client`,
+  `:model`, `:tool-registry`, `:tool-specs`, `:chat-opts`, `:max-rounds`)
+  plus the caller's `:on-update` callback.
+
+  On error (HTTP failure or hitting the round cap) returns a descriptive
+  string rather than throwing, so the caller can relay it to the user."
+  [session-id {:keys [postgres tool-registry tool-specs max-rounds on-update]
+               :as   opts}]
+  (let [opts (assoc opts :tool-specs (or tool-specs
+                                        (tools-registry/specs tool-registry)))]
+    (loop [round 0]
+      (if (>= round max-rounds)
+        (tool-round-cap-reply session-id max-rounds)
+        (let [history                 (sessions/session-history postgres session-id)
+              {:keys [message error]} (chat-once session-id opts history round)]
+          (if error
+            error
+            (do
+              (send-thought on-update message)
+              (if (ollama/has-tool-calls? message)
+                (do (run-tool-round session-id message opts)
+                    (recur (inc round)))
+                (finish-reply postgres session-id message round)))))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Prompt execution
@@ -226,8 +461,7 @@
   "Relay `text` as the prompt's final agent message and return the caller's
   stop reason."
   [on-update text]
-  (when on-update
-    (on-update (events/text-event "agent_message" (str text))))
+  (emit! on-update (events/text-event "agent_message" (str text)))
   {:stopReason "end_turn"})
 
 (defn run-prompt!
@@ -262,8 +496,8 @@
                            :messages  (count incoming)
                            :chars     (prompt-char-count incoming)}}
                   "Received prompt")
-        (let [reply (agent-loop/run-agent-loop sessionId
-                                               (assoc agent :on-update on-update))]
+        (let [reply (run-agent-loop sessionId
+                                    (assoc agent :on-update on-update))]
           (tel/log! {:level :info
                      :id    ::prompt-complete
                      :data  {:sessionId sessionId

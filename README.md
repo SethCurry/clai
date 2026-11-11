@@ -42,6 +42,37 @@ Copy `config.example.edn` to `./clai.edn` (or export the corresponding
 data directory is owned by the container's `postgres` user; to reset it, run
 `docker compose down` and remove `./local/postgres` as root.
 
+## Web UI
+
+The React app in `web/` talks to the daemon over a WebSocket (`/ws`) for chat
+streaming and for evaluating Clojure in the running JVM through nREPL. The
+daemon also exposes a small JSON API under `/api`.
+
+Build the UI and start everything with:
+
+```sh
+task web
+```
+
+That runs `npm install`, builds `web/dist`, starts an nREPL server, and serves
+the UI and API on http://127.0.0.1:8080. Pass a different port with
+`lein run web 3000`. The nREPL port is printed at startup and is also visible
+in the UI. Both servers bind to loopback; an nREPL client can run arbitrary
+code in the daemon's JVM, so do not expose either port to an untrusted
+network.
+
+For UI development, start the daemon once and run Vite separately:
+
+```sh
+lein run web
+npm run dev --prefix web
+```
+
+Vite serves the UI on http://127.0.0.1:5173 and proxies `/api` and `/ws` to
+the daemon at `http://127.0.0.1:8080`. Override the proxy target with
+`CLAI_DAEMON_URL`. `clai web` serves the built UI from `web/dist`; set
+`CLAI_WEB_ROOT` to serve a different build directory.
+
 ## cljdocs
 
 You can get a local copy by running `task cljd` and navigating

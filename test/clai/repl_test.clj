@@ -4,7 +4,7 @@
   The agent's session and prompt operations are stubbed so no Ollama server or
   network access is involved: the tests exercise the session helpers, update
   rendering, and namespace bookkeeping."
-  (:require [clai.agent :as agent]
+  (:require [clai.agent.core :as agent]
             [clai.agent.providers.ollama.prompt :as ollama-prompt]
             [clai.events.schema :as events]
             [clai.repl :as repl]

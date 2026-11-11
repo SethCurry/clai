@@ -5,6 +5,8 @@
   in `.nrepl-port`, the same convention Leiningen and `clj` use. With `shell`
   it launches a REPLY REPL that attaches to that server instead of starting an
   nREPL server of its own, so the REPL and the agent run in the server's JVM.
+  With `web` it starts both the nREPL server and the HTTP/WebSocket daemon
+  that serves the React UI in `./web`.
   `clai.repl` drives the in-process agent directly (see `src/user.clj` for the
   helpers it refers into `user`), so the agent can be used from the REPL while
   stdout stays free for the conversation. Pass `--standalone` to `shell` to
@@ -47,33 +49,51 @@
         (.delete file)))
     (catch Exception _ nil)))
 
-(defn- parse-nrepl-port
-  "The port requested by `clai nrepl`'s arguments: either none (the OS picks a
-  free port) or a single port number, where 0 also means a free port."
-  [args]
+(defn- parse-port
+  "Parse an optional single-port argument for `usage`, returning nil when no
+  port was requested. A port of 0 means the OS should choose one."
+  [args usage label]
   (let [args (vec args)]
     (cond
       (empty? args) nil
       (not= 1 (count args))
-      (throw (ex-info "Usage: clai nrepl [port]"
+      (throw (ex-info (str "Usage: " usage)
                       {:clai/usage true}))
       :else
       (let [port (parse-long (first args))]
         (if (and port (<= 0 port 65535))
           port
-          (throw (ex-info (str "Invalid nREPL port: " (first args)
-                               "\nUsage: clai nrepl [port]")
+          (throw (ex-info (str "Invalid " label ": " (first args)
+                               "\nUsage: " usage)
                           {:clai/usage true})))))))
+
+(defn- parse-nrepl-port
+  "The port requested by `clai nrepl`'s arguments: either none (the OS picks a
+  free port) or a single port number, where 0 also means a free port."
+  {:malli/schema [:-> [:sequential :any]
+                  [:maybe [:int {:min 0 :max 65535}]]]}
+  [args]
+  (parse-port args "clai nrepl [port]" "nREPL port"))
+
+(defn- parse-web-port
+  "The HTTP port requested by `clai web`'s arguments: either none (the default
+  [[default-web-port]]) or a single port number, where 0 lets the OS pick one."
+  {:malli/schema [:-> [:sequential :any]
+                  [:maybe [:int {:min 0 :max 65535}]]]}
+  [args]
+  (parse-port args "clai web [port]" "web port"))
 
 (defn start-nrepl!
   "Start an nREPL server, record its port in [[port-file]], and return the
   server map.
 
   `port` is the port to listen on; nil or 0 lets the OS pick a free one. The
-  port file is removed when the JVM shuts down."
+  server binds to loopback because an nREPL client can run arbitrary code in
+  this JVM. The port file is removed when the JVM shuts down."
+  {:malli/schema [:-> [:maybe [:int {:min 0 :max 65535}]] :map]}
   [port]
   (let [start-server (requiring-resolve 'nrepl.server/start-server)
-        server       (start-server :port (or port 0))
+        server       (start-server :port (or port 0) :bind "127.0.0.1")
         bound        (:port server)]
     (spit port-file (str bound))
     (.addShutdownHook (Runtime/getRuntime)
@@ -84,6 +104,78 @@
   "Block until the JVM exits; the server keeps running until then."
   []
   @(promise))
+
+;; ---------------------------------------------------------------------------
+;; HTTP/WebSocket daemon
+;; ---------------------------------------------------------------------------
+
+(def default-web-port
+  "The port `clai web` serves the React UI and JSON API on when none is given."
+  8080)
+
+(defn web-root
+  "The directory containing the built React app, from `CLAI_WEB_ROOT` or
+  `web/dist`."
+  {:malli/schema [:-> :string]}
+  []
+  (or (System/getenv "CLAI_WEB_ROOT") "web/dist"))
+
+(defn start-http-server!
+  "Start the HTTP/WebSocket daemon described by `opts`.
+
+  This is a thin wrapper around `clai.daemon.http/start-server!` so the
+  command can be tested without starting Jetty."
+  {:malli/schema [:-> :map :map]}
+  [opts]
+  ((requiring-resolve 'clai.daemon.http/start-server!) opts))
+
+(defn stop-nrepl!
+  "Stop a server returned by [[start-nrepl!]], if any, and remove [[port-file]]
+  when it still advertises that server. Returns nil."
+  {:malli/schema [:-> [:maybe :map] :nil]}
+  [server]
+  (when server
+    ((requiring-resolve 'nrepl.server/stop-server) server)
+    (delete-port-file! (:port server)))
+  nil)
+
+(defn serve-web
+  "Start an nREPL server and the HTTP/WebSocket daemon, then block.
+
+  The nREPL server listens on an OS-assigned port and publishes it in
+  [[port-file]], so `clai shell` can still attach. The HTTP server uses the
+  optional port argument (default [[default-web-port]]) and serves the React
+  build from [[web-root]]. Blocks until the JVM exits and returns an exit
+  status."
+  {:malli/schema [:-> [:sequential :any] [:int {:min 0 :max 1}]]}
+  [args]
+  (let [nrepl-server (atom nil)]
+    (try
+      (let [port        (parse-web-port args)
+            server      (start-nrepl! nil)
+            nrepl-port  (:port server)
+            _           (reset! nrepl-server server)
+            http-server (start-http-server!
+                         {:port       (or port default-web-port)
+                          :nrepl-port nrepl-port
+                          :root       (web-root)})]
+        (println (str "nREPL server listening on port " nrepl-port))
+        (println (str "Web UI listening on http://127.0.0.1:"
+                      (:port http-server)))
+        (flush)
+        (await-shutdown)
+        0)
+      (catch clojure.lang.ExceptionInfo e
+        (stop-nrepl! @nrepl-server)
+        (binding [*out* *err*]
+          (println (ex-message e)))
+        1)
+      (catch Throwable e
+        (stop-nrepl! @nrepl-server)
+        (binding [*out* *err*]
+          (println (str "Could not start the web daemon: "
+                        (ex-message e))))
+        1))))
 
 (defn serve-nrepl
   "Start an nREPL server and block until the JVM exits.
@@ -227,7 +319,8 @@
 (def commands
   "The `clai` subcommands, as `[name description]` pairs."
   [["nrepl" "Start an nREPL server and publish its port in .nrepl-port."]
-   ["shell" "Attach an interactive REPLY REPL to a running nREPL server."]])
+   ["shell" "Attach an interactive REPLY REPL to a running nREPL server."]
+   ["web" "Start nREPL and the HTTP/WebSocket daemon for the web UI."]])
 
 (defn usage
   "The `clai` usage text."
@@ -239,6 +332,7 @@
                                commands)
                           [""
                            "Run `clai nrepl [port]` to start a server."
+                           "Run `clai web [port]` to serve the web UI and API."
                            "Run `clai shell --help` for the REPL's options."]))))
 
 (defn run
@@ -252,6 +346,7 @@
     (case command
       "nrepl" (serve-nrepl (rest args))
       "shell" (launch-repl (rest args))
+      "web"   (serve-web (rest args))
       (nil "help" "--help" "-h") (do (println (usage)) 0)
       (do
         (binding [*out* *err*]

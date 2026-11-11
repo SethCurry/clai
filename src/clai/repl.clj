@@ -1,7 +1,8 @@
 (ns clai.repl
   "A REPL-friendly, in-process client for the `clai` agent.
 
-  [[current-agent]] is a plain agent map built by `clai.agent/ollama-agent`.
+  [[current-agent]] is a plain agent map built by
+  `clai.agent.core/ollama-agent`.
   The helpers here call its session and prompt operations directly; nothing
   goes through stdio or a wire protocol, so the agent can be driven from a
   REPL while stdout stays available for the conversation itself.
@@ -30,7 +31,7 @@
   [[current-session]] and [[current-agent]] are vars rather than atoms so a
   REPL can rebind or redefine them: `(with-redefs [current-agent my-agent]
   (new!))` drives a different agent."
-  (:require [clai.agent :as agent]
+  (:require [clai.agent.core :as agent]
             [clai.agent.providers.ollama.prompt :as ollama-prompt]
             [clai.events.schema :as events]
             [clojure.java.shell :as shell]

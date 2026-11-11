@@ -1,8 +1,8 @@
-(ns clai.agent-test
-  "Tests for the in-process agent in `clai.agent`, in particular that a prompt
-  actually reaches the model and that streamed updates validate against the
-  canonical session event schema."
-  (:require [clai.agent :as agent]
+(ns clai.agent.core-test
+  "Tests for the in-process agent in `clai.agent.core`, in particular that a
+  prompt actually reaches the model and that streamed updates validate against
+  the canonical session event schema."
+  (:require [clai.agent.core :as agent]
             [clai.agent.providers.ollama :as ollama]
             [clai.daemon.postgres.sessions :as sessions]
             [clai.events.schema :as events]

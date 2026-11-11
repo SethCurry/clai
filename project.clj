@@ -12,6 +12,8 @@
                  [org.postgresql/postgresql "42.7.8"]
                  [reply/reply "0.5.1"]
                  [nrepl/nrepl "1.0.0"]
+                 [ring/ring-core "1.15.4"]
+                 [ring/ring-jetty-adapter "1.15.4"]
                  [hiccup/hiccup "2.0.0"]
                  [com.datomic/local "1.0.301"]]
   :main clai.core

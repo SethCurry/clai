@@ -28,6 +28,32 @@ tasks:
         cmds:
             - lein run
 
+    # React UI. `web:build` produces web/dist, which `lein run web` serves.
+    web:
+        desc: Build the React UI and serve it with the clai daemon
+        cmds:
+            - task: web:build
+            - lein run web
+
+    web:install:
+        desc: Install the web UI's npm dependencies
+        cmds:
+            - cd web && npm install
+
+    web:build:
+        desc: Build the React UI into web/dist
+        deps:
+            - web:install
+        cmds:
+            - cd web && npm run build
+
+    web:dev:
+        desc: Run the Vite dev server (start `lein run web` separately)
+        deps:
+            - web:install
+        cmds:
+            - cd web && npm run dev
+
     # Serve clai's docs on a local cljdoc server. Docs are rendered from the
     # jar installed by `lein install` and doc/ from the working tree, so the
     # server doubles as a preview of what cljdoc.org would publish.

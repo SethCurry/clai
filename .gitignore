@@ -19,3 +19,7 @@ pom.xml.asc
 # Local development data (docker-compose.yml's PostgreSQL volume)
 /local/*
 !/local/.gitkeep
+
+# Web UI
+/web/node_modules
+/web/dist
