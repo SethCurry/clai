@@ -1,8 +1,9 @@
 (ns clai.agent.tools.builtin.subagent-test
   "Tests for the built-in `spawn_agent` tool."
   (:require [clai.agent.providers.ollama :as ollama]
-            [clai.agent.tools :as tools]
+            [clai.agent.tools.builtin :as builtin]
             [clai.agent.tools.builtin.subagent :as subagent]
+            [clai.agent.tools.registry :as registry]
             [clai.test-support :refer [quiet-logs]]
             [clojure.string :as str]
             [clojure.test :refer :all]))
@@ -43,13 +44,13 @@
   (mapv #(get-in % [:function :name]) (:tools request)))
 
 (deftest spawn-agent-is-a-built-in-tool
-  (is (contains? (set (tools/tool-ids (tools/built-in-registry)))
+  (is (contains? (set (registry/tool-ids (builtin/built-in-registry)))
                  "spawn_agent")))
 
 (deftest spawn-agent-runs-with-its-own-system-prompt-and-tools
   (let [requests (atom [])
         calls    (atom 0)
-        registry (tools/make-registry [(echo-tool) (spawn-tool)])]
+        registry (registry/make-registry [(echo-tool) (spawn-tool)])]
     (with-redefs [ollama/chat
                   (fn [_client request]
                     (swap! requests conj request)
@@ -87,7 +88,7 @@
 
 (deftest spawn-agent-withholds-itself-by-default
   (let [requests (atom [])
-        registry (tools/make-registry [(echo-tool) (spawn-tool)])]
+        registry (registry/make-registry [(echo-tool) (spawn-tool)])]
     (with-redefs [ollama/chat
                   (fn [_client request]
                     (swap! requests conj request)
@@ -98,7 +99,7 @@
 
 (deftest spawn-agent-can-be-explicitly-nested
   (let [requests (atom [])
-        registry (tools/make-registry [(echo-tool) (spawn-tool)])]
+        registry (registry/make-registry [(echo-tool) (spawn-tool)])]
     (with-redefs [ollama/chat
                   (fn [_client request]
                     (swap! requests conj request)
@@ -109,7 +110,7 @@
       (is (= ["spawn_agent"] (tool-names (first @requests)))))))
 
 (deftest spawn-agent-enforces-depth-limit
-  (let [registry (tools/make-registry [(echo-tool)])]
+  (let [registry (registry/make-registry [(echo-tool)])]
     (is (str/starts-with?
          (subagent/spawn-agent-fn
           {:prompt "too deep"}
@@ -117,7 +118,7 @@
          "Error:"))))
 
 (deftest spawn-agent-validates-required-inputs
-  (let [registry (tools/make-registry [(echo-tool)])]
+  (let [registry (registry/make-registry [(echo-tool)])]
     (is (str/starts-with?
          (subagent/spawn-agent-fn {:prompt "   "} (ctx registry))
          "Error:"))
@@ -128,7 +129,7 @@
 
 (deftest spawn-agent-clamps-max-rounds
   (let [requests (atom [])
-        registry (tools/make-registry [(echo-tool)])]
+        registry (registry/make-registry [(echo-tool)])]
     (with-redefs [ollama/chat
                   (fn [_client request]
                     (swap! requests conj request)

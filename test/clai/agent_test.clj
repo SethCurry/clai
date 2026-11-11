@@ -1,10 +1,8 @@
 (ns clai.agent-test
-  "Tests for the ACP agent handler in `clai.agent`, in particular that a
-  `session/prompt` actually reaches the model and that the reply validates
-  against the canonical session event schema."
-  (:require [acp.agent :as acp]
-            [acp.agent.helpers :as helpers]
-            [clai.agent :as agent]
+  "Tests for the in-process agent in `clai.agent`, in particular that a prompt
+  actually reaches the model and that streamed updates validate against the
+  canonical session event schema."
+  (:require [clai.agent :as agent]
             [clai.agent.providers.ollama :as ollama]
             [clai.daemon.postgres.sessions :as sessions]
             [clai.events.schema :as events]
@@ -21,36 +19,54 @@
 (def ^:private test-client
   (ollama/make-client {:host "http://localhost:11434" :timeout 1000}))
 
-(def ^:private session-update->event
-  "Maps a streamed text update to the event type and schema it represents."
-  {"user_message_chunk"  ["user_prompt" #'events/UserPromptEvent]
-   "agent_message_chunk" ["agent_message" #'events/AgentMessageEvent]
-   "agent_thought_chunk" ["agent_thought" #'events/AgentThoughtEvent]})
+(def ^:private event-type->schema
+  "Maps a text-bearing update type to the canonical event schema it represents."
+  {"user_prompt"   #'events/UserPromptEvent
+   "agent_message" #'events/AgentMessageEvent
+   "agent_thought" #'events/AgentThoughtEvent})
 
 (defn- validate-update!
-  "Validate the persisted event content represented by ACP `update`."
+  "Validate the canonical event content represented by `update`."
   [update]
-  (when-let [[event-type schema] (session-update->event (:sessionUpdate update))]
+  (if (= "tool_call" (:type update))
     (let [event {:id               0
                  :agent_session_id 0
-                 :type             event-type
-                 :content          [{:type    "text"
-                                     :content (get-in update [:content :text])}]}]
-      (when-not (m/validate schema event)
-        (throw (ex-info "Invalid session event content"
+                 :type             "tool_call"
+                 :content          (dissoc update :type)}]
+      (when-not (m/validate #'events/ToolCallEvent event)
+        (throw (ex-info "Invalid tool-call event content"
                         {:update update
                          :event  event
-                         :errors (m/explain schema event)})))))
+                         :errors (m/explain #'events/ToolCallEvent event)}))))
+    (when-let [schema (event-type->schema (:type update))]
+      (let [event {:id               0
+                   :agent_session_id 0
+                   :type             (:type update)
+                   :content          (:content update)}]
+        (when-not (m/validate schema event)
+          (throw (ex-info "Invalid session event content"
+                          {:update update
+                           :event  event
+                           :errors (m/explain schema event)}))))))
   update)
 
+(defn- prompt!
+  "Run one prompt against `handler`, validating and collecting every streamed
+  update in `updates`."
+  [handler session-id prompt updates]
+  (agent/run-prompt! handler
+                     {:sessionId session-id
+                      :prompt    prompt
+                      :on-update #(swap! updates conj (validate-update! %))}))
+
 ;; ---------------------------------------------------------------------------
-;; session/prompt end to end (Ollama stubbed)
+;; Prompt end to end (Ollama stubbed)
 ;; ---------------------------------------------------------------------------
 
 (defn- run-with-stubbed-ollama
-  "Run `f` with `/api/chat` and the ACP senders stubbed. `f` receives the
-  handler plus atoms collecting the chat request bodies (`requests`) and the
-  `[sessionId update]` pairs sent to the client (`updates`).
+  "Run `f` with `/api/chat` stubbed. `f` receives the agent plus atoms
+  collecting the chat request bodies (`requests`) and the event updates sent
+  to the caller (`updates`).
 
   `reply` is either the assistant message text or a full message map (for
   example to include a `:thinking` field). `agent-opts` is merged into the
@@ -58,39 +74,28 @@
   ([reply f] (run-with-stubbed-ollama reply {} f))
   ([reply agent-opts f]
    (let [requests (atom [])
-        updates  (atom [])]
-    (with-redefs [ollama/chat
-                  (fn [_client req]
-                    (swap! requests conj req)
-                    {:message (if (map? reply)
-                                (merge {:role "assistant"} reply)
-                                {:role "assistant" :content reply})})
-                  acp/send-session-update
-                  (fn [_conn sid update]
-                    ;; Validate the event content represented by the update,
-                    ;; so a malformed update fails the test.
-                    (validate-update! update)
-                    (swap! updates conj [sid update]))
-                  helpers/send-session-update
-                  (fn [_conn sid update]
-                    (validate-update! update)
-                    (swap! updates conj [sid update]))]
-      (let [handler (agent/ollama-agent
-                     (merge {:cfg    {}
-                             :client test-client
-                             :model  "stub-model"}
-                            agent-opts))]
-        (f handler requests updates))))))
+         updates  (atom [])]
+     (with-redefs [ollama/chat
+                   (fn [_client req]
+                     (swap! requests conj req)
+                     {:message (if (map? reply)
+                                 (merge {:role "assistant"} reply)
+                                 {:role "assistant" :content reply})})]
+       (let [handler (agent/ollama-agent
+                      (merge {:cfg    {}
+                              :client test-client
+                              :model  "stub-model"}
+                             agent-opts))]
+         (f handler requests updates))))))
 
-(deftest session-prompt-sends-user-text-to-ollama
+(deftest prompt-sends-user-text-to-ollama
   (run-with-stubbed-ollama
    "pong"
    (fn [handler requests updates]
-     (let [{:keys [sessionId]} (acp/handle-session-new handler nil {:cwd "/tmp"})
-           resp                (acp/handle-session-prompt
-                                handler nil
-                                {:sessionId sessionId
-                                 :prompt    [{:type "text" :text "ping"}]})]
+     (let [{:keys [sessionId]} (agent/new-session! handler {:cwd "/tmp"})
+           resp                (prompt! handler sessionId
+                                        [{:type "text" :content "ping"}]
+                                        updates)]
        (is (= {:stopReason "end_turn"} resp))
        (is (= 1 (count @requests)))
        (is (= [{:role "user" :content "ping"}]
@@ -98,10 +103,9 @@
            "the prompt text must be in the request sent to Ollama")
        (is (= "stub-model" (:model (first @requests))))
        (is (= 1 (count @updates)))
-       (let [[sid update] (first @updates)]
-         (is (= sessionId sid))
-         (is (= "agent_message_chunk" (:sessionUpdate update)))
-         (is (= "pong" (get-in update [:content :text]))))))))
+       (let [update (first @updates)]
+         (is (= "agent_message" (:type update)))
+         (is (= "pong" (events/content->text (:content update)))))))))
 
 (defn- temp-dir
   "Create an empty temporary directory for a test."
@@ -111,7 +115,7 @@
                   (make-array java.nio.file.attribute.FileAttribute 0)))
     (.deleteOnExit)))
 
-(deftest session-new-appends-agents-md-to-system-prompt
+(deftest new-session-appends-agents-md-to-system-prompt
   (let [dir    (temp-dir)
         agents (File. dir "AGENTS.md")]
     (try
@@ -119,17 +123,13 @@
       (run-with-stubbed-ollama
        "pong"
        {:cfg {:system-prompt "base prompt"}}
-       (fn [handler requests _updates]
-         (let [{:keys [sessionId]} (acp/handle-session-new
-                                    handler nil {:cwd (.getPath dir)})]
+       (fn [handler requests updates]
+         (let [{:keys [sessionId]} (agent/new-session! handler {:cwd (.getPath dir)})]
            (is (= [{:role "system" :content "base prompt\n\nProject rules."}]
-                  (take 1 (:history (sessions/load-session (:postgres handler)
+                  (take 1 (:history (sessions/load-session test-client
                                                        sessionId))))
                "AGENTS.md is appended to the configured system prompt")
-           (acp/handle-session-prompt
-            handler nil
-            {:sessionId sessionId
-             :prompt    [{:type "text" :text "ping"}]})
+           (prompt! handler sessionId "ping" updates)
            (is (= "base prompt\n\nProject rules."
                   (-> @requests first :messages first :content))
                "the model receives AGENTS.md before the first user turn"))))
@@ -137,90 +137,75 @@
         (.delete agents)
         (.delete dir)))))
 
-(deftest session-new-uses-agents-md-without-configured-system-prompt
+(deftest new-session-uses-agents-md-without-configured-system-prompt
   (let [dir    (temp-dir)
         agents (File. dir "AGENTS.md")]
     (try
       (spit agents "Only project rules.")
       (run-with-stubbed-ollama
        "pong"
-       (fn [handler requests _updates]
-         (let [{:keys [sessionId]} (acp/handle-session-new
-                                    handler nil {:cwd (.getPath dir)})]
+       (fn [handler requests updates]
+         (let [{:keys [sessionId]} (agent/new-session! handler {:cwd (.getPath dir)})]
            (is (= [{:role "system" :content "Only project rules."}]
-                  (take 1 (:history (sessions/load-session (:postgres handler)
+                  (take 1 (:history (sessions/load-session test-client
                                                        sessionId)))))
-           (acp/handle-session-prompt
-            handler nil
-            {:sessionId sessionId
-             :prompt    [{:type "text" :text "ping"}]})
+           (prompt! handler sessionId "ping" updates)
            (is (= "Only project rules."
                   (-> @requests first :messages first :content))))))
       (finally
         (.delete agents)
         (.delete dir)))))
 
-(deftest session-new-ignores-blank-agents-md
+(deftest new-session-ignores-blank-agents-md
   (let [dir    (temp-dir)
         agents (File. dir "AGENTS.md")]
     (try
       (spit agents "   \n\t")
       (run-with-stubbed-ollama
        "pong"
-       (fn [handler _requests _updates]
-         (let [{:keys [sessionId]} (acp/handle-session-new
-                                    handler nil {:cwd (.getPath dir)})]
-           (acp/handle-session-prompt
-            handler nil
-            {:sessionId sessionId
-             :prompt    [{:type "text" :text "ping"}]})
+       (fn [handler _requests updates]
+         (let [{:keys [sessionId]} (agent/new-session! handler {:cwd (.getPath dir)})]
+           (prompt! handler sessionId "ping" updates)
            (is (= [{:role "user" :content "ping"}]
-                  (take 1 (:history (sessions/load-session (:postgres handler)
+                  (take 1 (:history (sessions/load-session test-client
                                                        sessionId))))
                "a blank AGENTS.md adds no system message"))))
       (finally
         (.delete agents)
         (.delete dir)))))
 
-(deftest session-prompt-relays-model-thinking
+(deftest prompt-relays-model-thinking
   (run-with-stubbed-ollama
    {:content "pong" :thinking "let me think about this"}
    (fn [handler _requests updates]
-     (let [{:keys [sessionId]} (acp/handle-session-new handler nil {:cwd "/tmp"})
-           resp                (acp/handle-session-prompt
-                                handler nil
-                                {:sessionId sessionId
-                                 :prompt    [{:type "text" :text "ping"}]})]
+     (let [{:keys [sessionId]} (agent/new-session! handler {:cwd "/tmp"})
+           resp                (prompt! handler sessionId "ping" updates)]
        (is (= {:stopReason "end_turn"} resp))
-       (is (= ["agent_thought_chunk" "agent_message_chunk"]
-              (mapv (comp :sessionUpdate second) @updates))
-           "thinking must be sent as a thought chunk before the final reply")
+       (is (= ["agent_thought" "agent_message"]
+              (mapv :type @updates))
+           "thinking must be sent as a thought event before the final reply")
        (is (= "let me think about this"
-              (get-in (first @updates) [1 :content :text])))
+              (events/content->text (:content (first @updates)))))
        (is (= "pong"
-              (get-in (second @updates) [1 :content :text])))
+              (events/content->text (:content (second @updates)))))
        (is (= "let me think about this"
               (:thinking (last (:history (sessions/load-session
-                                          (:postgres handler) sessionId)))))
-           "thinking is persisted so session/load can replay it")))))
+                                          test-client sessionId)))))
+           "thinking is persisted so a resumed session can replay it")))))
 
-(deftest session-prompt-accumulates-history
+(deftest prompt-accumulates-history
   (run-with-stubbed-ollama
    "pong"
-   (fn [handler requests _updates]
-     (let [{:keys [sessionId]} (acp/handle-session-new handler nil {:cwd "/tmp"})]
-       (acp/handle-session-prompt handler nil
-                                  {:sessionId sessionId
-                                   :prompt    [{:type "text" :text "first"}]})
-       (acp/handle-session-prompt handler nil
-                                  {:sessionId sessionId
-                                   :prompt    [{:type "text" :text "second"}]})
+   (fn [handler requests updates]
+     (let [{:keys [sessionId]} (agent/new-session! handler {:cwd "/tmp"})]
+       (prompt! handler sessionId "first" updates)
+       (prompt! handler sessionId "second" updates)
        (is (= [{:role "user" :content "first"}
                {:role "assistant" :content "pong"}
                {:role "user" :content "second"}]
               (:messages (second @requests))))))))
 
-(deftest session-prompt-uses-the-agents-own-tool-registry
+(deftest prompt-uses-the-agents-own-tool-registry
   (let [requests (atom [])
         updates  (atom [])
         calls    (atom 0)
@@ -244,24 +229,13 @@
                                  [{:id "call-1"
                                    :function {:name "echo"
                                               :arguments "{\"text\":\"hi\"}"}}]}}
-                      {:message {:role "assistant" :content "done"}}))
-                  acp/send-session-update
-                  (fn [_conn sid update]
-                    (validate-update! update)
-                    (swap! updates conj [sid update]))
-                  helpers/send-session-update
-                  (fn [_conn sid update]
-                    (validate-update! update)
-                    (swap! updates conj [sid update]))]
+                      {:message {:role "assistant" :content "done"}}))]
       (let [handler (agent/ollama-agent {:cfg           {:tools ["echo"]}
                                          :client        test-client
                                          :model         "stub-model"
                                          :tool-registry [echo other]})
-            {:keys [sessionId]} (acp/handle-session-new handler nil {:cwd "/tmp"})
-            resp (acp/handle-session-prompt
-                  handler nil
-                  {:sessionId sessionId
-                   :prompt    [{:type "text" :text "ping"}]})]
+            {:keys [sessionId]} (agent/new-session! handler {:cwd "/tmp"})
+            resp (prompt! handler sessionId "ping" updates)]
         (is (= {:stopReason "end_turn"} resp))
         (is (= 2 (count @requests)))
         (is (= ["echo"]
@@ -274,9 +248,10 @@
                     first
                     :content))
             "the tool call must execute against the same per-agent registry")
-        (is (= "done" (get-in (last @updates) [1 :content :text])))))))
+        (is (= "done"
+               (events/content->text (:content (last @updates)))))))))
 
-(deftest tool-output-is-streamed-as-tool-call-updates
+(deftest tool-output-is-streamed-as-tool-call-events
   (let [requests (atom [])
         updates  (atom [])
         calls    (atom 0)
@@ -300,43 +275,24 @@
                                  [{:id "call-1"
                                    :function {:name "chatter"
                                               :arguments "{}"}}]}}
-                      {:message {:role "assistant" :content "done"}}))
-                  acp/send-session-update
-                  (fn [_conn sid update]
-                    (validate-update! update)
-                    (swap! updates conj [sid update]))
-                  helpers/send-session-update
-                  (fn [_conn sid update]
-                    (validate-update! update)
-                    (swap! updates conj [sid update]))]
+                      {:message {:role "assistant" :content "done"}}))]
       (let [handler (agent/ollama-agent {:cfg           {}
                                          :client        test-client
                                          :model         "stub-model"
                                          :tool-registry [chatter]})
-            {:keys [sessionId]} (acp/handle-session-new handler nil {:cwd "/tmp"})]
-        ;; A live connection is what makes streaming possible: without one
-        ;; there is nobody to send `tool_call_update`s to.
+            {:keys [sessionId]} (agent/new-session! handler {:cwd "/tmp"})]
         (is (= {:stopReason "end_turn"}
-               (acp/handle-session-prompt
-                handler {}
-                {:sessionId sessionId
-                 :prompt    [{:type "text" :text "ping"}]})))
+               (prompt! handler sessionId "ping" updates)))
         (let [tool-updates (->> @updates
-                               (map second)
-                               (filter #(str/starts-with? (:sessionUpdate %) "tool_call")))]
-          (is (= ["tool_call" "tool_call_update" "tool_call_update"
-                  "tool_call_update"]
-                 (mapv :sessionUpdate tool-updates))
+                                (filter #(= "tool_call" (:type %))))]
+          (is (= 4 (count tool-updates))
               "the tool call is opened, streamed twice, and closed")
-          (is (= ["first" "first second"]
-                 (mapv #(get-in % [:content 0 :content :text])
-                       (take 2 (rest tool-updates))))
-              "each chunk carries the output produced so far")
-          (is (every? nil? (mapv :status (take 2 (rest tool-updates))))
-              "streamed output does not close the call")
-          (is (= "completed" (:status (last tool-updates))))
-          (is (= "first second"
-                 (get-in (last tool-updates) [:content 0 :content :text]))))
+          (is (= [nil "first" "first second" "first second"]
+                 (mapv :output tool-updates))
+              "each update carries the output produced so far")
+          (is (= ["running" nil nil "completed"]
+                 (mapv :status tool-updates)))
+          (is (= "call-1" (:id (first tool-updates)))))
         (is (= "first second"
                (->> (:messages (second @requests))
                     (filter #(= "tool" (:role %)))
@@ -344,9 +300,9 @@
                     :content))
             "the model still sees the complete result")))))
 
-(deftest session-prompt-reads-local-resource-links
-  ;; `handle-session-prompt` passes the session cwd to the prompt converter so
-  ;; resource links (here a cwd-relative path) reach the model as text.
+(deftest prompt-reads-local-resource-links
+  ;; `run-prompt!` passes the session cwd to the prompt converter so resource
+  ;; links (here a cwd-relative path) reach the model as text.
   (let [dir (doto (File/createTempFile "clai-agent-resource" ".d")
               (.delete)
               (.mkdir))
@@ -355,15 +311,13 @@
       (spit f "resource body")
       (run-with-stubbed-ollama
        "done"
-       (fn [handler requests _updates]
-         (let [{:keys [sessionId]} (acp/handle-session-new
-                                    handler nil {:cwd (.getPath dir)})]
-           (acp/handle-session-prompt
-            handler nil
-            {:sessionId sessionId
-             :prompt    [{:type "resource_link"
-                          :name "notes.txt"
-                          :uri  (.getName f)}]})
+       (fn [handler requests updates]
+         (let [{:keys [sessionId]} (agent/new-session! handler {:cwd (.getPath dir)})]
+           (prompt! handler sessionId
+                    [{:type "resource_link"
+                      :name "notes.txt"
+                      :uri  (.getName f)}]
+                    updates)
            (let [content (-> @requests first :messages first :content)]
              (is (str/includes? content "notes.txt"))
              (is (str/includes? content "resource body")
@@ -372,24 +326,15 @@
         (.delete f)
         (.delete dir)))))
 
-(deftest session-cancel-does-not-throw
-  (run-with-stubbed-ollama
-   "pong"
-   (fn [handler _requests _updates]
-     (let [{:keys [sessionId]} (acp/handle-session-new handler nil {:cwd "/tmp"})]
-       (is (nil? (acp/on-session-cancel handler nil {:sessionId sessionId})))))))
-
 (deftest prompt-for-unknown-session-relays-message
   (run-with-stubbed-ollama
    "pong"
    (fn [handler requests updates]
-     (let [resp (acp/handle-session-prompt
-                 handler nil
-                 {:sessionId "missing"
-                  :prompt    [{:type "text" :text "ping"}]})]
+     (let [resp (prompt! handler "missing" "ping" updates)]
        (is (= {:stopReason "end_turn"} resp))
        (is (empty? @requests))
-       (let [[sid update] (first @updates)]
-         (is (= ["missing"] [sid]))
-         (is (= "agent_message_chunk" (:sessionUpdate update)))
-         (is (= "No session missing" (get-in update [:content :text]))))))))
+       (is (= 1 (count @updates)))
+       (let [update (first @updates)]
+         (is (= "agent_message" (:type update)))
+         (is (= "No session missing"
+                (events/content->text (:content update)))))))))

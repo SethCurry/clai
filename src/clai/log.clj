@@ -19,8 +19,8 @@
   {:malli/schema [:-> :nil]}
   []
   ;; Telemere's default console handler writes non-error signals to *out*.
-  ;; Stdout is reserved for ACP JSON-RPC traffic, so replace it with a handler
-  ;; that always writes to stderr.
+  ;; Stdout is reserved for the REPL conversation, so replace it with a
+  ;; handler that always writes to stderr.
   (tel/remove-handler! :default/console)
   (tel/add-handler! :clai/console
     (tel/handler:console {:stream :err})

@@ -25,7 +25,7 @@
                         :ssl-mode \"prefer\"}
        :tools          [\"read_file\" \"write_file\" ...]}
 
-  `:tools` is a vector of tool ids (see `clai.agent.tools/built-in-tools`) to
+  `:tools` is a vector of tool ids (see `clai.agent.tools.builtin/built-in-tools`) to
   enable. When omitted, every tool in the agent's registry is enabled; when
   present but empty, no tools are offered to the model.
 
@@ -40,7 +40,9 @@
   If none of these exist, an empty map is returned and `clai` behaves exactly
   as it did before config-file support (env vars + defaults)."
   (:require [clai.agent.providers.ollama :as ollama]
-            [clai.agent.tools :as tools]
+            [clai.agent.tools.builtin :as tools-builtin]
+            [clai.agent.tools.registry :as tools-registry]
+            [clai.agent.tools.schema :as tools-schema]
             [clai.daemon.postgres :as postgres]
             [clai.log]
             [clai.util :as util]
@@ -290,14 +292,14 @@
   callers that have not yet built their own per-agent registry; agents should
   pass the registry they own via the two-argument arity."
   {:malli/schema [:function
-                  [:=> [:cat #'config] [:vector #'tools/tool-spec]]
-                  [:=> [:cat #'config #'tools/ToolRegistry]
-                   [:vector #'tools/tool-spec]]]}
+                  [:=> [:cat #'config] [:vector #'tools-schema/tool-spec]]
+                  [:=> [:cat #'config #'tools-schema/ToolRegistry]
+                   [:vector #'tools-schema/tool-spec]]]}
   ([cfg]
-   (tool-specs cfg (tools/built-in-registry)))
+   (tool-specs cfg (tools-builtin/built-in-registry)))
   ([cfg tool-registry]
    (let [ids      (tool-ids cfg)
-         selected (tools/select-tools tool-registry ids)]
+         selected (tools-registry/select-tools tool-registry ids)]
      (if (nil? ids)
-       (tools/specs selected)
-       (tools/specs-for selected ids)))))
+       (tools-registry/specs selected)
+       (tools-registry/specs-for selected ids)))))

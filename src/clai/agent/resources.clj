@@ -1,10 +1,10 @@
 (ns clai.agent.resources
-  "Render ACP resource content blocks as text an LLM can read.
+  "Render resource content blocks as text an LLM can read.
 
-  ACP prompts may contain `resource_link` blocks that point at files (usually
-  with `file://` URIs) and `resource` blocks that embed resource contents.
-  Ollama's chat API only accepts text, so without conversion those blocks are
-  silently dropped and the model never learns which files the user referenced.
+  Prompts may contain `resource_link` blocks that point at files (usually with
+  `file://` URIs) and `resource` blocks that embed resource contents. Ollama's
+  chat API only accepts text, so without conversion those blocks are silently
+  dropped and the model never learns which files the user referenced.
 
   A `resource_link` describes a resource rather than carrying its bytes, so
   [[resource-link->text]] renders a small header with the link's metadata and,
@@ -143,7 +143,7 @@
 ;; ---------------------------------------------------------------------------
 
 (defn resource-link->text
-  "Render an ACP `ResourceLink` content block as readable text.
+  "Render a `resource_link` content block as readable text.
 
   The result starts with a `<resource-link>` header carrying the link's
   `name`, `uri`, and other metadata. When the URI points at a local file the
@@ -173,7 +173,7 @@
      (str head "\n" body "\n" (closing-tag tag)))))
 
 (defn embedded-resource->text
-  "Render an ACP `EmbeddedResource` content block (`{:type \"resource\"
+  "Render an embedded-resource content block (`{:type \"resource\"
   :resource ...}`) as readable text.
 
   Text resources are inlined verbatim. Binary blobs are described by size and

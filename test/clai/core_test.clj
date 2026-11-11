@@ -1,8 +1,8 @@
 (ns clai.core-test
   "Tests for the `clai` command-line dispatch in `clai.core`.
 
-  The agent server and the REPLY launcher are stubbed, so nothing here starts
-  the stdio agent, JLine, or an nREPL server."
+  The REPLY launcher is stubbed, so nothing here starts JLine or an nREPL
+  server."
   (:require [clai.core :as core]
             [clai.test-support :refer [quiet-logs]]
             [clojure.string :as str]
@@ -20,14 +20,12 @@
       (f))
     {:out (str out) :err (str err)}))
 
-(deftest agent-is-the-default-command
-  (let [served (atom 0)
-        repl   (fn [_] (throw (ex-info "the REPL should not launch" {})))]
-    (with-redefs [core/serve-agent (fn [] (swap! served inc))
-                  core/launch-repl repl]
-      (is (zero? (core/run [])))
-      (is (zero? (core/run ["agent"])))
-      (is (= 2 @served)))))
+(deftest no-arguments-prints-usage
+  (let [{:keys [out err]} (capture #(is (zero? (core/run []))))]
+    (is (str/includes? out "Usage: clai [command]"))
+    (is (str/includes? out "nrepl"))
+    (is (str/includes? out "shell"))
+    (is (str/blank? err))))
 
 (deftest repl-forwards-its-arguments
   (let [seen (atom ::none)]

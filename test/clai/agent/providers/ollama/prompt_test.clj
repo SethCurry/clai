@@ -1,7 +1,8 @@
-(ns clai.agent.providers.ollama.acp-test
-  "Tests for ACP -> Ollama prompt normalization in `clai.agent.providers.ollama.acp`."
-  (:require [acp.agent :as acp]
-            [clai.agent.providers.ollama.acp :as ollama-acp]
+(ns clai.agent.providers.ollama.prompt-test
+  "Tests for prompt normalization and history replay in
+  `clai.agent.providers.ollama.prompt`."
+  (:require [clai.agent.providers.ollama.prompt :as ollama-prompt]
+            [clai.events.schema :as events]
             [clai.test-support :refer [quiet-logs]]
             [clojure.string :as str]
             [clojure.test :refer :all])
@@ -9,38 +10,35 @@
 
 (use-fixtures :once quiet-logs)
 
-(def ^:private prompt->messages
-  "The ACP prompt normalizer."
-  #'ollama-acp/acp-prompt->ollama-messages)
-
 ;; ---------------------------------------------------------------------------
 ;; Prompt normalization
 ;; ---------------------------------------------------------------------------
 
 (deftest content-block-prompt-becomes-user-message
-  ;; ACP sends `:prompt` as a vector of ContentBlocks; their text must survive
-  ;; the conversion (regression: it used to be dropped, sending an empty
-  ;; user message and prompting the model to report "no request").
+  ;; Prompts arrive as vectors of event content blocks; their text must survive
+  ;; the conversion (regression: it used to be dropped, sending an empty user
+  ;; message and prompting the model to report "no request").
   (is (= [{:role "user" :content "hello"}]
-         (prompt->messages [{:type "text" :text "hello"}])))
+         (ollama-prompt/prompt->messages [{:type "text" :content "hello"}])))
   (is (= [{:role "user" :content "hello\nworld"}]
-         (prompt->messages [{:type "text" :text "hello"}
-                            {:type "text" :text "world"}])))
+         (ollama-prompt/prompt->messages [{:type "text" :content "hello"}
+                                          {:type "text" :content "world"}])))
   (is (= [{:role "user" :content "look"}]
-         (prompt->messages [{:type "text" :text "look"}
-                            {:type "image" :data "..."}]))))
+         (ollama-prompt/prompt->messages [{:type "text" :content "look"}
+                                          {:type "image" :data "..."}]))))
 
 (deftest tolerant-prompt-shapes
-  (is (= [] (prompt->messages nil)))
-  (is (= [{:role "user" :content "hi"}] (prompt->messages "hi")))
+  (is (= [] (ollama-prompt/prompt->messages nil)))
+  (is (= [{:role "user" :content "hi"}] (ollama-prompt/prompt->messages "hi")))
+  ;; Older callers used `:text`; keep accepting it while `:content` is canonical.
   (is (= [{:role "user" :content "hi"}]
-         (prompt->messages {:type "text" :text "hi"})))
+         (ollama-prompt/prompt->messages {:type "text" :text "hi"})))
   ;; role-tagged messages keep their role
   (is (= [{:role "user" :content "hi"}]
-         (prompt->messages [{:role "user"
-                             :content [{:type "text" :text "hi"}]}])))
+         (ollama-prompt/prompt->messages
+          [{:role "user" :content [{:type "text" :content "hi"}]}])))
   (is (= [{:role "assistant" :content "yo"}]
-         (prompt->messages [{:role "assistant" :content "yo"}]))))
+         (ollama-prompt/prompt->messages [{:role "assistant" :content "yo"}]))))
 
 ;; ---------------------------------------------------------------------------
 ;; Resource blocks
@@ -56,8 +54,8 @@
 (deftest resource-link-blocks-are-converted-not-dropped
   (let [f (temp-text-file "the file body")]
     (try
-      (let [[msg] (prompt->messages
-                   [{:type "text" :text "please read"}
+      (let [[msg] (ollama-prompt/prompt->messages
+                   [{:type "text" :content "please read"}
                     {:type "resource_link"
                      :name "notes.txt"
                      :uri (str (.toURI f))
@@ -71,7 +69,7 @@
       (finally (.delete f)))))
 
 (deftest resource-link-with-unreadable-target-still-describes-it
-  (let [[msg] (prompt->messages
+  (let [[msg] (ollama-prompt/prompt->messages
                [{:type "resource_link"
                  :name "missing.txt"
                  :uri "file:///definitely/not/here/missing.txt"}])
@@ -84,14 +82,14 @@
   (let [f (temp-text-file "relative body")]
     (try
       (let [name (.getName f)
-            [msg] (prompt->messages
+            [msg] (ollama-prompt/prompt->messages
                    [{:type "resource_link" :name name :uri name}]
                    {:cwd (.getPath (.getParentFile f))})]
         (is (str/includes? (:content msg) "relative body")))
       (finally (.delete f)))))
 
 (deftest embedded-text-resource-is-inlined
-  (let [[msg] (prompt->messages
+  (let [[msg] (ollama-prompt/prompt->messages
                [{:type "resource"
                  :resource {:uri "file:///tmp/inline.txt"
                             :mimeType "text/plain"
@@ -99,7 +97,7 @@
     (is (str/includes? (:content msg) "inline contents"))))
 
 (deftest resource-block-in-role-tagged-message
-  (let [[msg] (prompt->messages
+  (let [[msg] (ollama-prompt/prompt->messages
                [{:role "user"
                  :content [{:type "resource"
                             :resource {:uri "file:///tmp/inline.txt"
@@ -109,36 +107,27 @@
 
 (deftest existing-text-and-image-behaviour-is-preserved
   (is (= [{:role "user" :content "look"}]
-         (prompt->messages [{:type "text" :text "look"}
-                            {:type "image" :data "..."}]))))
+         (ollama-prompt/prompt->messages
+          [{:type "text" :content "look"}
+           {:type "image" :data "..."}]))))
 
 ;; ---------------------------------------------------------------------------
 ;; History replay
 ;; ---------------------------------------------------------------------------
 
-(deftest replay-sends-thought-chunks-before-assistant-text
-  (let [sent (atom [])]
-    (with-redefs [acp/send-session-update
-                  (fn [_conn sid update]
-                    (swap! sent conj [sid update]))]
-      (is (= 2 (ollama-acp/replay-session-history
-                nil "session-1"
-                [{:role "assistant"
-                  :thinking "step one"
-                  :content  "the answer"}])))
-      (is (= ["agent_thought_chunk" "agent_message_chunk"]
-             (mapv (comp :sessionUpdate second) @sent)))
-      (is (= "step one" (get-in (first @sent) [1 :content :text])))
-      (is (= "the answer" (get-in (second @sent) [1 :content :text]))))))
+(deftest history-replays-thoughts-before-assistant-text
+  (let [updates (ollama-prompt/history->updates
+                 [{:role "assistant"
+                   :thinking "step one"
+                   :content  "the answer"}])]
+    (is (= ["agent_thought" "agent_message"] (mapv :type updates)))
+    (is (= "step one" (events/content->text (:content (first updates)))))
+    (is (= "the answer" (events/content->text (:content (second updates)))))))
 
-(deftest replay-skips-messages-without-thinking
-  (let [sent (atom [])]
-    (with-redefs [acp/send-session-update
-                  (fn [_conn sid update]
-                    (swap! sent conj [sid update]))]
-      (is (= 2 (ollama-acp/replay-session-history
-                nil "session-2"
-                [{:role "user" :content "hi"}
-                 {:role "assistant" :content "hello"}])))
-      (is (= ["user_message_chunk" "agent_message_chunk"]
-             (mapv (comp :sessionUpdate second) @sent))))))
+(deftest history-skips-messages-without-thinking
+  (let [updates (ollama-prompt/history->updates
+                 [{:role "user" :content "hi"}
+                  {:role "system" :content "internal"}
+                  {:role "tool" :content "internal"}
+                  {:role "assistant" :content "hello"}])]
+    (is (= ["user_prompt" "agent_message"] (mapv :type updates)))))

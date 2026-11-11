@@ -19,9 +19,8 @@
   ## Sessions and events
 
   A session is one `agent_session` row: a database-assigned id (exposed as a
-  string, so it fits the ACP `sessionId` shape) plus the session's working
-  directory. Its conversation is the ordered `agent_session_event` rows that
-  reference it.
+  string) plus the session's working directory. Its conversation is the
+  ordered `agent_session_event` rows that reference it.
 
   The event log is message-granular: `append-history` derives the event's
   `event_type` from the chat message's role (`user`/`system` -> `user_prompt`,
@@ -148,8 +147,8 @@
   row.
 
   Session ids are exposed as strings, and `INSERT` returns the numeric key, so
-  both are accepted. Anything non-numeric (for example a UUID minted by an ACP
-  client) returns nil instead of throwing."
+  both are accepted. Anything non-numeric (for example an externally minted
+  UUID) returns nil instead of throwing."
   [id]
   (when (some? id)
     (when-let [n (if (number? id) id (parse-long (str id)))]
@@ -391,7 +390,7 @@
 
 (defn list-session-summaries
   "Like [[list-sessions]] but returns only metadata (no histories), suitable
-  for session pickers and ACP `session/list` responses."
+  for session pickers and other lightweight listings."
   {:malli/schema [:-> #'postgres/client-schema [:vector #'session-summary]]}
   [client]
   (mapv row->summary

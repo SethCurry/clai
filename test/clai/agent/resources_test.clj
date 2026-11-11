@@ -1,5 +1,5 @@
 (ns clai.agent.resources-test
-  "Tests for rendering ACP resource content blocks as LLM-readable text."
+  "Tests for rendering resource content blocks as LLM-readable text."
   (:require [clai.agent.resources :as resources]
             [clojure.string :as str]
             [clojure.test :refer :all])

@@ -83,6 +83,6 @@
   nil)
 
 (defonce ^:private _instrumented
-  ;; Requiring this namespace is enough to turn instrumentation on; `clai.core`
-  ;; requires it before starting the ACP server.
+  ;; Requiring this namespace is enough to turn instrumentation on; loading
+  ;; `clai.agent` or the REPL helpers makes runtime schema checks available.
   (do (start!) true))

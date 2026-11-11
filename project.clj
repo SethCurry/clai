@@ -13,8 +13,7 @@
                  [reply/reply "0.5.1"]
                  [nrepl/nrepl "1.0.0"]
                  [hiccup/hiccup "2.0.0"]
-                 [com.datomic/local "1.0.301"]
-                 [io.scurry/acp "0.1.0-SNAPSHOT"]]
+                 [com.datomic/local "1.0.301"]]
   :main clai.core
   ;; `schema/` holds the canonical storage DDL, which `clai.daemon.postgres`
   ;; loads from the classpath at runtime (and the uberjar must carry).
@@ -25,10 +24,10 @@
   {:uberjar
    {;; AOT'd `clai` classes refer to classes that dependency namespaces
     ;; generate with `defrecord`/`deftype`/`defprotocol` -- for example
-    ;; `acp.agent.AgentHandler` and `taoensso.telemere.impl.WrappedSignal`.
-    ;; Those classes are only written into the jar when the namespace that
-    ;; defines them is AOT compiled as well, and `:aot :all` only scans this
-    ;; project's own `:source-paths`, so dependency namespaces are listed out.
+    ;; `taoensso.telemere.impl.WrappedSignal`. Those classes are only written
+    ;; into the jar when the namespace that defines them is AOT compiled as
+    ;; well, and `:aot :all` only scans this project's own `:source-paths`, so
+    ;; dependency namespaces are listed out.
     ;;
     ;; A dependency namespace used only through its functions does not need to
     ;; be listed; add one here if building the uberjar starts failing with a
@@ -36,13 +35,6 @@
     ;; sources have no timestamp to compare against, `lein clean` is needed
     ;; after upgrading one of these dependencies.
     :aot [#"^clai\..*" #"^user$"
-
-          ;; io.scurry/acp transport. Schema types come from clai.events.schema,
-          ;; so none of the acp.schema.* namespaces need AOT compilation.
-          acp.agent
-          acp.agent.helpers
-          acp.errors
-          acp.jsonrpc
 
           ;; com.taoensso/telemere, plus the namespaces it loads at runtime
           taoensso.encore

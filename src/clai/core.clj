@@ -1,56 +1,21 @@
 (ns clai.core
   "Command-line entry point for `clai`.
 
-  With no arguments (or with `agent`) it serves the ACP agent over stdio, the
-  way an ACP client such as an editor launches it.
-
   With `nrepl` it starts an nREPL server and publishes the port it listens on
   in `.nrepl-port`, the same convention Leiningen and `clj` use. With `shell`
   it launches a REPLY REPL that attaches to that server instead of starting an
-  nREPL server of its own, so the REPL and the agent run in the server's JVM:
-  `clai.repl` wires a client and the agent back to back over queue channels
-  (see `src/user.clj` for the helpers it refers into `user`), so the agent can
-  be driven from the REPL while stdout stays free for the conversation. Pass
-  `--standalone` to `shell` to run the REPL in this process instead."
-  (:require [acp.agent :as acp]
-            [clai.agent :as agent]
-            [clai.instrument :as instrument]
-            [clai.log]
+  nREPL server of its own, so the REPL and the agent run in the server's JVM.
+  `clai.repl` drives the in-process agent directly (see `src/user.clj` for the
+  helpers it refers into `user`), so the agent can be used from the REPL while
+  stdout stays free for the conversation. Pass `--standalone` to `shell` to
+  run the REPL in this process instead.
+
+  With no arguments (or `help`) it prints usage."
+  (:require [clai.log]
             [clojure.java.io :as io]
             [clojure.pprint :as pprint]
-            [clojure.string :as str]
-            [taoensso.telemere :as tel])
+            [clojure.string :as str])
   (:gen-class))
-
-;; ---------------------------------------------------------------------------
-;; Agent over stdio
-;; ---------------------------------------------------------------------------
-
-(defn make-agent
-  "Build a fresh agent with its own built-in tool registry.
-
-  `opts` is passed through to `clai.agent/ollama-agent`; supply
-  `:tool-registry` (or `:tools`) to give the agent a custom registry. Config
-  `:tools` ids still narrow whichever registry is supplied."
-  ([] (make-agent {}))
-  ([opts] (agent/ollama-agent opts)))
-
-(defn serve-agent
-  "Start the `clai` agent over stdio: read ACP messages from stdin and answer
-  `session/prompt` requests by calling the Ollama chat API. Blocks until stdin
-  reaches EOF (the client disconnected)."
-  []
-  (instrument/start!)
-  (tel/log! {:level :info :id ::agent-starting}
-            "Starting clai ACP agent over stdio")
-  (try
-    (acp/run (make-agent))
-    (catch Throwable e
-      (tel/error! {:id ::agent-failed} e)
-      (throw e))
-    (finally
-      (tel/log! {:level :info :id ::agent-stopping}
-                "clai ACP agent stopped"))))
 
 ;; ---------------------------------------------------------------------------
 ;; nREPL server
@@ -261,8 +226,7 @@
 
 (def commands
   "The `clai` subcommands, as `[name description]` pairs."
-  [["agent" "Serve the ACP agent over stdio; the default command."]
-   ["nrepl" "Start an nREPL server and publish its port in .nrepl-port."]
+  [["nrepl" "Start an nREPL server and publish its port in .nrepl-port."]
    ["shell" "Attach an interactive REPLY REPL to a running nREPL server."]])
 
 (defn usage
@@ -280,17 +244,15 @@
 (defn run
   "Run the `clai` CLI described by `args` and return an exit status.
 
-  `args` does not include the program name. With no command the ACP agent is
-  served, which keeps `clai` backwards compatible with clients that launch it
-  without arguments. Prints the usage text for `help` (or `--help`/`-h`) and
-  reports an unknown command on stderr with a non-zero status."
+  `args` does not include the program name. With no command it prints the
+  usage text, as it does for `help` (or `--help`/`-h`). Reports an unknown
+  command on stderr with a non-zero status."
   [args]
-  (let [command (or (first args) "agent")]
+  (let [command (first args)]
     (case command
-      "agent" (do (serve-agent) 0)
       "nrepl" (serve-nrepl (rest args))
       "shell" (launch-repl (rest args))
-      ("help" "--help" "-h") (do (println (usage)) 0)
+      (nil "help" "--help" "-h") (do (println (usage)) 0)
       (do
         (binding [*out* *err*]
           (println (str "Unknown command: " command))
@@ -304,7 +266,7 @@
   (let [status (run args)]
     ;; REPLY uses futures for parsing and completion, and the agent may leave
     ;; pool threads behind; shutting the pools down lets the JVM exit once the
-    ;; REPL or the stdio server finishes.
+    ;; REPL finishes.
     (shutdown-agents)
     (when-not (zero? status)
       (System/exit status))))

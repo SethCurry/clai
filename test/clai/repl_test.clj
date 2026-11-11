@@ -1,11 +1,12 @@
 (ns clai.repl-test
   "Tests for the in-process REPL client in `clai.repl`.
 
-  A stub `AgentHandler` is run as [[clai.repl/current-agent]] so no Ollama
-  server or network access is involved: the tests exercise the channel
-  plumbing, the session helpers, and update rendering."
-  (:require [acp.agent :as acp]
-            [acp.errors :as acp-errors]
+  The agent's session and prompt operations are stubbed so no Ollama server or
+  network access is involved: the tests exercise the session helpers, update
+  rendering, and namespace bookkeeping."
+  (:require [clai.agent :as agent]
+            [clai.agent.providers.ollama.prompt :as ollama-prompt]
+            [clai.events.schema :as events]
             [clai.repl :as repl]
             [clai.shell.cli :as cli]
             [clai.test-support :refer [instrument quiet-logs]]
@@ -15,87 +16,76 @@
   (:import [java.io StringWriter]))
 
 ;; ---------------------------------------------------------------------------
-;; Stub agent
+;; Stub agent operations
 ;; ---------------------------------------------------------------------------
 
-(defrecord StubHandler []
-  acp/AgentHandler
-  (handle-initialize [_ _ {:keys [protocolVersion]}]
-    {:protocolVersion (long (or protocolVersion acp/protocol-version-2))
-     :info            {:name "stub" :version "0"}
-     :capabilities    {:loadSession true}})
+(defn- prompt-text
+  "Flatten a prompt the way the agent's Ollama converter does."
+  [prompt]
+  (->> (ollama-prompt/prompt->messages prompt)
+       (map :content)
+       (str/join "\n")))
 
-  (handle-session-new [_ _ {:keys [cwd]}]
-    {:sessionId "stub-session" :cwd cwd})
+(defn- stub-load-session!
+  "Return a fake session for any non-blank id, with history for
+  `with-history`."
+  [_ {:keys [sessionId cwd]}]
+  (when-not (str/blank? (str sessionId))
+    (let [id (str sessionId)]
+      {:sessionId id
+       :cwd       (or cwd "/tmp")
+       :history   (if (= "with-history" id)
+                    [{:role "user" :content "hello"}
+                     {:role "assistant" :content "hi there"}]
+                    [])})))
 
-  (handle-session-list [_ _ _]
-    {:sessions [{:sessionId "older"  :cwd "/tmp"
-                 :updatedAt "2024-01-01T00:00:00Z"}
-                {:sessionId "newest" :cwd "/tmp"
-                 :updatedAt "2024-02-01T00:00:00Z"}]})
+(defn- stub-run-prompt!
+  "Answer prompts with simple event updates, including tool and thought cases."
+  [_ {:keys [prompt on-update]}]
+  (let [text (prompt-text prompt)]
+    (case text
+      "fail" (throw (ex-info "boom" {:clai/test true}))
 
-  (handle-session-prompt [_ conn {:keys [sessionId prompt]}]
-    (let [text (get-in prompt [0 :text])]
-      (case text
-        "fail" (acp-errors/acp-error acp-errors/err-internal "boom")
+      "tool" (do
+               (on-update {:type   "tool_call"
+                           :id     "call-1"
+                           :title  "reading AGENTS.md"
+                           :status "running"})
+               (on-update {:type   "tool_call"
+                           :id     "call-1"
+                           :status "completed"
+                           :output "contents"})
+               {:stopReason "end_turn"})
 
-        "tool" (do
-                 (acp/send-session-update
-                  conn sessionId
-                  {:sessionUpdate "tool_call"
-                   :toolCallId    "call-1"
-                   :title         "reading AGENTS.md"})
-                 (acp/send-session-update
-                  conn sessionId
-                  {:sessionUpdate "tool_call_update"
-                   :toolCallId    "call-1"
-                   :status        "completed"
-                   :content       [{:type    "content"
-                                    :content {:type "text" :text "contents"}}]})
+      "stream" (do
+                 (on-update (events/text-event "agent_thought" "pondering"))
+                 (on-update (events/text-event "agent_message" "answer"))
+                 (on-update {:type   "tool_call"
+                             :id     "call-2"
+                             :title  "a tool"
+                             :status "running"})
                  {:stopReason "end_turn"})
 
-        "stream" (do
-                   (acp/send-session-update
-                    conn sessionId
-                    {:sessionUpdate "agent_thought_chunk"
-                     :content       {:type "text" :text "pondering"}})
-                   (acp/send-agent-message-chunk conn sessionId "answer")
-                   (acp/send-session-update
-                    conn sessionId
-                    {:sessionUpdate "tool_call"
-                     :toolCallId    "call-2"
-                     :title         "a tool"})
-                   {:stopReason "end_turn"})
-
-        (do
-          (acp/send-agent-message-chunk conn sessionId "echo: ")
-          (acp/send-agent-message-chunk conn sessionId text)
-          {:stopReason "end_turn"}))))
-
-  (on-ext-request [_ conn method {:keys [sessionId]}]
-    (if (= "session/load" method)
       (do
-        (when (= "with-history" sessionId)
-          (acp/send-session-update
-           conn sessionId
-           {:sessionUpdate "user_message_chunk"
-            :content       {:type "text" :text "hello"}})
-          (acp/send-session-update
-           conn sessionId
-           {:sessionUpdate "agent_message_chunk"
-            :content       {:type "text" :text "hi there"}}))
-        {})
-      (acp-errors/acp-error acp-errors/err-method))))
+        (on-update (events/text-event "agent_message" (str "echo: " text)))
+        {:stopReason "end_turn"}))))
 
-(defrecord NoLoadHandler []
-  acp/AgentHandler
-  (handle-initialize [_ _ {:keys [protocolVersion]}]
-    {:protocolVersion (long (or protocolVersion acp/protocol-version-2))
-     :info            {:name "no-load" :version "0"}
-     :capabilities    {}})
-
-  (handle-session-new [_ _ {:keys [cwd]}]
-    {:sessionId "no-load" :cwd cwd}))
+(defn- with-stub-agent
+  "Run `f` with the agent's session and prompt operations stubbed."
+  [f]
+  (with-redefs [agent/new-session! (fn [_ {:keys [cwd]}]
+                                     {:sessionId "stub-session" :cwd cwd})
+                agent/load-session! stub-load-session!
+                agent/list-sessions! (fn [_ _]
+                                       {:sessions
+                                        [{:sessionId "older"
+                                          :cwd       "/tmp"
+                                          :createdAt "2024-01-01T00:00:00Z"}
+                                         {:sessionId "newest"
+                                          :cwd       "/tmp"
+                                          :createdAt "2024-02-01T00:00:00Z"}]})
+                agent/run-prompt! stub-run-prompt!]
+    (f)))
 
 (use-fixtures :once quiet-logs)
 (use-fixtures :once instrument)
@@ -105,9 +95,10 @@
     ;; the runner back where it was so later tests do not inherit it.
     (let [test-ns *ns*]
       (try
-        (with-redefs [repl/current-agent (->StubHandler)]
-          (alter-var-root #'repl/current-session (constantly nil))
-          (f))
+        (with-stub-agent
+          #(do
+             (alter-var-root #'repl/current-session (constantly nil))
+             (f)))
         (finally
           (repl/disconnect!)
           (alter-var-root #'repl/current-session (constantly nil))
@@ -175,6 +166,47 @@
       (is (= "sessions.stub-session" (str (ns-name *ns*))))
       (is (= session (var-get (get (ns-map ns) 'current-session))))
       (is (= "stub-session" (repl/current-session-id))))))
+
+(deftest new!-builds-the-session-namespace-through-namespace-builder
+  (let [built (promise)
+        build repl/namespace-builder]
+    (with-redefs [repl/namespace-builder
+                  (fn [opts]
+                    (deliver built opts)
+                    (build opts))]
+      (let [session (repl/new! {:cwd "/tmp"})]
+        (is (= {:session session :cwd "/tmp"} @built))
+        (is (= "sessions.stub-session" (str (ns-name *ns*))))))))
+
+(deftest namespace-builder-accepts-options
+  (let [ns-sym  'sessions.clai-repl-test-builder
+        session {:sessionId "builder-test" :cwd "/tmp"}]
+    (remove-ns ns-sym)
+    (try
+      (let [ns (repl/namespace-builder {:session   session
+                                        :namespace ns-sym
+                                        :cwd       "/"})]
+        (is (= ns-sym (ns-name ns)))
+        (is (= (assoc session :cwd "/")
+               (var-get (get (ns-interns ns) 'current-session))))
+        (is (= "/" (var-get (get (ns-interns ns) '*cwd*)))))
+      (finally
+        (remove-ns ns-sym)))))
+
+(deftest namespace-builder-can-seed-from-another-namespace
+  (let [ns-sym     'sessions.clai-repl-test-seeded
+        source-sym 'clai.repl-test-seed-source]
+    (remove-ns ns-sym)
+    (try
+      (let [source-var (intern (create-ns source-sym) 'seeded-value 42)
+            ns         (repl/namespace-builder
+                        {:session   {:sessionId "seeded"}
+                         :namespace ns-sym
+                         :seed-from source-sym})]
+        (is (identical? source-var (get (ns-map ns) 'seeded-value))))
+      (finally
+        (remove-ns ns-sym)
+        (remove-ns source-sym)))))
 
 (deftest session-namespaces-are-seeded-from-user
   (let [user-ns    (the-ns 'user)
@@ -259,8 +291,8 @@
   (repl/new!)
   (let [[result out] (with-cli-out
                       #(repl/prompt!
-                        [{:type "text" :text "one"}
-                         {:type "text" :text "two"}]))]
+                        [{:type "text" :content "one"}
+                         {:type "text" :content "two"}]))]
     (is (= {:stopReason "end_turn"} result))
     (is (str/includes? out "echo: one"))))
 
@@ -284,15 +316,14 @@
             "  [tool] a tool"]
            (str/split-lines out)))))
 
-(deftest prompt!-throws-on-an-agent-error
+(deftest prompt!-propagates-agent-errors
   (repl/new!)
   (let [ex (try
              (binding [*out* (StringWriter.)] (repl/prompt! "fail"))
              nil
              (catch clojure.lang.ExceptionInfo e e))]
     (is (some? ex))
-    (is (str/includes? (ex-message ex) "boom"))
-    (is (= acp-errors/err-internal (-> ex ex-data :acp/error :code)))))
+    (is (str/includes? (ex-message ex) "boom"))))
 
 (deftest prompt!-requires-a-session
   (is (thrown? clojure.lang.ExceptionInfo (repl/prompt! "ping"))))
@@ -326,7 +357,7 @@
   ;; Read the global current-session rather than the session namespace's copy.
   (let [[result out] (binding [*ns* (the-ns 'user)]
                        (with-cli-out #(repl/history!)))]
-    (is (= {} result))
+    (is (= "with-history" (:sessionId result)))
     (is (= ["you> hello" "clai> hi there"] (str/split-lines out)))))
 
 (deftest history!-accepts-an-explicit-session-id
@@ -336,16 +367,6 @@
 
 (deftest history!-requires-a-session
   (is (thrown? clojure.lang.ExceptionInfo (repl/history!))))
-
-(deftest history!-requires-load-session-support
-  (with-redefs [repl/current-agent (->NoLoadHandler)]
-    (repl/new!)
-    (let [ex (try
-               (binding [*out* (StringWriter.)] (repl/history!))
-               nil
-               (catch clojure.lang.ExceptionInfo e e))]
-      (is (some? ex))
-      (is (true? (:clai/no-history (ex-data ex)))))))
 
 ;; ---------------------------------------------------------------------------
 ;; disconnect!

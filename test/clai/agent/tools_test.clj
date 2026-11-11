@@ -1,6 +1,7 @@
 (ns clai.agent.tools-test
   "Tests for the immutable, per-agent tool registry."
-  (:require [clai.agent.tools :as tools]
+  (:require [clai.agent.tools.invoke :as invoke]
+            [clai.agent.tools.registry :as registry]
             [clai.test-support :refer [quiet-logs]]
             [clojure.test :refer :all]))
 
@@ -16,52 +17,52 @@
                         :parameters {:type "object"}}}})
 
 (deftest make-registry-builds-by-id
-  (let [registry (tools/make-registry [(tool "a" "A") (tool "b" "B")])]
-    (is (= #{"a" "b"} (set (tools/tool-ids registry))))
+  (let [registry (registry/make-registry [(tool "a" "A") (tool "b" "B")])]
+    (is (= #{"a" "b"} (set (registry/tool-ids registry))))
     (is (= "a" (get-in registry ["a" :id])))
     (is (= "b" (get-in registry ["b" :id])))))
 
 (deftest register-and-unregister-are-immutable
-  (let [base     (tools/make-registry [(tool "a" "A")])
-        added    (tools/register-tool base (tool "b" "B"))
-        removed  (tools/unregister-tool added "a")]
-    (is (= #{"a"} (set (tools/tool-ids base)))
+  (let [base     (registry/make-registry [(tool "a" "A")])
+        added    (registry/register-tool base (tool "b" "B"))
+        removed  (registry/unregister-tool added "a")]
+    (is (= #{"a"} (set (registry/tool-ids base)))
         "registering must not mutate the original registry")
-    (is (= #{"a" "b"} (set (tools/tool-ids added))))
-    (is (= #{"b"} (set (tools/tool-ids removed))))
-    (is (= #{"a" "b"} (set (tools/tool-ids added)))
+    (is (= #{"a" "b"} (set (registry/tool-ids added))))
+    (is (= #{"b"} (set (registry/tool-ids removed))))
+    (is (= #{"a" "b"} (set (registry/tool-ids added)))
         "unregistering must not mutate the original registry")))
 
 (deftest select-tools-narrows-a-registry
-  (let [registry (tools/make-registry [(tool "a" "A")
-                                       (tool "b" "B")
-                                       (tool "c" "C")])]
-    (is (= #{"a" "b" "c"} (set (tools/tool-ids (tools/select-tools registry nil)))))
-    (is (= #{"b" "a"} (set (tools/tool-ids (tools/select-tools registry ["b" "a"])))))
-    (is (= #{} (set (tools/tool-ids (tools/select-tools registry [])))))
-    (is (= #{"b"} (set (tools/tool-ids (tools/select-tools registry ["b" "missing"])))))))
+  (let [registry (registry/make-registry [(tool "a" "A")
+                                           (tool "b" "B")
+                                           (tool "c" "C")])]
+    (is (= #{"a" "b" "c"} (set (registry/tool-ids (registry/select-tools registry nil)))))
+    (is (= #{"b" "a"} (set (registry/tool-ids (registry/select-tools registry ["b" "a"])))))
+    (is (= #{} (set (registry/tool-ids (registry/select-tools registry [])))))
+    (is (= #{"b"} (set (registry/tool-ids (registry/select-tools registry ["b" "missing"])))))))
 
 (deftest specs-for-preserves-requested-order
-  (let [registry (tools/make-registry [(tool "a" "A")
-                                       (tool "b" "B")
-                                       (tool "c" "C")])]
+  (let [registry (registry/make-registry [(tool "a" "A")
+                                           (tool "b" "B")
+                                           (tool "c" "C")])]
     (is (= ["c" "a"]
            (mapv #(get-in % [:function :name])
-                 (tools/specs-for registry ["c" "missing" "a"]))))))
+                 (registry/specs-for registry ["c" "missing" "a"]))))))
 
 (deftest invoke-uses-the-supplied-registry
-  (let [registry-a (tools/make-registry [(tool "same" "from-a")])
-        registry-b (tools/make-registry [(tool "same" "from-b")])]
-    (is (= "from-a" (tools/invoke registry-a "same" {} {})))
-    (is (= "from-b" (tools/invoke registry-b "same" {} {})))
+  (let [registry-a (registry/make-registry [(tool "same" "from-a")])
+        registry-b (registry/make-registry [(tool "same" "from-b")])]
+    (is (= "from-a" (invoke/invoke registry-a "same" {} {})))
+    (is (= "from-b" (invoke/invoke registry-b "same" {} {})))
     (is (= "Error: unknown tool 'same'"
-           (tools/invoke (tools/make-registry []) "same" {} {}))
+           (invoke/invoke (registry/make-registry []) "same" {} {}))
         "a tool in another agent's registry is not visible")))
 
 (deftest execute-calls-uses-the-supplied-registry
-  (let [registry (tools/make-registry [(tool "echo" "ok")])
+  (let [registry (registry/make-registry [(tool "echo" "ok")])
         calls    [{:id "1"
                    :function {:name "echo"
                               :arguments "{\"text\":\"hi\"}"}}]]
     (is (= [{:role "tool" :content "ok" :name "echo" :tool_call_id "1"}]
-           (tools/execute-calls registry calls {})))))
+           (invoke/execute-calls registry calls {})))))

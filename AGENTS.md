@@ -6,6 +6,11 @@ Malli schema types should start with an upper case letter, and all functions sho
 
 All def's and defn's should have comments explaining what they do.
 
+If you see code that can be simplified, please do so while still doing whatever task was asked of you.
+That includes partial rewrites, but try not to refactor more than 3 namespaces at once (finish refactoring until unit tests work if you've already started).
+
+Don't worry about backwards compatibility.  There are no users.  Just write the code in the cleanest way that makes the most sense.
+
 ## Functionality Locations
 
 | Functionality | Location |
