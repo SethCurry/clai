@@ -1,11 +1,13 @@
 (ns clai.daemon.files
-  "Filesystem path completion for the web UI's `@` mentions.
+  "Filesystem browsing for the web UI: `@`-mention completion and the file
+  explorer.
 
   When the user types `@` in the prompt composer, the UI asks the daemon for
   the entries of the session's working directory and narrows them as the user
-  keeps typing. The daemon does the listing so the browser never needs direct
-  access to the filesystem, and so the paths it offers are exactly the ones
-  the agent can read.
+  keeps typing. The file explorer asks the same question without a prefix and
+  then asks [[read-file]] for the text of whatever the user clicks. The daemon
+  does the reading so the browser never needs direct access to the filesystem,
+  and so the paths it offers are exactly the ones the agent can read.
 
   [[list-entries]] treats the typed text as a path relative to the session's
   working directory: everything before the last `/` names the directory to
@@ -21,7 +23,8 @@
       ;;                  :type \"directory\"}]}"
   (:require [clojure.java.io :as io]
             [clojure.string :as str])
-  (:import [java.io File]))
+  (:import [java.io File]
+           [java.util Arrays]))
 
 ;; ---------------------------------------------------------------------------
 ;; Schemas
@@ -35,12 +38,15 @@
 
 (def CompletionRequest
   "Options for [[list-entries]]. `:root` is the directory the user may browse
-  (normally the session's `cwd`); `:path` is the text typed after `@`; and
-  `:limit` caps the number of returned entries."
+  (normally the session's `cwd`); `:path` is the text typed after `@`, or the
+  directory to list when it ends in `/`; `:limit` caps the number of returned
+  entries; and `:include-hidden?` lists dotfiles unconditionally, which the
+  file explorer does."
   [:map
    [:root [:maybe :string]]
    [:path {:optional true} [:maybe :string]]
-   [:limit {:optional true} [:maybe [:int {:min 1 :max 500}]]]])
+   [:limit {:optional true} [:maybe [:int {:min 1 :max 1000}]]]
+   [:include-hidden? {:optional true} [:maybe :boolean]]])
 
 (def Entry
   "One completion candidate. `:path` is relative to the request's `:root` and
@@ -59,6 +65,24 @@
    [:prefix :string]
    [:entries [:vector Entry]]])
 
+(def ReadRequest
+  "Options for [[read-file]]. `:root` is the directory the caller may read from
+  (normally the session's `cwd`) and `:path` is the file path relative to it."
+  [:map
+   [:root [:maybe :string]]
+   [:path {:optional true} [:maybe :string]]])
+
+(def FileContent
+  "One file, as the file explorer previews it. `:content` holds at most
+  [[MaxPreviewBytes]] of text and is empty when `:binary` is true, because
+  those bytes were not text worth showing."
+  [:map
+   [:path :string]
+   [:name :string]
+   [:content :string]
+   [:truncated :boolean]
+   [:binary :boolean]])
+
 ;; ---------------------------------------------------------------------------
 ;; Path handling
 ;; ---------------------------------------------------------------------------
@@ -75,13 +99,13 @@
   (.startsWith (.toPath file) (.toPath root)))
 
 (defn- resolve-in-root
-  "Resolve relative `directory` against `root`, returning a canonical `File`.
+  "Resolve relative `path` against `root`, returning a canonical `File`.
 
   Returns nil when the result escapes `root` (through `..` or a symlink), so
-  the endpoint can never list anything outside the session's working
+  neither listing nor reading can ever reach outside the session's working
   directory."
-  [^File root directory]
-  (let [resolved (.getCanonicalFile (io/file root ^String directory))]
+  [^File root path]
+  (let [resolved (.getCanonicalFile (io/file root ^String path))]
     (when (within-root? root resolved)
       resolved)))
 
@@ -128,10 +152,17 @@
      :type (if directory? "directory" "file")}))
 
 (defn- hidden?
-  "True when `file` is a dotfile or dot-directory, which completions offer only
-  when the user has already typed a leading `.`."
+  "True when `file` is a dotfile or dot-directory."
   [^File file]
   (str/starts-with? (.getName file) "."))
+
+(defn- offered?
+  "True when `file` belongs in a listing: dotfiles are left out unless the
+  request asks for them or the user has already typed a leading `.`."
+  [prefix include-hidden? ^File file]
+  (or include-hidden?
+      (not (hidden? file))
+      (str/starts-with? prefix ".")))
 
 (defn- matches-prefix?
   "True when `entry`'s name starts with `prefix`, ignoring case."
@@ -144,18 +175,18 @@
   [(if (= type "directory") 0 1) (str/lower-case name) name])
 
 ;; ---------------------------------------------------------------------------
-;; Completion
+;; Listing
 ;; ---------------------------------------------------------------------------
 
 (defn list-entries
   "List completion entries under `:root` for the text the user typed after
-  `@`.
+  `@`, or for the directory named by a `:path` that ends in `/`.
 
   Returns a [[CompletionResult]]; a missing root, a directory that does not
   exist, or a path escaping the root all yield an empty `:entries` vector
   rather than an error, so the UI can keep typing."
   {:malli/schema [:-> CompletionRequest CompletionResult]}
-  [{:keys [root path limit]}]
+  [{:keys [root path limit include-hidden?]}]
   (let [{:keys [directory prefix]} (split-path path)
         empty-result {:directory directory :prefix prefix :entries []}
         root-file    (when-not (str/blank? root)
@@ -170,9 +201,62 @@
       (assoc empty-result
              :entries (->> (.listFiles dir)
                            (remove nil?)
-                           (remove #(and (hidden? %) (not (str/starts-with? prefix "."))))
+                           (filter #(offered? prefix include-hidden? %))
                            (map #(entry-for root-file %))
                            (filter #(matches-prefix? prefix %))
                            (sort-by sort-key)
                            (take (or limit DefaultLimit))
                            vec)))))
+
+;; ---------------------------------------------------------------------------
+;; File preview
+;; ---------------------------------------------------------------------------
+
+(def MaxPreviewBytes
+  "The largest file, in bytes, that [[read-file]] decodes. Anything longer is
+  truncated, so a log or an archive opened by mistake cannot stall the
+  browser."
+  (* 128 1024))
+
+(defn- binary-bytes?
+  "True when `bytes` contain a NUL byte, which is the cheapest sign that a
+  file is not text."
+  [^bytes bytes]
+  (loop [index 0]
+    (cond
+      (= index (alength bytes))  false
+      (zero? (aget bytes index)) true
+      :else                      (recur (inc index)))))
+
+(defn- read-preview
+  "Read at most [[MaxPreviewBytes]] of `file`, returning the bytes and whether
+  the file continues past them."
+  [^File file]
+  (with-open [in (io/input-stream file)]
+    (let [buffer (byte-array MaxPreviewBytes)
+          count  (.readNBytes in buffer 0 MaxPreviewBytes)]
+      {:bytes     (if (= count MaxPreviewBytes)
+                    buffer
+                    (Arrays/copyOf buffer (int count)))
+       :truncated (pos? (.read in))})))
+
+(defn read-file
+  "Read one file under `:root` for the file explorer.
+
+  Returns a [[FileContent]] for a readable regular file, and nil when the path
+  is blank, does not name a file, or escapes `:root`."
+  {:malli/schema [:-> ReadRequest [:maybe FileContent]]}
+  [{:keys [root path]}]
+  (let [path      (str/replace (normalize-path path) #"/+$" "")
+        root-file (when-not (str/blank? root)
+                    (canonical-dir (io/file root)))
+        file      (when (and root-file (not (str/blank? path)))
+                    (resolve-in-root root-file path))]
+    (when (and file (.isFile file) (.canRead file))
+      (let [{:keys [bytes truncated]} (read-preview file)
+            binary                    (binary-bytes? bytes)]
+        {:path      path
+         :name      (.getName file)
+         :content   (if binary "" (String. ^bytes bytes "UTF-8"))
+         :truncated truncated
+         :binary    binary}))))

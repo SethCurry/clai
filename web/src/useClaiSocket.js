@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { responseBody } from './api.js'
 import { sessionNamespace } from './sessionNamespace.js'
 
 // Reconnect quickly at first, then back off so a daemon restart is picked up
@@ -46,16 +47,6 @@ function appendEvalResponse(entries, requestId, response) {
     responses: [...(next[index].responses ?? []), response],
   }
   return next
-}
-
-async function responseBody(response) {
-  const text = await response.text()
-  if (!text) return {}
-  try {
-    return JSON.parse(text)
-  } catch {
-    return {}
-  }
 }
 
 function sortConfigs(configs) {

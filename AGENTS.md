@@ -25,9 +25,10 @@ its nice for a user to use from the REPL.
 | PostgreSQL client           | ./src/clai/daemon/postgres.clj           |
 | Session storage             | ./src/clai/daemon/postgres/sessions.clj  |
 | Git repo/worktree storage   | ./src/clai/daemon/postgres/git.clj       |
-| `@`-mention file completion | ./src/clai/daemon/files.clj              |
+| File listing/preview (web)  | ./src/clai/daemon/files.clj              |
 | Storage DDL                 | ./schema/schema.sql                      |
 | Web UI                      | ./web                                    |
+| Web file explorer           | ./web/src/components/FileExplorer.jsx    |
 
 Make sure to maintain files like this that list major file and subdirectories and what they contain.
 

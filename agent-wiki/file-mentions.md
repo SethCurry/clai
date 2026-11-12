@@ -47,6 +47,8 @@ list, and the popup says so.
 
 ## See also
 
+- [Browsing files in the web UI](file-explorer.md): the Files panel, which
+  shows the same directory as a tree and previews file contents.
 - [Plugins](plugins.md): add behavior to every prompt.
 - [Git repositories and worktrees](git-repositories.md): where worktrees live
   when you want a session pointed at a checkout.

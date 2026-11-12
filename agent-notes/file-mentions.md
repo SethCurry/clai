@@ -57,6 +57,11 @@ listing; the browser only renders it.
   `npm test` in `web/` (`node --test`). There is no browser test runner; the
   rest of the hook is exercised by hand.
 
+## See also
+
+- `agent-notes/file-explorer.md` -- the file explorer panel, which reuses
+  `clai.daemon.files` for browsing and previewing.
+
 ## Deliberately not done
 
 - No mention support in the Clojure REPL panel -- it is not a prompt.

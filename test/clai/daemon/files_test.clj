@@ -101,6 +101,14 @@
       (is (= [".hidden"] (names (files/list-entries {:root (str root)
                                                      :path "."})))))))
 
+(deftest the-files-endpoint-opts-into-hidden-entries-entirely
+  (with-tree
+    (fn [root]
+      (is (= ["docs" "src" ".hidden" "README.md"]
+             (names (files/list-entries {:root            (str root)
+                                         :path            ""
+                                         :include-hidden? true})))))))
+
 (deftest nested-directories-are-listed-with-relative-paths
   (with-tree
     (fn [root]
@@ -139,3 +147,47 @@
              (names (files/list-entries {:root (str root)
                                          :path ""
                                          :limit files/DefaultLimit})))))))
+
+;; ---------------------------------------------------------------------------
+;; File preview
+;; ---------------------------------------------------------------------------
+
+(deftest read-file-returns-the-text-of-a-file-below-the-root
+  (with-tree
+    (fn [root]
+      (spit (io/file root "src/app.clj") "(ns app)")
+      (is (= {:path       "src/app.clj"
+              :name       "app.clj"
+              :content    "(ns app)"
+              :truncated false
+              :binary    false}
+             (files/read-file {:root (str root) :path "src/app.clj"}))))))
+
+(deftest read-file-truncates-large-files
+  (with-tree
+    (fn [root]
+      (spit (io/file root "big.txt")
+            (apply str (repeat (+ files/MaxPreviewBytes 10) "a")))
+      (let [result (files/read-file {:root (str root) :path "big.txt"})]
+        (is (= files/MaxPreviewBytes (count (:content result))))
+        (is (true? (:truncated result)))))))
+
+(deftest read-file-does-not-preview-binary-files
+  (with-tree
+    (fn [root]
+      (with-open [out (io/output-stream (io/file root "blob.bin"))]
+        (.write out (byte-array [1 2 0 3])))
+      (is (= {:path       "blob.bin"
+              :name       "blob.bin"
+              :content    ""
+              :truncated false
+              :binary    true}
+             (files/read-file {:root (str root) :path "blob.bin"}))))))
+
+(deftest read-file-refuses-paths-outside-the-root-and-non-files
+  (with-tree
+    (fn [root]
+      (doseq [path ["../etc/passwd" "/etc/passwd" "src" "src/" "nope.clj" "" nil]]
+        (is (nil? (files/read-file {:root (str root) :path path})) (pr-str path)))
+      (is (nil? (files/read-file {:root nil :path "README.md"})))
+      (is (nil? (files/read-file {:root "" :path "README.md"}))))))

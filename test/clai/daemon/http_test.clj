@@ -118,6 +118,26 @@
   [response]
   (json/parse-string (body-text response) true))
 
+(defn- with-temp-tree
+  "Create a temporary directory holding a small tree, call `f` with its
+  canonical `File`, and delete it afterwards.
+
+      README.md
+      .github/
+      src/app.clj"
+  [f]
+  (let [root (.toFile (Files/createTempDirectory
+                       "clai-explorer-" (make-array FileAttribute 0)))]
+    (try
+      (spit (io/file root "README.md") "# hi")
+      (io/make-parents (io/file root "src/app.clj"))
+      (spit (io/file root "src/app.clj") "(ns app)")
+      (io/make-parents (io/file root ".github/workflows/ci.yml"))
+      (f (.getCanonicalFile root))
+      (finally
+        (doseq [file (reverse (file-seq root))]
+          (io/delete-file file true))))))
+
 (defn- wait-until
   "Wait up to two seconds for `pred` to become truthy."
   [pred]
@@ -474,3 +494,58 @@
       (finally
         (doseq [file (reverse (file-seq root))]
           (io/delete-file file true))))))
+
+(deftest session-files-can-be-listed-and-previewed
+  (let [store (atom {})]
+    (with-temp-tree
+      (fn [root]
+        (with-fake-agent store
+          (fn []
+            (let [handler (http/handler (state store))
+                  id      (:sessionId (new-session store (str root)))]
+
+              (testing "a listing includes dotfiles, directories first"
+                (let [response (handler (request :get
+                                                 (str "/api/sessions/" id
+                                                      "/files?path=")))]
+                  (is (= 200 (:status response)))
+                  (is (= {:directory ""
+                          :prefix    ""
+                          :entries   [{:name ".github"
+                                       :path ".github/"
+                                       :type "directory"}
+                                      {:name "src"
+                                       :path "src/"
+                                       :type "directory"}
+                                      {:name "README.md"
+                                       :path "README.md"
+                                       :type "file"}]}
+                         (response-body response)))))
+
+              (testing "a nested directory is listed by its relative path"
+                (is (= [{:name "app.clj" :path "src/app.clj" :type "file"}]
+                       (:entries (response-body
+                                  (handler (request :get
+                                                    (str "/api/sessions/" id
+                                                         "/files?path=src/"))))))))
+
+              (testing "a file's text is returned for the preview"
+                (is (= {:path       "src/app.clj"
+                        :name       "app.clj"
+                        :content    "(ns app)"
+                        :truncated false
+                        :binary    false}
+                       (response-body
+                        (handler (request :get
+                                          (str "/api/sessions/" id
+                                               "/file?path=src/app.clj")))))))
+
+              (testing "missing files and sessions are 404s"
+                (is (= 404 (:status (handler (request :get
+                                                       (str "/api/sessions/" id
+                                                            "/file?path=nope.clj"))))))
+                (is (= 404 (:status (handler (request :get
+                                                       "/api/sessions/nope/files?path=")))))
+                (is (= 404 (:status (handler
+                                     (request :get
+                                              "/api/sessions/nope/file?path=a.txt")))))))))))))

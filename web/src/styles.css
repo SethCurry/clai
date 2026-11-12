@@ -173,6 +173,14 @@ pre {
   grid-template-columns: 280px minmax(0, 1fr) 420px;
 }
 
+.layout--with-files {
+  grid-template-columns: 280px minmax(0, 1fr) 300px;
+}
+
+.layout--with-repl.layout--with-files {
+  grid-template-columns: 280px minmax(0, 1fr) 400px 300px;
+}
+
 .layout > * {
   min-width: 0;
   min-height: 0;
@@ -182,7 +190,8 @@ pre {
 
 .sidebar,
 .chat,
-.repl {
+.repl,
+.explorer {
   border: 1px solid var(--border);
   border-radius: 15px;
   background: linear-gradient(180deg, rgba(23, 28, 38, 0.88), rgba(15, 18, 25, 0.94));
@@ -498,6 +507,12 @@ pre {
   min-height: 0;
   padding: 22px;
   overflow-y: auto;
+}
+
+/* Timeline entries keep their natural height so long content scrolls in the
+   pane instead of being squashed into an illegible strip by flex-shrink. */
+.timeline > * {
+  flex: 0 0 auto;
 }
 
 .timeline__empty {
@@ -1114,6 +1129,11 @@ pre {
   overflow-y: auto;
 }
 
+/* Same as the timeline: entries scroll in the pane instead of shrinking. */
+.repl__output > * {
+  flex: 0 0 auto;
+}
+
 .repl__empty {
   margin: 6px 2px;
   color: var(--muted);
@@ -1232,6 +1252,172 @@ pre {
 .repl__footer {
   color: var(--muted-2);
   font-size: 0.68rem;
+}
+
+/* --------------------------------------------------------------- explorer */
+
+.explorer {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.explorer__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.explorer__heading {
+  min-width: 0;
+}
+
+.explorer__heading h2 {
+  margin: 0;
+  font-size: 0.92rem;
+  font-weight: 650;
+}
+
+.explorer__heading p {
+  margin: 3px 0 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.explorer__actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 6px;
+}
+
+.explorer__tree {
+  flex: 1;
+  min-height: 0;
+  padding: 8px 6px;
+  overflow: auto;
+}
+
+.explorer__list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.explorer__item {
+  margin: 0;
+}
+
+.explorer__row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  width: 100%;
+  padding: 4px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  text-align: left;
+  cursor: pointer;
+}
+
+.explorer__row:hover {
+  background: var(--panel);
+}
+
+.explorer__row:focus-visible {
+  outline: 1px solid var(--accent-2);
+  outline-offset: -1px;
+}
+
+.explorer__row--active {
+  background: rgba(56, 189, 248, 0.14);
+  color: var(--accent);
+}
+
+.explorer__icon {
+  flex: 0 0 auto;
+  width: 9px;
+  color: var(--muted-2);
+  font-size: 0.7rem;
+}
+
+.explorer__label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.explorer__note {
+  margin: 2px 0;
+  padding: 4px 8px;
+  color: var(--muted);
+  font-size: 0.74rem;
+  line-height: 1.5;
+}
+
+.explorer__note--error {
+  color: #fca5a5;
+}
+
+.explorer__preview {
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  max-height: 46%;
+  border-top: 1px solid var(--border);
+}
+
+.explorer__preview-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.explorer__preview-name {
+  overflow: hidden;
+  font-family: var(--mono);
+  font-size: 0.74rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.explorer__close {
+  flex: 0 0 auto;
+  padding: 0 4px;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  font-size: 0.95rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.explorer__close:hover {
+  color: var(--text);
+}
+
+.explorer__content {
+  flex: 1;
+  min-height: 0;
+  margin: 0;
+  padding: 10px 12px;
+  overflow: auto;
+  font-size: 0.73rem;
+  line-height: 1.55;
+  white-space: pre;
 }
 
 /* ------------------------------------------------------------------- empty */
@@ -1624,12 +1810,21 @@ pre {
 
 /* ------------------------------------------------------------- responsive */
 
+@media (max-width: 1400px) {
+  .layout--with-repl.layout--with-files {
+    grid-template-columns: 250px minmax(0, 1fr) 340px 260px;
+  }
+}
+
 @media (max-width: 1180px) {
-  .layout--with-repl {
+  .layout--with-repl,
+  .layout--with-files,
+  .layout--with-repl.layout--with-files {
     grid-template-columns: 250px minmax(0, 1fr);
   }
 
-  .layout--with-repl .repl {
+  .layout--with-repl .repl,
+  .layout--with-files .explorer {
     grid-column: 1 / -1;
     min-height: 320px;
     max-height: 42vh;
@@ -1661,7 +1856,9 @@ pre {
   }
 
   .layout,
-  .layout--with-repl {
+  .layout--with-repl,
+  .layout--with-files,
+  .layout--with-repl.layout--with-files {
     grid-template-columns: 1fr;
     gap: 10px;
     padding: 10px;
@@ -1677,9 +1874,19 @@ pre {
   }
 
   .layout--with-repl .repl,
-  .repl {
+  .layout--with-files .explorer,
+  .repl,
+  .explorer {
     min-height: 440px;
     max-height: none;
+  }
+
+  .explorer__preview {
+    max-height: none;
+  }
+
+  .explorer__content {
+    max-height: 320px;
   }
 
   .modal-backdrop {

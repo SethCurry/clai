@@ -51,6 +51,10 @@ The React app in `web/` talks to the daemon over a WebSocket (`/ws`) for chat
 streaming and for evaluating Clojure in the running JVM through nREPL. The
 daemon also exposes a small JSON API under `/api`.
 
+Besides the chat and the session sidebar, the UI has a Clojure REPL panel and
+a read-only Files panel that browses the selected session's working directory.
+Each panel can be hidden from the top bar.
+
 Build the UI and start everything with:
 
 ```sh

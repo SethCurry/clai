@@ -2,7 +2,7 @@
 
 The browser UI for clai. It is a Vite + React app that talks to
 `clai.daemon.http` over `/ws`, with a few JSON endpoints under `/api` for
-health checks and non-streaming session access.
+health checks, non-streaming session access, and filesystem reads.
 
 ## Scripts
 
@@ -57,6 +57,8 @@ PUT    /api/agent-configs/:id
 DELETE /api/agent-configs/:id
 GET    /api/plugins
 GET    /api/sessions/:id/completions?path=src/cl&limit=50
+GET    /api/sessions/:id/files?path=src/&limit=500
+GET    /api/sessions/:id/file?path=src/clai/core.clj
 ```
 
 Request and response bodies use the same shape as the `agent-config` rows,
@@ -74,6 +76,23 @@ ends in `/` so the UI can keep descending. Paths that escape the session's
 
 ```json
 {"directory":"src/clai","prefix":"da","entries":[{"name":"daemon","path":"src/clai/daemon/","type":"directory"}]}
+```
+
+The file explorer uses two more endpoints, both scoped to the session's `cwd`
+and both refusing paths that escape it:
+
+`/files` lists one directory -- a `path` ending in `/` lists all of it -- and
+includes dotfiles, which completions hides until you type a `.`:
+
+```json
+{"directory":"src","prefix":"","entries":[{"name":"app.clj","path":"src/app.clj","type":"file"}]}
+```
+
+`/file` reads one file for the preview. `content` holds at most 128 KiB, and a
+file that looks binary comes back with `binary` true and an empty `content`:
+
+```json
+{"path":"src/app.clj","name":"app.clj","content":"(ns app)","truncated":false,"binary":false}
 ```
 
 Server messages:
@@ -113,5 +132,11 @@ card until the status becomes `completed` or `failed`.
   it builds on, and `src/components/PathAutocomplete.jsx` renders the list.
 - `src/components/ReplPanel.jsx` evaluates Clojure through the daemon's nREPL
   connection, defaulting to the selected session's `sessions.<id>` namespace.
+- `src/components/FileExplorer.jsx` is the Files panel beside the REPL. It
+  lists the selected session's `cwd` lazily -- a folder is fetched when it is
+  first opened -- and previews one file's text at a time.
+  `src/fileExplorer.js` holds the pure helpers it renders with, including
+  `visibleRows`, which flattens the caching tree into rows.
+- `src/api.js` holds the shared `fetch` body reader.
 - `src/sessionNamespace.js` derives that namespace from a session id, matching
   `clai.repl/session-ns`.

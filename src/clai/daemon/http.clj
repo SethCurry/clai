@@ -5,8 +5,10 @@
   serves two things from the same JVM as the agent:
 
     * a JSON HTTP API for sessions, agent configurations, plugins, and
-      session-scoped file completion (`/api/sessions`, `/api/agent-configs`,
-      `/api/plugins`, `/api/sessions/<id>/completions`, `/api/health`), and
+      session-scoped filesystem reads (`/api/sessions`, `/api/agent-configs`,
+      `/api/plugins`, `/api/sessions/<id>/completions`,
+      `/api/sessions/<id>/files`, `/api/sessions/<id>/file`, `/api/health`),
+      and
     * a WebSocket at `/ws` that streams agent updates and forwards Clojure
       evaluations to the running nREPL server.
 
@@ -142,6 +144,11 @@
       (throw (ex-info "Request body must be a JSON object"
                       {:body value})))))
 
+(defn- query-params
+  "Decode `request`'s query string into a `{\"key\" \"value\"}` map."
+  [request]
+  (codec/form-decode (or (:query-string request) "")))
+
 (defn- parse-limit
   "Parse a `limit` query parameter, returning nil when it is absent or not a
   number so [[files/list-entries]] falls back to its default."
@@ -190,13 +197,32 @@
   (:plugins (agent/list-plugins! agent {})))
 
 (defn- completions
-  "Resolve `request`'s `path` and `limit` query parameters into filesystem
+  "Resolve `request`'s `path` and `limit` query parameters into `@`-mention
   completion entries relative to `cwd`."
   [cwd request]
-  (let [params (codec/form-decode (or (:query-string request) ""))]
+  (let [{:strs [path limit]} (query-params request)]
     (files/list-entries {:root  cwd
-                         :path  (get params "path")
-                         :limit (parse-limit (get params "limit"))})))
+                         :path  path
+                         :limit (parse-limit limit)})))
+
+(defn- directory-listing
+  "Resolve `request`'s `path` and `limit` query parameters into the directory
+  listing the file explorer shows.
+
+  Unlike [[completions]] this always lists dotfiles: an explorer that hid
+  `.github` or `.clai` would be lying about the tree."
+  [cwd request]
+  (let [{:strs [path limit]} (query-params request)]
+    (files/list-entries {:root            cwd
+                         :path            path
+                         :limit           (parse-limit limit)
+                         :include-hidden? true})))
+
+(defn- file-preview
+  "Read the file named by `request`'s `path` query parameter, relative to
+  `cwd`. Returns nil when `cwd` holds no readable file at that path."
+  [cwd request]
+  (files/read-file {:root cwd :path (get (query-params request) "path")}))
 
 (defn- update-agent-config-from-request!
   "Update configuration `config-id` from the JSON request/body `config`."
@@ -478,6 +504,18 @@
   endpoint for a session's working directory."
   #"^/api/sessions/([^/]+)/completions$")
 
+(def ^:private session-files-path
+  "Regex matching `/api/sessions/<id>/files`, the file explorer's directory
+  listing endpoint. `?path=` names the directory, `/`-terminated so the whole
+  directory is listed."
+  #"^/api/sessions/([^/]+)/files$")
+
+(def ^:private session-file-path
+  "Regex matching `/api/sessions/<id>/file`, the file explorer's preview
+  endpoint. `?path=` names one file, relative to the session's working
+  directory."
+  #"^/api/sessions/([^/]+)/file$")
+
 (def ^:private static-index
   "The file served for `/` and client-side routes."
   "index.html")
@@ -595,6 +633,20 @@
       (let [session-id (second (re-matches session-completions-path uri))]
         (if-let [cwd (agent/session-cwd! agent {:sessionId session-id})]
           (json-response 200 (completions cwd request))
+          (json-response 404 {:error (str "No session " session-id)})))
+
+      (and (= method :get) (re-matches session-files-path uri))
+      (let [session-id (second (re-matches session-files-path uri))]
+        (if-let [cwd (agent/session-cwd! agent {:sessionId session-id})]
+          (json-response 200 (directory-listing cwd request))
+          (json-response 404 {:error (str "No session " session-id)})))
+
+      (and (= method :get) (re-matches session-file-path uri))
+      (let [session-id (second (re-matches session-file-path uri))]
+        (if-let [cwd (agent/session-cwd! agent {:sessionId session-id})]
+          (if-let [file (file-preview cwd request)]
+            (json-response 200 file)
+            (json-response 404 {:error "No such file"}))
           (json-response 404 {:error (str "No session " session-id)})))
 
       (and (= method :get) (re-matches session-path uri))

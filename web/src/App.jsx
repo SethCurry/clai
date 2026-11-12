@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { AgentConfigManager } from './components/AgentConfigManager.jsx'
 import { Chat } from './components/Chat.jsx'
 import { ErrorToasts } from './components/ErrorToasts.jsx'
+import { FileExplorer } from './components/FileExplorer.jsx'
 import { ReplPanel } from './components/ReplPanel.jsx'
 import { SessionSidebar } from './components/SessionSidebar.jsx'
 import { useClaiSocket } from './useClaiSocket.js'
@@ -36,13 +37,23 @@ function EmptyState({ hasSessions, onNewSession }) {
 
 /**
  * The web UI shell: connection status, the session sidebar, the chat timeline,
- * and the optional Clojure REPL panel.
+ * and the optional Clojure REPL and file explorer panels.
  */
 export default function App() {
   const clai = useClaiSocket()
   const [replOpen, setReplOpen] = useState(true)
+  const [filesOpen, setFilesOpen] = useState(true)
   const [configManagerOpen, setConfigManagerOpen] = useState(false)
   const statusLabel = STATUS_LABELS[clai.status] || clai.status
+  // The grid gains a column per open panel, so the classes have to agree with
+  // what is actually rendered.
+  const layoutClass = [
+    'layout',
+    replOpen && 'layout--with-repl',
+    filesOpen && 'layout--with-files',
+  ]
+    .filter(Boolean)
+    .join(' ')
 
   return (
     <div className="app">
@@ -71,10 +82,16 @@ export default function App() {
           >
             {replOpen ? 'Hide REPL' : 'Show REPL'}
           </button>
+          <button
+            className="button button--quiet"
+            onClick={() => setFilesOpen((open) => !open)}
+          >
+            {filesOpen ? 'Hide files' : 'Show files'}
+          </button>
         </div>
       </header>
 
-      <div className={`layout${replOpen ? ' layout--with-repl' : ''}`}>
+      <div className={layoutClass}>
         <SessionSidebar
           sessions={clai.sessions}
           currentSession={clai.currentSession}
@@ -114,6 +131,14 @@ export default function App() {
             onEval={clai.evalForm}
             onClear={clai.clearRepl}
             onClose={() => setReplOpen(false)}
+          />
+        )}
+
+        {filesOpen && (
+          <FileExplorer
+            key={clai.currentSession?.sessionId ?? 'no-session'}
+            currentSession={clai.currentSession}
+            onClose={() => setFilesOpen(false)}
           />
         )}
       </div>
