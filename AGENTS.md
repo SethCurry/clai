@@ -26,9 +26,11 @@ its nice for a user to use from the REPL.
 | Session storage             | ./src/clai/daemon/postgres/sessions.clj  |
 | Git repo/worktree storage   | ./src/clai/daemon/postgres/git.clj       |
 | File listing/preview (web)  | ./src/clai/daemon/files.clj              |
+| Clojure runtime introspection (web) | ./src/clai/daemon/namespaces.clj |
 | Storage DDL                 | ./schema/schema.sql                      |
 | Web UI                      | ./web                                    |
 | Web file explorer           | ./web/src/components/FileExplorer.jsx    |
+| Web namespace explorer      | ./web/src/components/ClojureExplorer.jsx |
 
 Make sure to maintain files like this that list major file and subdirectories and what they contain.
 

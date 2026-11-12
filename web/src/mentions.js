@@ -6,16 +6,16 @@
  * accepting a completion replaces the token rather than appending to it.
  */
 export function tokenAt(value, caret) {
-  if (typeof value !== 'string') return null
-  const position = Math.min(
-    Math.max(Number.isInteger(caret) ? caret : value.length, 0),
-    value.length,
-  )
-  let start = position
-  while (start > 0 && !/\s/.test(value[start - 1])) start -= 1
-  let end = position
-  while (end < value.length && !/\s/.test(value[end])) end += 1
-  return { start, end, text: value.slice(start, end) }
+    if (typeof value !== "string") return null;
+    const position = Math.min(
+        Math.max(Number.isInteger(caret) ? caret : value.length, 0),
+        value.length,
+    );
+    let start = position;
+    while (start > 0 && !/\s/.test(value[start - 1])) start -= 1;
+    let end = position;
+    while (end < value.length && !/\s/.test(value[end])) end += 1;
+    return { start, end, text: value.slice(start, end) };
 }
 
 /**
@@ -26,7 +26,7 @@ export function tokenAt(value, caret) {
  * empty when the user has just typed it.
  */
 export function mentionAt(value, caret) {
-  const token = tokenAt(value, caret)
-  if (!token || !token.text.startsWith('@')) return null
-  return { ...token, path: token.text.slice(1) }
+    const token = tokenAt(value, caret);
+    if (!token || !token.text.startsWith("@")) return null;
+    return { ...token, path: token.text.slice(1) };
 }

@@ -52,8 +52,10 @@ streaming and for evaluating Clojure in the running JVM through nREPL. The
 daemon also exposes a small JSON API under `/api`.
 
 Besides the chat and the session sidebar, the UI has a Clojure REPL panel and
-a read-only Files panel that browses the selected session's working directory.
-Each panel can be hidden from the top bar.
+a read-only explorer panel with two tabs: **Files** browses the selected
+session's working directory, and **Namespaces** browses the loaded Clojure
+namespaces, their Vars, docstrings, and source, starting from the session's own
+namespace. Each panel can be hidden from the top bar.
 
 Build the UI and start everything with:
 

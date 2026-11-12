@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { AgentConfigManager } from './components/AgentConfigManager.jsx'
 import { Chat } from './components/Chat.jsx'
 import { ErrorToasts } from './components/ErrorToasts.jsx'
-import { FileExplorer } from './components/FileExplorer.jsx'
+import { ExplorerPanel } from './components/ExplorerPanel.jsx'
 import { ReplPanel } from './components/ReplPanel.jsx'
 import { SessionSidebar } from './components/SessionSidebar.jsx'
 import { useClaiSocket } from './useClaiSocket.js'
@@ -37,12 +37,14 @@ function EmptyState({ hasSessions, onNewSession }) {
 
 /**
  * The web UI shell: connection status, the session sidebar, the chat timeline,
- * and the optional Clojure REPL and file explorer panels.
+ * and the optional Clojure REPL and explorer panels. The explorer shows either
+ * the session's files or the Clojure namespaces the REPL can use.
  */
 export default function App() {
   const clai = useClaiSocket()
   const [replOpen, setReplOpen] = useState(true)
-  const [filesOpen, setFilesOpen] = useState(true)
+  const [explorerOpen, setExplorerOpen] = useState(true)
+  const [explorerTab, setExplorerTab] = useState('files')
   const [configManagerOpen, setConfigManagerOpen] = useState(false)
   const statusLabel = STATUS_LABELS[clai.status] || clai.status
   // The grid gains a column per open panel, so the classes have to agree with
@@ -50,7 +52,7 @@ export default function App() {
   const layoutClass = [
     'layout',
     replOpen && 'layout--with-repl',
-    filesOpen && 'layout--with-files',
+    explorerOpen && 'layout--with-explorer',
   ]
     .filter(Boolean)
     .join(' ')
@@ -84,9 +86,9 @@ export default function App() {
           </button>
           <button
             className="button button--quiet"
-            onClick={() => setFilesOpen((open) => !open)}
+            onClick={() => setExplorerOpen((open) => !open)}
           >
-            {filesOpen ? 'Hide files' : 'Show files'}
+            {explorerOpen ? 'Hide explorer' : 'Show explorer'}
           </button>
         </div>
       </header>
@@ -134,11 +136,12 @@ export default function App() {
           />
         )}
 
-        {filesOpen && (
-          <FileExplorer
-            key={clai.currentSession?.sessionId ?? 'no-session'}
+        {explorerOpen && (
+          <ExplorerPanel
+            tab={explorerTab}
+            onTab={setExplorerTab}
             currentSession={clai.currentSession}
-            onClose={() => setFilesOpen(false)}
+            onClose={() => setExplorerOpen(false)}
           />
         )}
       </div>

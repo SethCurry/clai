@@ -130,10 +130,11 @@ function Preview({ preview }) {
  * reads the branches the user looks at. Clicking a file previews its text,
  * which the daemon truncates rather than streaming a whole large file.
  *
- * Mount this with a `key` of the session id, so switching sessions starts
- * from a fresh tree.
+ * This renders the body of the explorer panel; `ExplorerPanel` draws the tabs
+ * and the close button around it. Mount it with a `key` of the session id, so
+ * switching sessions starts from a fresh tree.
  */
-export function FileExplorer({ currentSession, onClose }) {
+export function FileExplorer({ currentSession }) {
   const sessionId = currentSession?.sessionId ?? null
   // Open directories. The working directory (`""`) starts open.
   const [expanded, setExpanded] = useState(() => new Set(['']))
@@ -242,10 +243,9 @@ export function FileExplorer({ currentSession, onClose }) {
   const previewPath = preview?.path ?? selected
 
   return (
-    <aside className="explorer">
+    <div className="explorer__panel">
       <header className="explorer__header">
         <div className="explorer__heading">
-          <h2>Files</h2>
           <p title={currentSession?.cwd}>
             {currentSession?.cwd || 'no session selected'}
           </p>
@@ -257,13 +257,6 @@ export function FileExplorer({ currentSession, onClose }) {
             disabled={!sessionId}
           >
             Refresh
-          </button>
-          <button
-            className="button button--quiet"
-            onClick={onClose}
-            aria-label="Close file explorer"
-          >
-            ×
           </button>
         </div>
       </header>
@@ -305,6 +298,6 @@ export function FileExplorer({ currentSession, onClose }) {
           <Preview preview={preview} />
         </section>
       )}
-    </aside>
+    </div>
   )
 }

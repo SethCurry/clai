@@ -2,7 +2,8 @@
 
 The browser UI for clai. It is a Vite + React app that talks to
 `clai.daemon.http` over `/ws`, with a few JSON endpoints under `/api` for
-health checks, non-streaming session access, and filesystem reads.
+health checks, non-streaming session access, filesystem reads, and Clojure
+namespace introspection.
 
 ## Scripts
 
@@ -59,6 +60,9 @@ GET    /api/plugins
 GET    /api/sessions/:id/completions?path=src/cl&limit=50
 GET    /api/sessions/:id/files?path=src/&limit=500
 GET    /api/sessions/:id/file?path=src/clai/core.clj
+GET    /api/namespaces
+GET    /api/namespaces/:namespace/vars
+GET    /api/namespaces/:namespace/var?name=join
 ```
 
 Request and response bodies use the same shape as the `agent-config` rows,
@@ -95,6 +99,36 @@ file that looks binary comes back with `binary` true and an empty `content`:
 {"path":"src/app.clj","name":"app.clj","content":"(ns app)","truncated":false,"binary":false}
 ```
 
+The namespace explorer browses the Clojure runtime of the daemon's own JVM,
+which is the one the REPL panel evaluates in:
+
+`/api/namespaces` lists every loaded namespace, sorted by name, with its
+docstring and how many public Vars it holds:
+
+```json
+{"namespaces":[{"name":"clojure.string","doc":"Clojure String utilities","varCount":37}]}
+```
+
+`/vars` lists one namespace's public Vars -- fetched when the namespace is
+opened in the tree -- and reports an unloaded namespace with `missing` true
+instead of failing:
+
+```json
+{"namespace":"clojure.string","doc":"Clojure String utilities","missing":false,
+ "vars":[{"name":"join","doc":"Returns a string of all elements in coll...","arglists":"[coll] [separator coll]","macro":false}]}
+```
+
+`/var?name=...` returns everything about one Var -- fetched when it is clicked.
+`source` and `value` are null when they cannot be read (a REPL definition has
+no file, a macro or an unbound Var has no interesting value):
+
+```json
+{"namespace":"clojure.string","name":"join","doc":"Returns a string...",
+ "arglists":"[coll] [separator coll]","malliSchema":null,"macro":false,
+ "private":false,"dynamic":false,"deprecated":null,"file":"clojure/string.clj",
+ "line":180,"source":"(defn ^String join ...)","value":null}
+```
+
 Server messages:
 
 ```json
@@ -119,8 +153,8 @@ card until the status becomes `completed` or `failed`.
 - `src/useClaiSocket.js` owns the WebSocket, reconnects, and reduces server
   messages into app state. Agent-configuration writes go through the HTTP API
   and update the same state.
-- `src/App.jsx` is the shell: top bar, sidebar, chat, optional REPL, and the
-  agent-configuration dialog.
+- `src/App.jsx` is the shell: top bar, sidebar, chat, optional REPL and
+  explorer panels, and the agent-configuration dialog.
 - `src/components/AgentConfigManager.jsx` creates, edits, and deletes stored
   agent configurations, including their active-plugin list.
 - `src/components/UpdateView.jsx` renders messages, thoughts, and tool calls.
@@ -132,11 +166,21 @@ card until the status becomes `completed` or `failed`.
   it builds on, and `src/components/PathAutocomplete.jsx` renders the list.
 - `src/components/ReplPanel.jsx` evaluates Clojure through the daemon's nREPL
   connection, defaulting to the selected session's `sessions.<id>` namespace.
-- `src/components/FileExplorer.jsx` is the Files panel beside the REPL. It
-  lists the selected session's `cwd` lazily -- a folder is fetched when it is
-  first opened -- and previews one file's text at a time.
-  `src/fileExplorer.js` holds the pure helpers it renders with, including
-  `visibleRows`, which flattens the caching tree into rows.
+- `src/components/ExplorerPanel.jsx` is the panel beside the REPL, with one
+  tab for files and one for Clojure namespaces. Only the selected tab is
+  mounted, and each explorer is keyed by the session id, so switching sessions
+  starts both trees fresh.
+- `src/components/FileExplorer.jsx` is the Files tab. It lists the selected
+  session's `cwd` lazily -- a folder is fetched when it is first opened -- and
+  previews one file's text at a time. `src/fileExplorer.js` holds the pure
+  helpers it renders with, including `visibleRows`, which flattens the caching
+  tree into rows.
+- `src/components/ClojureExplorer.jsx` is the Namespaces tab. It lists the
+  namespaces loaded in the daemon's JVM, the Vars of each namespace when it is
+  opened, and the docstring, argument lists, malli schema, source, and value of
+  a Var when it is clicked. The session's own namespace (`sessions.<id>`, or
+  `user` without a session) starts open. `src/cljExplorer.js` holds its pure
+  helpers, including `visibleRows` and `sortNamespaces`.
 - `src/api.js` holds the shared `fetch` body reader.
 - `src/sessionNamespace.js` derives that namespace from a session id, matching
   `clai.repl/session-ns`.

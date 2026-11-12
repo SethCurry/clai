@@ -495,6 +495,51 @@
         (doseq [file (reverse (file-seq root))]
           (io/delete-file file true))))))
 
+(deftest clojure-namespaces-can-be-browsed
+  (let [store (atom {})]
+    (with-fake-agent store
+      (fn []
+        (let [handler (http/handler (state store))]
+
+          (testing "the root listing holds the loaded namespaces"
+            (let [response (handler (request :get "/api/namespaces"))
+                  body     (response-body response)]
+              (is (= 200 (:status response)))
+              (is (some #{"clojure.string"} (map :name (:namespaces body))))))
+
+          (testing "one namespace's Vars are listed"
+            (let [response (handler (request :get
+                                             "/api/namespaces/clojure.string/vars"))
+                  body     (response-body response)]
+              (is (= 200 (:status response)))
+              (is (= "clojure.string" (:namespace body)))
+              (is (false? (:missing body)))
+              (is (some #{"join"} (map :name (:vars body))))))
+
+          (testing "one Var's docstring, argument lists, and source are returned"
+            (let [response (handler (request :get
+                                             "/api/namespaces/clojure.string/var?name=join"))
+                  body     (response-body response)]
+              (is (= 200 (:status response)))
+              (is (= "join" (:name body)))
+              (is (= "clojure.string" (:namespace body)))
+              (is (= "[coll] [separator coll]" (:arglists body)))
+              (is (re-find #"Returns a string" (:doc body)))
+              (is (str/starts-with? (:source body) "(defn"))))
+
+          (testing "an unloaded namespace answers with :missing"
+            (let [response (handler (request :get
+                                             "/api/namespaces/nope.nope/vars"))]
+              (is (= 200 (:status response)))
+              (is (true? (:missing (response-body response))))))
+
+          (testing "a Var request needs a name, and unknown Vars are 404s"
+            (is (= 400 (:status (handler (request :get
+                                                  "/api/namespaces/clojure.string/var")))))
+            (is (= 404 (:status (handler
+                                 (request :get
+                                          "/api/namespaces/clojure.string/var?name=nope")))))))))))
+
 (deftest session-files-can-be-listed-and-previewed
   (let [store (atom {})]
     (with-temp-tree

@@ -6,6 +6,10 @@ The web UI has a read-only file explorer panel, mounted to the right of the
 Clojure REPL panel. It browses the selected session's `cwd`, opens folders
 lazily, and previews one file's text at a time.
 
+It is the **Files** tab of the shared explorer panel; the **Namespaces** tab
+in the same column browses the Clojure runtime (see
+[clj-explorer.md](clj-explorer.md)).
+
 ## Why a tree beside the REPL
 
 - The REPL is where you poke at the running daemon; reading the file you are
@@ -47,16 +51,18 @@ lazily, and previews one file's text at a time.
   the panel renders (with `depth`, and `note`/`error` rows for branches that
   are loading, empty, truncated, or unreadable), `fileName`, and `LIST_LIMIT`
   (500, the per-directory page size).
-- `web/src/components/FileExplorer.jsx` -- the panel: `expanded` (a Set,
+- `web/src/components/FileExplorer.jsx` -- the Files tab: `expanded` (a Set,
   `""` open by default), `listings` cache, `selected` path, and the fetched
   `preview`. Effects fetch every open folder that has no listing yet and
   re-read the selected file, aborting in flight reads on unmount and when the
-  selection changes. `App.jsx` mounts it with `key={sessionId}` so switching
-  sessions starts from a fresh tree.
+  selection changes. `ExplorerPanel.jsx` mounts it with `key={sessionId}` so
+  switching sessions starts from a fresh tree; the panel's header carries the
+  Files/Namespaces tabs and the close button, and this component renders the
+  body (`.explorer__panel`) with the `cwd` and Refresh.
 - `web/src/api.js` -- `responseBody`, the JSON-or-`{}` body reader that used
   to live inside `useClaiSocket.js`.
-- `web/src/styles.css` -- `.layout--with-files` and
-  `.layout--with-repl.layout--with-files` add the column; the `explorer`
+- `web/src/styles.css` -- `.layout--with-explorer` and
+  `.layout--with-repl.layout--with-explorer` add the column; the `explorer`
   block styles the panel. Below 1180px both panels drop to full-width rows.
 
 ## Testing

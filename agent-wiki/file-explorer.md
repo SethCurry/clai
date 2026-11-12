@@ -1,8 +1,9 @@
 # Browsing files in the web UI
 
-The web UI has a **Files** panel. It shows the working directory of the
-session you have selected, and it sits to the right of the Clojure REPL
-panel.
+The web UI has a **Files** tab in the explorer panel to the right of the
+Clojure REPL. It shows the working directory of the session you have selected;
+the **Namespaces** tab beside it browses the Clojure runtime (see
+[Browsing Clojure namespaces](namespaces.md)).
 
 - Click a folder to open it, and click it again to close it. Folders are
   listed before files, both in name order, and dotfiles such as `.github` or
@@ -11,8 +12,8 @@ panel.
   again (or the `×`) to stop previewing it.
 - **Refresh** re-reads every open folder and the file you are previewing, so
   it picks up changes the agent made while you were watching.
-- The `×` in the panel header hides the panel; **Show files** in the top bar
-  brings it back.
+- The `×` in the panel header hides the panel; **Show explorer** in the top
+  bar brings it back.
 
 The panel is read-only. It is there to answer "what is in this session's
 directory?" without leaving the browser, not to edit files -- ask the agent
@@ -49,4 +50,6 @@ named but not shown.
 
 - [Mentioning files and folders](file-mentions.md): the `@` completion popup,
   which searches the same directory.
+- [Browsing Clojure namespaces](namespaces.md): the other half of the
+  explorer panel, for inspecting the runtime the REPL evaluates in.
 - [Plugins](plugins.md): add behavior to every prompt.

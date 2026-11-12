@@ -4,10 +4,12 @@
   The browser cannot speak nREPL's bencode transport, so this namespace
   serves two things from the same JVM as the agent:
 
-    * a JSON HTTP API for sessions, agent configurations, plugins, and
-      session-scoped filesystem reads (`/api/sessions`, `/api/agent-configs`,
-      `/api/plugins`, `/api/sessions/<id>/completions`,
-      `/api/sessions/<id>/files`, `/api/sessions/<id>/file`, `/api/health`),
+    * a JSON HTTP API for sessions, agent configurations, plugins,
+      session-scoped filesystem reads, and introspection of this JVM's Clojure
+      namespaces (`/api/sessions`, `/api/agent-configs`, `/api/plugins`,
+      `/api/sessions/<id>/completions`, `/api/sessions/<id>/files`,
+      `/api/sessions/<id>/file`, `/api/namespaces`,
+      `/api/namespaces/<ns>/vars`, `/api/namespaces/<ns>/var`, `/api/health`),
       and
     * a WebSocket at `/ws` that streams agent updates and forwards Clojure
       evaluations to the running nREPL server.
@@ -24,6 +26,7 @@
             [clai.agent.core :as agent]
             [clai.agent.providers.ollama.prompt :as ollama-prompt]
             [clai.daemon.files :as files]
+            [clai.daemon.namespaces :as namespaces]
             [clai.daemon.nrepl :as nrepl-bridge]
             [clai.events.schema :as events]
             [clai.log]
@@ -516,9 +519,29 @@
   directory."
   #"^/api/sessions/([^/]+)/file$")
 
+(def ^:private namespaces-path
+  "The namespace explorer's root listing: every namespace loaded in this JVM."
+  "/api/namespaces")
+
+(def ^:private namespace-vars-path
+  "Regex matching `/api/namespaces/<namespace>/vars`, the namespace explorer's
+  listing of one namespace's public Vars."
+  #"^/api/namespaces/([^/]+)/vars$")
+
+(def ^:private namespace-var-path
+  "Regex matching `/api/namespaces/<namespace>/var?name=<var-name>`, the
+  namespace explorer's detail for one Var."
+  #"^/api/namespaces/([^/]+)/var$")
+
 (def ^:private static-index
   "The file served for `/` and client-side routes."
   "index.html")
+
+(defn- path-namespace
+  "The namespace named by the first path segment `pattern` captured in `uri`,
+  percent-decoded."
+  [pattern uri]
+  (codec/url-decode (second (re-matches pattern uri))))
 
 (defn- request-path
   "The path of `request`, without any query string."
@@ -628,6 +651,27 @@
           (json-response 201 (session-payload agent sessionId)))
         (catch Throwable e
           (json-response 400 {:error (util/error-message e)})))
+
+      (and (= method :get) (= uri namespaces-path))
+      (json-response 200 (namespaces/list-namespaces))
+
+      (and (= method :get) (re-matches namespace-vars-path uri))
+      (json-response 200
+                     (namespaces/namespace-vars
+                      (path-namespace namespace-vars-path uri)))
+
+      (and (= method :get) (re-matches namespace-var-path uri))
+      (let [namespace-name (path-namespace namespace-var-path uri)
+            var-name       (get (query-params request) "name")]
+        (cond
+          (str/blank? (str var-name))
+          (json-response 400 {:error "A var name is required"})
+
+          :else
+          (if-let [detail (namespaces/var-detail namespace-name var-name)]
+            (json-response 200 detail)
+            (json-response 404
+                           {:error (str "No var " namespace-name "/" var-name)}))))
 
       (and (= method :get) (re-matches session-completions-path uri))
       (let [session-id (second (re-matches session-completions-path uri))]
