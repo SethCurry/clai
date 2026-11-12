@@ -44,6 +44,7 @@
       agent_session                one row per agent session
       agent_session_event          events belonging to a session
       agent_session_event_content  JSONB content attached to an event
+      plugin                       installed Clojure-jar plugins
 
   Every statement in that file is idempotent, so applying it on every process
   start (or from the container's `psql` init step) is safe.

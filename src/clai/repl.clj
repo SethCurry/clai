@@ -35,6 +35,7 @@
   (:require [clai.agent.core :as agent]
             [clai.agent.providers.ollama.prompt :as ollama-prompt]
             [clai.events.schema :as events]
+            [clai.plugins :as plugins]
             [clojure.java.shell :as shell]
             [clojure.string :as str]))
 
@@ -168,11 +169,15 @@
   "Connect to [[current-agent]] and return it. Idempotent while connected.
 
   The optional `agent` argument is an agent map to use instead of
-  [[current-agent]]; it is used only when a new connection is created."
+  [[current-agent]]; it is used only when a new connection is created. When
+  the agent carries a PostgreSQL client, the enabled plugins stored there are
+  loaded before the connection is published."
   ([] (connect! (force (deref #'current-agent))))
   ([agent]
    (or (:agent @runtime)
        (do
+         (when-let [postgres (:postgres agent)]
+           (plugins/load-configured! postgres))
          (reset! runtime {:agent agent})
          agent))))
 
@@ -299,9 +304,9 @@
       (ns-unmap ns sym)))
   (intern ns sym value))
 
-(defn namespace-builder
-  "Create and return the REPL namespace described by `opts`, a
-  [[NamespaceBuilderOpts]] map.
+(defn- default-namespace-builder
+  "Create and return the REPL namespace described by `opts`, without running
+  plugin hooks.
 
   The namespace is `sessions.<id>` unless `opts` supplies `:namespace`. On
   first use it is seeded from `:seed-from` (default `user`) and its `:doc` is
@@ -310,12 +315,7 @@
   `current-session` Var is set to `:session` and its `*cwd*` Var is set to the
   effective working directory (`:cwd`, then the session's `:cwd`, then the
   JVM's working directory). The caller is responsible for switching into the
-  returned namespace.
-
-  This is the extension point for plugins: replace or wrap this Var (for
-  example, with `alter-var-root`) to change how session namespaces are
-  built."
-  {:malli/schema [:-> NamespaceBuilderOpts Namespace]}
+  returned namespace."
   [{:keys [session namespace cwd seed-from] :or {seed-from 'user}}]
   (let [cwd     (str (or cwd (:cwd session) (default-cwd)))
         session (assoc session :cwd cwd)
@@ -341,6 +341,22 @@
                    :doc (str "Working directory for shell helpers called in "
                              "this clai session namespace (" id ").")))
     ns))
+
+(defn namespace-builder
+  "Create and return the REPL namespace described by `opts`, a
+  [[NamespaceBuilderOpts]] map.
+
+  The default builder ([[default-namespace-builder]]) creates or refreshes
+  `sessions.<id>` as documented there. The `:namespace-builder` plugin hooks
+  wrap it, so plugins can change options, seed extra Vars, or replace the
+  resulting namespace entirely. Hooks run in plugin priority order and call
+  `next` to continue.
+
+  This remains the extension point for callers that prefer `alter-var-root`;
+  replacing this Var bypasses the plugin hooks."
+  {:malli/schema [:-> NamespaceBuilderOpts Namespace]}
+  [opts]
+  (plugins/build-namespace opts default-namespace-builder))
 
 (defn- select-session!
   "Make `session` current and move the REPL into the namespace built for it.

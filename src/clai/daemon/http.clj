@@ -23,6 +23,7 @@
             [clai.daemon.nrepl :as nrepl-bridge]
             [clai.events.schema :as events]
             [clai.log]
+            [clai.plugins :as plugins]
             [clai.repl :as repl]
             [clai.util :as util]
             [clojure.java.io :as io]
@@ -617,6 +618,8 @@
   [{:keys [host port root nrepl-port agent]
     :or   {host "127.0.0.1" port 8080 root "web/dist"}}]
   (let [agent (or agent (agent/ollama-agent))
+         _     (when-let [postgres (:postgres agent)]
+                 (plugins/load-configured! postgres))
          state {:agent       agent
                 :root        (.getCanonicalFile (io/file root))
                 :nrepl-port  nrepl-port

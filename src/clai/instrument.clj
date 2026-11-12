@@ -20,6 +20,8 @@
             [clai.daemon.postgres]
             [clai.daemon.postgres.sessions]
             [clai.log]
+            [clai.plugins]
+            [clai.plugins.store]
             [clai.util]
             [clojure.string :as str]
             [malli.instrument :as mi]

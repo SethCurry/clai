@@ -73,7 +73,8 @@
 (defn- with-stub-agent
   "Run `f` with the agent's session and prompt operations stubbed."
   [f]
-  (with-redefs [agent/new-session! (fn [_ {:keys [cwd]}]
+  (with-redefs [repl/current-agent (delay {:model "stub-model"})
+                agent/new-session! (fn [_ {:keys [cwd]}]
                                      {:sessionId "stub-session" :cwd cwd})
                 agent/load-session! stub-load-session!
                 agent/list-sessions! (fn [_ _]

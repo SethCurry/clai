@@ -25,6 +25,26 @@ CREATE TABLE IF NOT EXISTS agent_config (
     updated_at TIMESTAMPTZ DEFAULT now()
 );
 
+-- Installed plugins. A row names a Clojure jar, the namespace in that jar
+-- that exposes the plugin descriptor, and the plugin's own JSON configuration.
+-- `clai.plugins` loads enabled rows at daemon/REPL startup and composes their
+-- hooks; see `doc/plugins.md`.
+CREATE TABLE IF NOT EXISTS plugin (
+    id BIGSERIAL PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    -- Absolute path to the plugin's jar file.
+    jar_path TEXT NOT NULL,
+    -- Namespace that defines the `plugin` Var in the jar.
+    entry_namespace TEXT NOT NULL,
+    -- Plugin-specific configuration, passed to the plugin's constructor.
+    config JSONB NOT NULL DEFAULT '{}'::jsonb,
+    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    -- Lower priorities run first; equal priorities run by name.
+    priority INT NOT NULL DEFAULT 100,
+    created_at TIMESTAMPTZ DEFAULT now(),
+    updated_at TIMESTAMPTZ DEFAULT now()
+);
+
 CREATE TABLE IF NOT EXISTS agent_session (
     id BIGSERIAL PRIMARY KEY,
     -- Optional human-readable label; the UI falls back to the directory name.

@@ -39,6 +39,7 @@
             [clai.daemon.postgres.sessions :as sessions]
             [clai.events.schema :as events]
             [clai.log]
+            [clai.plugins :as plugins]
             [clai.util :as util]
             [clojure.java.io :as io]
             [clojure.string :as str]
@@ -75,17 +76,28 @@
                     "Failed to read AGENTS.md; continuing without it")
           nil)))))
 
-(defn- system-prompt-for
-  "Build a session's system prompt from the configured `sys-prompt` and the
-  `AGENTS.md` in `cwd`.
+(defn- default-system-prompt
+  "Assemble the default system prompt from a plugin-hook context.
 
   Project instructions are appended to the configured system prompt (with a
   blank line between them); when no system prompt is configured, they become
   the system prompt. Returns nil when neither is available."
+  [{:keys [sys-prompt agents-md]}]
+  (when (or (some? sys-prompt) (some? agents-md))
+    (str/join "\n\n" (remove nil? [sys-prompt agents-md]))))
+
+(defn- system-prompt-for
+  "Build a session's system prompt from the configured `sys-prompt` and the
+  `AGENTS.md` in `cwd`.
+
+  The default assembly is wrapped by the `:system-prompt` plugin hooks, which
+  may add to, replace, or post-process the result."
   [sys-prompt cwd]
-  (let [agents-md (read-agents-md cwd)]
-    (when (or (some? sys-prompt) (some? agents-md))
-      (str/join "\n\n" (remove nil? [sys-prompt agents-md])))))
+  (plugins/assemble-system-prompt
+   {:sys-prompt sys-prompt
+    :cwd        cwd
+    :agents-md  (read-agents-md cwd)}
+   default-system-prompt))
 
 ;; ---------------------------------------------------------------------------
 ;; Session helpers
@@ -537,14 +549,18 @@
 
 (defn- finish-reply
   "Record the assistant's final `msg` in the session history and return its
-  text."
-  [postgres session-id msg round]
-  (let [content  (or (:content msg) "")
-        thinking (:thinking msg)]
-    (sessions/append-history postgres session-id
-                             (cond-> {:role "assistant" :content content}
-                               (not (str/blank? (str thinking)))
-                               (assoc :thinking (str thinking))))
+  text. The `:agent-message-pre` plugin hooks may replace the message before
+  it is persisted."
+  [postgres session msg round]
+  (let [session-id (:sessionId session)
+        message    (plugins/agent-message-pre
+                    session
+                    (cond-> {:role "assistant"
+                             :content (or (:content msg) "")}
+                      (not (str/blank? (str (:thinking msg))))
+                      (assoc :thinking (str (:thinking msg)))))
+        content    (str (or (:content message) ""))]
+    (sessions/append-history postgres session-id message)
     (tel/log! {:level :debug
                :id    ::chat-response
                :data  {:sessionId session-id
@@ -574,7 +590,8 @@
 
   `opts` is the agent map from [[ollama-agent]] (`:postgres`, `:client`,
   `:model`, `:tool-registry`, `:tool-specs`, `:chat-opts`, `:max-rounds`)
-  plus the caller's `:on-update` callback.
+  plus the caller's `:on-update` callback and the loaded `:session` passed to
+  the message plugin hooks.
 
   On error (HTTP failure or hitting the round cap) returns a descriptive
   string rather than throwing, so the caller can relay it to the user."
@@ -594,7 +611,7 @@
               (if (ollama/has-tool-calls? message)
                 (do (run-tool-round session-id message opts)
                     (recur (inc round)))
-                (finish-reply postgres session-id message round)))))))))
+                (finish-reply postgres (:session opts) message round)))))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Prompt execution
@@ -607,10 +624,16 @@
 
 (defn- send-reply!
   "Relay `text` as the prompt's final agent message and return the caller's
-  stop reason."
-  [on-update text]
-  (emit! on-update (events/text-event "agent_message" (str text)))
-  {:stopReason "end_turn"})
+  stop reason. The `:agent-message-post` plugin hooks may replace the event
+  update before it is sent."
+  [on-update session text]
+  (let [message {:role "assistant" :content (str text)}
+        update  (plugins/agent-message-post
+                 session
+                 message
+                 (events/text-event "agent_message" (str text)))]
+    (emit! on-update update)
+    {:stopReason "end_turn"}))
 
 (defn run-prompt!
   "Append `opts`'s `:prompt` to a session, drive the Ollama conversation to
@@ -637,8 +660,12 @@
   (let [postgres (:postgres agent)]
     (if-let [session (sessions/load-session postgres sessionId)]
       (let [agent    (apply-agent-config agent (session-agent-config agent session))
-            incoming (ollama-prompt/prompt->messages prompt {:cwd (:cwd session)})]
+            incoming (plugins/user-prompt-pre
+                      session
+                      (ollama-prompt/prompt->messages prompt {:cwd (:cwd session)}))]
         (run! #(sessions/append-history postgres sessionId %) incoming)
+        (run! #(sessions/append-history postgres sessionId %)
+              (plugins/user-prompt-post session incoming))
         (tel/log! {:level :info
                    :id    ::prompt-received
                    :data  {:sessionId sessionId
@@ -646,20 +673,22 @@
                            :chars     (prompt-char-count incoming)}}
                   "Received prompt")
         (let [reply (run-agent-loop sessionId
-                                    (assoc agent :on-update on-update))]
+                                    (assoc agent
+                                           :session   session
+                                           :on-update on-update))]
           (tel/log! {:level :info
                      :id    ::prompt-complete
                      :data  {:sessionId sessionId
                              :chars     (count (str reply))}}
                     "Prompt complete")
-          (send-reply! on-update reply)))
+          (send-reply! on-update session reply)))
       ;; Unknown session: tell the caller and bail.
       (do
         (tel/log! {:level :warn
                    :id    ::unknown-session-prompt
                    :data  {:sessionId sessionId}}
                   "Received prompt for unknown session")
-        (send-reply! on-update (str "No session " sessionId))))))
+        (send-reply! on-update nil (str "No session " sessionId))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Agent configuration

@@ -130,6 +130,8 @@
               statements))
     (is (some #(re-find #"(?is)^CREATE TABLE IF NOT EXISTS agent_session_event\b" %)
               statements))
+    (is (some #(re-find #"(?is)^CREATE TABLE IF NOT EXISTS plugin\b" %)
+              statements))
     (is (some #(re-find #"agent_session_event_type_t" %) statements)
         "the event-type enum is declared")))
 
@@ -181,6 +183,7 @@
         (is (pg/ping client))
         (is (relation-exists? client "agent_session"))
         (is (relation-exists? client "agent_session_event"))
+        (is (relation-exists? client "plugin"))
         (is (relation-exists? client "agent_session_event_type_t"))
 
         ;; The DDL is idempotent, so applying it again is a no-op

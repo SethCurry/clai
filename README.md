@@ -76,6 +76,13 @@ the daemon at `http://127.0.0.1:8080`. Override the proxy target with
 `CLAI_DAEMON_URL`. `clai web` serves the built UI from `web/dist`; set
 `CLAI_WEB_ROOT` to serve a different build directory.
 
+## Plugins
+
+Plugins are Clojure jars configured in PostgreSQL. They can change session
+namespace creation, system-prompt assembly, and the handling of user prompts
+and agent messages. See [doc/plugins.md](doc/plugins.md) for the hook contract,
+the `plugin` table, and a complete example.
+
 ## cljdocs
 
 You can get a local copy by running `task cljd` and navigating
