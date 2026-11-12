@@ -100,6 +100,11 @@ export function SessionSidebar({
                   onClick={() => onLoadSession(session.sessionId)}
                   title={session.cwd}
                 >
+                  {session.title && (
+                    <span className="session-row__title" title={session.title}>
+                      {session.title}
+                    </span>
+                  )}
                   <span className="session-row__id">
                     #{shortId(session.sessionId)}
                   </span>

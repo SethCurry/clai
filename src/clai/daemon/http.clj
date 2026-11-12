@@ -143,10 +143,10 @@
 ;; ---------------------------------------------------------------------------
 
 (defn- session-summary
-  "The public shape of a session: identifiers, cwd, and selected config,
-  without history."
+  "The public shape of a session: identifiers, title, cwd, and selected
+  config, without history."
   [session]
-  (select-keys session [:sessionId :cwd :configId :createdAt]))
+  (select-keys session [:sessionId :title :cwd :configId :createdAt]))
 
 (defn- session-payload
   "Load `session-id` and return the summary plus the event updates a chat view
@@ -300,6 +300,7 @@
       {\"type\": \"list_sessions\"}
       {\"type\": \"new_session\", \"cwd\": \"/path\", \"configId\": \"3\"}
       {\"type\": \"load_session\", \"sessionId\": \"12\"}
+      {\"type\": \"rename_session\", \"sessionId\": \"12\", \"title\": \"Fix the build\"}
       {\"type\": \"delete_session\", \"sessionId\": \"12\"}
       {\"type\": \"list_agent_configs\"}
       {\"type\": \"load_agent_config\", \"configId\": \"3\"}
@@ -313,7 +314,7 @@
   {:malli/schema [:-> #'State #'Connection :any :nil]}
   [state conn raw]
   (try
-    (let [{:keys [type requestId cwd sessionId configId name prompt code ns]
+    (let [{:keys [type requestId cwd sessionId configId name title prompt code ns]
            :as _message}
           (if (string? raw)
             (json/parse-string raw true)
@@ -359,6 +360,19 @@
           (send! conn {:type      "deleted"
                        :requestId requestId
                        :sessionId (str sessionId)}))
+
+        "rename_session"
+        (if (and (string? sessionId) (or (nil? title) (string? title)))
+          (if-let [session (agent/rename-session! (:agent state)
+                                                  {:sessionId (str sessionId)
+                                                   :title     title})]
+            (send! conn {:type      "session_renamed"
+                         :requestId requestId
+                         :sessionId (:sessionId session)
+                         :session   session})
+            (send-error! conn requestId (str "No session " sessionId)))
+          (send-error! conn requestId
+                       "rename_session requires sessionId and an optional title"))
 
         "prompt"
         (if (and (string? sessionId) (string? prompt))

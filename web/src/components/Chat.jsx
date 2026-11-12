@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { EditableTitle } from './EditableTitle.jsx'
 import { UpdateView } from './UpdateView.jsx'
 
 function shortId(id) {
@@ -10,7 +11,7 @@ function shortId(id) {
  * The conversation timeline and composer. Updates are appended in stream order
  * by `useClaiSocket`; tool-call fragments are merged before they reach here.
  */
-export function Chat({ session, updates, promptRunning, onPrompt }) {
+export function Chat({ session, updates, promptRunning, onPrompt, onRename }) {
   const [draft, setDraft] = useState('')
   const endRef = useRef(null)
 
@@ -33,10 +34,17 @@ export function Chat({ session, updates, promptRunning, onPrompt }) {
   return (
     <section className="chat">
       <header className="chat__header">
-        <div>
-          <h2>
-            Session <span>#{shortId(session.sessionId)}</span>
-          </h2>
+        <div className="chat__heading">
+          <div className="chat__title-row">
+            <EditableTitle
+              className="chat__title"
+              value={session.title}
+              placeholder="Untitled session"
+              ariaLabel="Session title"
+              onSave={(title) => onRename(session.sessionId, title)}
+            />
+            <span className="chat__id">#{shortId(session.sessionId)}</span>
+          </div>
           <p title={session.cwd}>{session.cwd || 'No working directory'}</p>
         </div>
         <div className="chat__badge">

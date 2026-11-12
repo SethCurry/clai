@@ -182,6 +182,7 @@ export function useClaiSocket() {
             activeSession.current = session.sessionId
             setCurrentSession({
               sessionId: session.sessionId,
+              title: session.title ?? null,
               cwd: session.cwd,
               configId: session.configId,
               createdAt: session.createdAt,
@@ -215,6 +216,20 @@ export function useClaiSocket() {
               setUpdates([])
             }
             break
+
+          case 'session_renamed': {
+            const session = message.session
+            if (!session?.sessionId) break
+            const withTitle = (previous) =>
+              previous.sessionId === session.sessionId
+                ? { ...previous, title: session.title ?? null }
+                : previous
+            setCurrentSession((previous) =>
+              previous ? withTitle(previous) : previous,
+            )
+            setSessions((previous) => previous.map(withTitle))
+            break
+          }
 
           case 'eval':
             setReplEntries((previous) =>
@@ -295,6 +310,11 @@ export function useClaiSocket() {
 
   const deleteSession = useCallback(
     (sessionId) => send({ type: 'delete_session', sessionId }),
+    [send],
+  )
+
+  const renameSession = useCallback(
+    (sessionId, title) => send({ type: 'rename_session', sessionId, title }),
     [send],
   )
 
@@ -431,6 +451,7 @@ export function useClaiSocket() {
     refreshSessions,
     loadSession,
     deleteSession,
+    renameSession,
     saveAgentConfig,
     deleteAgentConfig,
     runPrompt,

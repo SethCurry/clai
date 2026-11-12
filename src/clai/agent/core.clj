@@ -112,9 +112,10 @@
   "Shape one session-store summary for the session picker.
 
   Sessions carry `createdAt` rather than an update timestamp, so that is what
-  the picker sorts and displays."
-  [{:keys [sessionId cwd configId createdAt]}]
+  the picker sorts and displays. `:title` is nil until the session is named."
+  [{:keys [sessionId title cwd configId createdAt]}]
   (cond-> {:sessionId sessionId
+           :title     title
            :cwd       (or cwd "")}
     (some? configId)  (assoc :configId configId)
     (some? createdAt) (assoc :createdAt createdAt)))
@@ -150,15 +151,16 @@
 ;; ---------------------------------------------------------------------------
 
 (defn new-session!
-  "Create a session for `{:keys [cwd configId]}` and record its system prompt
-  (the selected agent configuration's prompt, or the configured prompt, plus
-  any `AGENTS.md`). Returns `{:sessionId id :configId id}`."
+  "Create a session for `{:keys [cwd title configId]}` and record its system
+  prompt (the selected agent configuration's prompt, or the configured prompt,
+  plus any `AGENTS.md`). Returns `{:sessionId id :configId id}`."
   {:malli/schema [:-> :map [:map
                             [:cwd {:optional true} [:maybe :string]]
+                            [:title {:optional true} [:maybe :string]]
                             [:configId {:optional true}
                              [:maybe [:or :string :int]]]]
                   :map]}
-  [agent {:keys [cwd configId]}]
+  [agent {:keys [cwd title configId]}]
   (let [{:keys [postgres sys-prompt]} agent
         config     (if (str/blank? (str configId))
                      nil
@@ -167,6 +169,7 @@
                                          {:configId configId}))))
         session    (sessions/create-session postgres
                                             {:cwd      cwd
+                                             :title    title
                                              :configId (:configId config)})
         sys-prompt (or (:system-prompt config) sys-prompt)]
     (run! #(sessions/append-history postgres (:sessionId session) %)
@@ -330,6 +333,23 @@
              :data  {:sessionId sessionId}}
             "Dropped session")
   {})
+
+(defn rename-session!
+  "Set the human-readable title of the session named by `opts`'s
+  `:sessionId`. A blank `:title` clears it. Returns the updated session
+  summary, or nil when the session is unknown."
+  {:malli/schema [:-> :map [:map
+                            [:sessionId :string]
+                            [:title {:optional true} [:maybe :string]]]
+                  [:maybe :map]]}
+  [agent {:keys [sessionId title]}]
+  (when-let [renamed (sessions/rename-session (:postgres agent)
+                                               sessionId title)]
+    (tel/log! {:level :info
+               :id    ::session-renamed
+               :data  {:sessionId sessionId :title (:title renamed)}}
+              "Renamed session")
+    (session-summary renamed)))
 
 (defn resume-session!
   "Resume the session named by `opts`.

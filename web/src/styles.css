@@ -364,6 +364,15 @@ pre {
   white-space: nowrap;
 }
 
+.session-row__title {
+  overflow: hidden;
+  color: var(--text);
+  font-size: 0.82rem;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .session-row__config {
   overflow: hidden;
   color: var(--accent);
@@ -436,15 +445,27 @@ pre {
   border-bottom: 1px solid var(--border);
 }
 
-.chat__header h2 {
-  margin: 0;
+.chat__heading {
+  min-width: 0;
+}
+
+.chat__title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.chat__title {
   font-size: 0.95rem;
   font-weight: 650;
 }
 
-.chat__header h2 span {
+.chat__id {
+  flex: 0 0 auto;
   color: var(--accent);
   font-family: var(--mono);
+  font-size: 0.78rem;
   font-weight: 500;
 }
 
@@ -937,6 +958,42 @@ pre {
 .button--danger:hover:not(:disabled) {
   border-color: #fca5a5;
   background: rgba(248, 113, 113, 0.18);
+}
+
+/* --------------------------------------------------------- editable title */
+
+.editable-title {
+  max-width: 100%;
+  padding: 2px 7px;
+  margin-left: -7px;
+  overflow: hidden;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text);
+  cursor: text;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.editable-title:hover {
+  border-color: var(--border);
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.editable-title--placeholder {
+  color: var(--muted);
+  font-style: italic;
+}
+
+.editable-title--input {
+  width: 32ch;
+  border-color: var(--accent-2);
+  background: var(--panel-3);
+  color: var(--text);
+  cursor: text;
+  outline: none;
 }
 
 /* -------------------------------------------------------------------- repl */

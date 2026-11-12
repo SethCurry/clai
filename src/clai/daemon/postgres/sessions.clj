@@ -4,7 +4,7 @@
   Sessions live in the two tables declared in `schema/schema.sql` and created
   by `clai.daemon.postgres/ensure-schema!`:
 
-      agent_session        id, working_directory, created_at
+      agent_session        id, title, working_directory, created_at
       agent_session_event  append-only event log, one typed JSONB per row
 
   Every function here takes a `clai.daemon.postgres/Client` as its first
@@ -19,8 +19,9 @@
   ## Sessions and events
 
   A session is one `agent_session` row: a database-assigned id (exposed as a
-  string) plus the session's working directory. Its conversation is the
-  ordered `agent_session_event` rows that reference it.
+  string), an optional human-readable title, and the session's working
+  directory. Its conversation is the ordered `agent_session_event` rows that
+  reference it.
 
   The event log is message-granular: `append-history` derives the event's
   `event_type` from the chat message's role (`user`/`system` -> `user_prompt`,
@@ -48,6 +49,7 @@
       (sessions/load-session client (:sessionId session))"
   (:require [clai.daemon.postgres :as postgres]
             [clojure.java.io :as io]
+            [clojure.string :as str]
             [next.jdbc :as jdbc]
             [taoensso.telemere :as tel])
   (:import [java.io File]))
@@ -72,9 +74,10 @@
 
 (def session
   "A session state map, as returned by [[create-session]], [[load-session]],
-  and [[list-sessions]]."
+  and [[list-sessions]]. `:title` is nil for an untitled session."
   [:map
    [:sessionId non-empty-string]
+   [:title [:maybe :string]]
    [:cwd :string]
    [:configId {:optional true} [:maybe non-empty-string]]
    [:createdAt {:optional true} [:maybe :string]]
@@ -84,6 +87,7 @@
   "A session state map without `:history`."
   [:map
    [:sessionId non-empty-string]
+   [:title [:maybe :string]]
    [:cwd :string]
    [:configId {:optional true} [:maybe non-empty-string]]
    [:createdAt {:optional true} [:maybe :string]]])
@@ -92,13 +96,16 @@
   "Options accepted by [[create-session]]."
   [:map
    [:cwd {:optional true} [:or :string [:fn #(instance? File %)]]]
+   [:title {:optional true} [:maybe :string]]
    [:configId {:optional true} [:maybe [:or non-empty-string :int]]]])
 
 (def save-session-state
   "A session map accepted by [[save-session]]: the history is replaced and a
-  missing `:sessionId` creates a new session."
+  missing `:sessionId` creates a new session. A missing or blank `:title`
+  leaves the stored title untouched; use [[rename-session]] to clear it."
   [:map
    [:sessionId {:optional true} [:maybe [:or non-empty-string :int]]]
+   [:title {:optional true} [:maybe :string]]
    [:configId {:optional true} [:maybe [:or non-empty-string :int]]]
    [:cwd [:or :string [:fn #(instance? File %)]]]
    [:createdAt {:optional true} [:maybe :string]]
@@ -129,10 +136,17 @@
 ;; Row conversion
 ;; ---------------------------------------------------------------------------
 
+(defn- normalize-title
+  "A trimmed session title, or nil when `title` is blank."
+  [title]
+  (let [title (some-> title str str/trim)]
+    (when-not (str/blank? title) title)))
+
 (defn- row->summary
   "Convert an `agent_session` row to the session summary shape."
   [row]
   (cond-> {:sessionId (str (:id row))
+           :title     (normalize-title (:title row))
            :cwd       (:working-directory row)}
     (some? (:agent-config-id row))
     (assoc :configId (str (:agent-config-id row)))
@@ -180,23 +194,30 @@
 ;; ---------------------------------------------------------------------------
 
 (def ^:private select-session-sql
-  "SELECT id, working_directory, agent_config_id, created_at
+  "SELECT id, title, working_directory, agent_config_id, created_at
      FROM agent_session
     WHERE id = ?")
 
 (def ^:private list-sessions-sql
-  "SELECT id, working_directory, agent_config_id, created_at
+  "SELECT id, title, working_directory, agent_config_id, created_at
      FROM agent_session
     ORDER BY created_at, id")
 
 (def ^:private insert-session-sql
-  "INSERT INTO agent_session (working_directory, agent_config_id)
-   VALUES (?, ?)
-   RETURNING id, working_directory, agent_config_id, created_at")
+  "INSERT INTO agent_session (title, working_directory, agent_config_id)
+   VALUES (?, ?, ?)
+   RETURNING id, title, working_directory, agent_config_id, created_at")
 
+;; A missing or blank `:title` in `save-session` keeps the stored title, so
+;; callers that only move a session's cwd do not wipe it.
 (def ^:private update-session-sql
   "UPDATE agent_session
-      SET working_directory = ?, agent_config_id = ?
+      SET working_directory = ?, agent_config_id = ?, title = COALESCE(?, title)
+    WHERE id = ?")
+
+(def ^:private rename-session-sql
+  "UPDATE agent_session
+      SET title = ?
     WHERE id = ?")
 
 (def ^:private select-history-sql
@@ -265,7 +286,10 @@
   saved state (including the database-assigned `:sessionId`). A `:sessionId`
   that does not name a row (including an id that is not a database key, such
   as a UUID) returns nil with a warning instead of creating a caller-named
-  row."
+  row.
+
+  A missing or blank `:title` leaves the stored title unchanged; use
+  [[rename-session]] to set or clear it."
   {:malli/schema [:-> #'postgres/client-schema #'save-session-state
                   [:maybe #'session]]}
   [client state]
@@ -277,18 +301,20 @@
         given   (:sessionId state)
         id      (session-key given)
         config  (session-key (:configId state))
+        title   (normalize-title (:title state))
         history (:history state)]
     (jdbc/with-transaction [tx (:datasource client)]
       (if-let [row (cond
                      (nil? given)
                      (postgres/exec-one! tx ::create-session
                                          insert-session-sql
-                                         [(:cwd state) config])
+                                         [title (:cwd state) config])
 
                      id
                      (let [result (postgres/exec-one! tx ::save-session
                                                       update-session-sql
-                                                      [(:cwd state) config id])]
+                                                      [(:cwd state) config
+                                                       title id])]
                        (when (pos? (postgres/updated-count result))
                          (postgres/exec-one! tx ::reload-session
                                              select-session-sql [id]))))]
@@ -312,6 +338,7 @@
     :cwd       the working directory for the session (defaults to the JVM's
                current directory). The agent also reads `<cwd>/AGENTS.md` for
                project instructions.
+    :title     an optional human-readable title for the session.
     :configId  an `agent_config` id to associate with the session. The row is
                validated by the database's foreign key."
   {:malli/schema [:function
@@ -320,14 +347,16 @@
                          [:maybe #'create-session-opts]]
                    #'session]]}
   ([client] (create-session client nil))
-  ([client {:keys [cwd configId]}]
+  ([client {:keys [cwd title configId]}]
    (let [session (save-session client {:cwd      (canonical-cwd cwd)
+                                       :title    title
                                        :configId configId
                                        :history  []})]
      (tel/log! {:level :info
                 :id    ::session-created
                 :data  {:sessionId (:sessionId session)
                         :cwd       (:cwd session)
+                        :title     (:title session)
                         :configId  (:configId session)}}
                "Created PostgreSQL session")
      session)))
@@ -369,6 +398,35 @@
                :data  {:sessionId session-id :deleted? deleted?}}
               "Deleted PostgreSQL session")
     deleted?))
+
+(defn rename-session
+  "Set `session-id`'s human-readable title, returning the updated summary, or
+  nil when the session is unknown. `title` is trimmed, and a blank title
+  clears the stored title."
+  {:malli/schema [:-> #'postgres/client-schema #'non-empty-string
+                  [:maybe :string] [:maybe #'session-summary]]}
+  [client session-id title]
+  (let [client (ready client)]
+    (if-let [id (session-key session-id)]
+      (let [datasource (:datasource client)
+            title      (normalize-title title)
+            result     (postgres/exec-one! datasource ::rename-session
+                                           rename-session-sql
+                                           [title id])]
+        (if (pos? (postgres/updated-count result))
+          (do
+            (tel/log! {:level :debug
+                       :id    ::session-renamed
+                       :data  {:sessionId session-id :title title}}
+                      "Renamed PostgreSQL session")
+            (row->summary (postgres/exec-one! datasource ::load-session
+                                              select-session-sql [id])))
+          (do
+            (warn-unknown-session ::rename-session session-id)
+            nil)))
+      (do
+        (warn-unknown-session ::rename-session session-id)
+        nil))))
 
 (defn session-exists?
   "Return true when `session-id` is recorded."

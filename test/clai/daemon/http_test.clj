@@ -8,6 +8,7 @@
             [clai.daemon.http :as http]
             [clai.test-support :refer [instrument quiet-logs]]
             [clojure.java.io :as io]
+            [clojure.string :as str]
             [clojure.test :refer :all]
             [ring.websocket :as ws])
   (:import [java.io File]
@@ -51,6 +52,15 @@
                 (fn [_ {:keys [sessionId]}]
                   (swap! store dissoc (str sessionId))
                   {})
+
+                agent/rename-session!
+                (fn [_ {:keys [sessionId title]}]
+                  (when-let [session (get @store (str sessionId))]
+                    (let [title   (when-not (str/blank? (str title))
+                                    (str/trim (str title)))
+                          updated (assoc session :title title)]
+                      (swap! store assoc (str sessionId) updated)
+                      (select-keys updated [:sessionId :title :cwd :configId]))))
 
                 agent/run-prompt!
                 (fn [_ {:keys [prompt on-update]}]
@@ -158,6 +168,46 @@
             (is (= 200 (:status deleted)))
             (is (= id (:deleted (response-body deleted)))))
           (is (= 404 (:status (handler (request :get (str "/api/sessions/" id)))))))))))
+
+(deftest session-titles-can-be-renamed-and-cleared
+  (let [store (atom {})
+        sent  (atom [])
+        conn  {:send           #(swap! sent conj %)
+               :nrepl          (atom nil)
+               :prompt-running (atom false)}]
+    (with-fake-agent store
+      (fn []
+        (let [daemon-state (state store)
+              session      (new-session store "/tmp/project")
+              id           (:sessionId session)]
+          (http/handle-message! daemon-state conn
+                                (json/generate-string
+                                 {:type      "rename_session"
+                                  :requestId "r1"
+                                  :sessionId id
+                                  :title     "  Fix the build  "}))
+          (is (= "session_renamed" (:type (first @sent))))
+          (is (= "Fix the build" (get-in (first @sent) [:session :title])))
+          (is (= "Fix the build" (:title (get @store id))))
+
+          (reset! sent [])
+          (http/handle-message! daemon-state conn
+                                (json/generate-string
+                                 {:type      "rename_session"
+                                  :requestId "r2"
+                                  :sessionId id
+                                  :title     ""}))
+          (is (nil? (get-in (first @sent) [:session :title])))
+
+          (reset! sent [])
+          (http/handle-message! daemon-state conn
+                                (json/generate-string
+                                 {:type      "rename_session"
+                                  :requestId "r3"
+                                  :sessionId "999999999"
+                                  :title     "Nope"}))
+          (is (= "error" (:type (first @sent))))
+          (is (= "r3" (:requestId (first @sent)))))))))
 
 
 (deftest agent-configurations-can-be-listed-and-loaded

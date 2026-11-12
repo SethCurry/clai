@@ -44,12 +44,28 @@
 (deftest session-round-trip
   (if-let [url (System/getenv "CLAI_TEST_POSTGRES_URL")]
     (let [client  (pg/open {:url url})
-          session (sessions/create-session client {:cwd "/tmp/clai-test"})
+          session (sessions/create-session client {:cwd   "/tmp/clai-test"
+                                                    :title "  Initial title  "})
           id      (:sessionId session)]
       (try
         (is (string? id))
         (is (= "/tmp/clai-test" (:cwd (sessions/load-session client id))))
         (is (some? (:createdAt (sessions/load-session client id))))
+        (is (= "Initial title" (:title (sessions/load-session client id))))
+
+        ;; Titles are trimmed, cleared by a blank rename, and preserved by a
+        ;; save that does not mention them.
+        (is (= "Fix the build"
+               (:title (sessions/rename-session client id "  Fix the build  "))))
+        (is (= "Fix the build" (:title (sessions/load-session client id))))
+        (is (= "Fix the build"
+               (:title (sessions/save-session client
+                                              {:sessionId id
+                                               :cwd       "/tmp/clai-test"
+                                               :history   []}))))
+        (is (nil? (sessions/rename-session client "not-a-row" "Nope")))
+        (is (nil? (:title (sessions/rename-session client id nil))))
+        (is (nil? (:title (sessions/load-session client id))))
 
         (is (= {:role "user" :content "hello"}
                (sessions/append-history client id {:role "user" :content "hello"})))

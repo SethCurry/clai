@@ -27,6 +27,8 @@ CREATE TABLE IF NOT EXISTS agent_config (
 
 CREATE TABLE IF NOT EXISTS agent_session (
     id BIGSERIAL PRIMARY KEY,
+    -- Optional human-readable label; the UI falls back to the directory name.
+    title TEXT,
     -- Must be an absolute path
     working_directory TEXT NOT NULL,
     -- The selected agent configuration, when the session has one.
@@ -35,11 +37,14 @@ CREATE TABLE IF NOT EXISTS agent_session (
 );
 
 -- `CREATE TABLE IF NOT EXISTS` does not add columns to an existing table, so
--- the session/config link is added explicitly for databases created before it
+-- these columns are added explicitly for databases created before they
 -- existed.
 ALTER TABLE agent_session
     ADD COLUMN IF NOT EXISTS agent_config_id BIGINT
         REFERENCES agent_config(id) ON DELETE SET NULL;
+
+ALTER TABLE agent_session
+    ADD COLUMN IF NOT EXISTS title TEXT;
 
 -- PostgreSQL has no `CREATE TYPE IF NOT EXISTS`, so guard the enum by hand.
 DO $$

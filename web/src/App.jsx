@@ -96,6 +96,7 @@ export default function App() {
             updates={clai.updates}
             promptRunning={clai.promptRunning}
             onPrompt={clai.runPrompt}
+            onRename={clai.renameSession}
           />
         ) : (
           <EmptyState
