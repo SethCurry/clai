@@ -1429,6 +1429,39 @@ pre {
   font-size: 0.76rem;
 }
 
+.config-form__plugins {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+}
+
+.config-form__plugin {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text);
+  cursor: pointer;
+  font-size: 0.76rem;
+  letter-spacing: normal;
+  text-transform: none;
+}
+
+.config-form__plugin input {
+  width: auto;
+  margin: 0;
+  accent-color: var(--accent-2);
+}
+
+.config-form__plugin span {
+  font-weight: 400;
+  letter-spacing: normal;
+  text-transform: none;
+}
+
 .config-form__error {
   margin: 0;
   padding: 8px 10px;

@@ -37,6 +37,7 @@ Client messages:
 {"type":"list_agent_configs"}
 {"type":"load_agent_config","configId":"3"}
 {"type":"load_agent_config","name":"fast"}
+{"type":"list_plugins"}
 {"type":"prompt","sessionId":"...","prompt":"..."}
 {"type":"eval","code":"(+ 1 2)","ns":"sessions.123"}
 ```
@@ -53,12 +54,14 @@ GET    /api/agent-configs/:id
 POST   /api/agent-configs
 PUT    /api/agent-configs/:id
 DELETE /api/agent-configs/:id
+GET    /api/plugins
 ```
 
 Request and response bodies use the same shape as the `agent-config` rows,
 with kebab-case keys such as `system-prompt` and `max-tool-rounds`. A `null`
 `tools` value means the agent's default registry, while an empty array
-disables tools for sessions that select the configuration.
+disables tools for sessions that select the configuration. A `null` `plugins`
+value means every enabled plugin, while an empty array disables plugins.
 
 Server messages:
 
@@ -66,6 +69,7 @@ Server messages:
 {"type":"hello","model":"gemma3","nreplPort":12345}
 {"type":"sessions","sessions":[...]}
 {"type":"session","session":{"sessionId":"...","cwd":"...","updates":[...]}}
+{"type":"plugins","plugins":[{"pluginId":"1","name":"todays-date","enabled":true}]}
 {"type":"update","sessionId":"...","update":{"type":"agent_message", "...":"..."}}
 {"type":"prompt_done","sessionId":"...","result":{"stopReason":"end_turn"}}
 {"type":"deleted","sessionId":"..."}
@@ -86,7 +90,7 @@ card until the status becomes `completed` or `failed`.
 - `src/App.jsx` is the shell: top bar, sidebar, chat, optional REPL, and the
   agent-configuration dialog.
 - `src/components/AgentConfigManager.jsx` creates, edits, and deletes stored
-  agent configurations.
+  agent configurations, including their active-plugin list.
 - `src/components/UpdateView.jsx` renders messages, thoughts, and tool calls.
 - `src/components/Chat.jsx` is the prompt timeline and composer.
 - `src/components/ReplPanel.jsx` evaluates Clojure through the daemon's nREPL

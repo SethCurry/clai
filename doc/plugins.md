@@ -42,6 +42,20 @@ The plugin's dependencies must either be on `clai`'s classpath already or be
 shaded into the plugin jar; the plugin loader adds the jar itself to the class
 path, not other jars nested inside it.
 
+This repository includes a complete example in
+`src/clai_plugin_todays_date/plugin.clj`. Build its standalone jar with
+`lein plugin-jar` (or `task plugin:build`) and install it with entry namespace
+`clai-plugin-todays-date.plugin`:
+
+```clojure
+(store/create-plugin
+ client
+ {:name            "todays-date"
+  :jar-path        "/absolute/path/to/clai/target/plugin/clai-plugin-todays-date.jar"
+  :entry-namespace "clai-plugin-todays-date.plugin"
+  :config          {:date-format "EEEE, MMMM d, yyyy"}})
+```
+
 ## Hooks
 
 Hooks run in priority order: lower `priority` values first, then by plugin
@@ -100,6 +114,28 @@ The `plugin` table is declared in `schema/schema.sql` and is created by
 `store/list-enabled`, `store/select-plugin`, `store/load-plugin`,
 `store/update-plugin`, and `store/delete-plugin` provide the rest of the CRUD
 API.
+
+## Choosing active plugins
+
+Every enabled plugin is registered at startup, but an agent can narrow which
+plugins actually run. The `agent_config.plugins` column lists plugin names (or
+database ids) that are active for sessions selecting that configuration:
+
+| Value | Meaning |
+| ----- | ------- |
+| `NULL` | Every registered plugin runs. |
+| `[]` | No plugins run. |
+| `["todays-date", "audit"]` | Only the named plugins run. |
+
+The config file's `:plugins` key sets the agent-wide default in the same way.
+A session's stored agent configuration overrides that default. The web UI's
+**Manage** dialog exposes the same setting as **Plugins** when creating or
+editing an agent configuration.
+
+Only the hook functions from active plugins are called. System-prompt hooks
+receive the selection when a session starts, and message hooks receive it on
+the session map, so the same registry can serve sessions with different
+plugin sets.
 
 Plugin rows are loaded by `clai.plugins/load-configured!`. To reload after
 changing a row:

@@ -27,7 +27,8 @@
                         :api-key  \"opapi-...\"
                         :project  \"my-project\" ; default for new tasks
                         :type     \"Task\"}
-       :tools          [\"read_file\" \"write_file\" ...]}
+       :tools          [\"read_file\" \"write_file\" ...]
+       :plugins        [\"todays-date\" ...]}
 
   `:openproject` configures the OpenProject work-package tools. `:url` (or
   `:base-url`) is the instance root or its `/api/v3` API root. Authenticate
@@ -40,6 +41,11 @@
   `:tools` is a vector of tool ids (see `clai.agent.tools.builtin/built-in-tools`) to
   enable. When omitted, every tool in the agent's registry is enabled; when
   present but empty, no tools are offered to the model.
+
+  `:plugins` is a vector of plugin names (or database ids) that the agent's
+  sessions may run. When omitted, every enabled plugin is active; when present
+  but empty, plugins are disabled. A session's stored agent configuration can
+  override this list.
 
   ## File discovery
 
@@ -127,7 +133,8 @@
    [:ollama {:optional true} ollama-config]
    [:postgres {:optional true} postgres-config]
    [:openproject {:optional true} openproject-config]
-   [:tools {:optional true} [:sequential :string]]])
+   [:tools {:optional true} [:sequential :string]]
+   [:plugins {:optional true} [:sequential :string]]])
 
 ;; ---------------------------------------------------------------------------
 ;; Candidate file locations

@@ -18,6 +18,7 @@
             [clai.agent.tools.registry]
             [clai.config]
             [clai.daemon.postgres]
+            [clai.daemon.postgres.git]
             [clai.daemon.postgres.sessions]
             [clai.log]
             [clai.plugins]

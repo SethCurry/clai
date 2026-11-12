@@ -48,6 +48,9 @@
                   {:sessions (mapv #(select-keys % [:sessionId :cwd :configId])
                                    (vals @store))})
 
+                agent/list-plugins!
+                (fn [_ _] {:plugins []})
+
                 agent/delete-session!
                 (fn [_ {:keys [sessionId]}]
                   (swap! store dissoc (str sessionId))
@@ -230,6 +233,28 @@
             (is (= (first configs)
                    (response-body (handler (request :get "/api/agent-configs/1")))))
             (is (= 404 (:status (handler (request :get "/api/agent-configs/999")))))))))))
+
+(deftest installed-plugins-can-be-listed
+  (let [store   (atom {})
+        sent    (atom [])
+        conn    {:send           #(swap! sent conj %)
+                 :nrepl          (atom nil)
+                 :prompt-running (atom false)}
+        plugins [{:pluginId "1" :name "todays-date" :enabled true}
+                 {:pluginId "2" :name "audit" :enabled false}]]
+    (with-fake-agent store
+      (fn []
+        (with-redefs [agent/list-plugins! (fn [_ _] {:plugins plugins})]
+          (let [handler (http/handler (state store))]
+            (is (= {:plugins plugins}
+                   (response-body (handler (request :get "/api/plugins"))))))
+          (http/handle-message! (state store) conn
+                                (json/generate-string
+                                 {:type "list_plugins" :requestId "r-plugins"}))
+          (is (= {:type "plugins"
+                  :requestId "r-plugins"
+                  :plugins plugins}
+                 (first @sent))))))))
 
 (deftest agent-configurations-can-be-created-updated-and-deleted
   (with-fake-agent (atom {})

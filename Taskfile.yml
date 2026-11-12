@@ -24,6 +24,15 @@ tasks:
             - "target/**/*"
         cmds:
             - lein uberjar
+    plugin:build:
+        desc: Build the example today's-date plugin jar
+        sources:
+            - "src/clai_plugin_todays_date/**/*.clj"
+            - project.clj
+        generates:
+            - "target/plugin/clai-plugin-todays-date.jar"
+        cmds:
+            - lein plugin-jar
     run:
         cmds:
             - lein run

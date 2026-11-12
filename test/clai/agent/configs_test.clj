@@ -31,6 +31,7 @@
              :model-options     "{\"temperature\":0}"
              :response-format   "\"json\""
              :tools             (into-array String ["read_file" "run_command"])
+             :plugins           (into-array String ["todays-date" "audit"])
              :created-at        "2025-01-01T00:00:00Z"
              :updated-at        "2025-01-02T00:00:00Z"}]
     (is (= {:configId      "7"
@@ -42,6 +43,7 @@
             :options       {:temperature 0}
             :format        "json"
             :tools         ["read_file" "run_command"]
+            :plugins       ["todays-date" "audit"]
             :createdAt     "2025-01-01T00:00:00Z"
             :updatedAt     "2025-01-02T00:00:00Z"}
            (configs/row->config row)))))
@@ -51,14 +53,19 @@
           :model   nil
           :think   false
           :options {}
-          :tools   ["read_file" "run_command"]}
+          :tools   ["read_file" "run_command"]
+          :plugins ["todays-date" "audit"]}
          (configs/prepare-config {:name    "  fast  "
                                   :model   "   "
                                   :think   false
                                   :options nil
-                                  :tools   [" read_file " "run_command"]})))
+                                  :tools   [" read_file " "run_command"]
+                                  :plugins [" todays-date " "audit"]})))
   (is (= [] (:tools (configs/prepare-config {:name "no-tools" :tools []})))
       "an empty tool list stays distinct from clearing the override")
+  (is (= [] (:plugins (configs/prepare-config {:name "no-plugins"
+                                               :plugins []})))
+      "an empty plugin list stays distinct from clearing the override")
   (is (thrown-with-msg? clojure.lang.ExceptionInfo
                         #"agent configuration"
                         (configs/prepare-config {:name "   "}))))
@@ -86,20 +93,24 @@
                                               :think         true
                                               :options       {:temperature 0}
                                               :format        "json"
-                                              :tools         ["read_file"]})]
+                                              :tools         ["read_file"]
+                                              :plugins       ["todays-date"]})]
           (is (string? (:configId created)))
           (is (= name (:name created)))
           (is (= {:temperature 0} (:options created)))
           (is (= ["read_file"] (:tools created)))
+          (is (= ["todays-date"] (:plugins created)))
           (is (= created (configs/load-config client (:configId created))))
           (is (= created (configs/select-config client name)))
 
           (let [updated (configs/update-config client (:configId created)
                                                {:name  name
                                                 :model "large"
+                                                :plugins []
                                                 :tools []})]
             (is (= "large" (:model updated)))
             (is (= [] (:tools updated)))
+            (is (= [] (:plugins updated)))
             (is (nil? (:system-prompt updated))
                 "a full update clears overrides the new configuration omits"))
 

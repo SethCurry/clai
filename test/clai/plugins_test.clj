@@ -146,6 +146,30 @@
          (plugins/assemble-system-prompt {:sys-prompt "base"}
                                          (fn [ctx] (:sys-prompt ctx))))))
 
+(deftest system-prompt-hooks-honor-the-active-plugin-selection
+  (plugins/register! (plugin-row "alpha" {} 10)
+                     {:hooks {:system-prompt
+                              (fn [ctx next]
+                                (str (next ctx) "-alpha"))}})
+  (plugins/register! (plugin-row "beta" {} 20)
+                     {:hooks {:system-prompt
+                              (fn [ctx next]
+                                (str (next ctx) "-beta"))}})
+  (let [prompt (fn [active]
+                 (plugins/assemble-system-prompt
+                  (cond-> {:sys-prompt "base"}
+                    (some? active) (assoc :plugins active))
+                  (fn [ctx] (:sys-prompt ctx))))]
+    (is (= "base-beta-alpha" (prompt nil))
+        "a nil selection runs every registered plugin")
+    (is (= "base-alpha" (prompt ["alpha"])))
+    (is (= "base-beta" (prompt ["beta"])))
+    (is (= "base-beta" (prompt ["id-beta"]))
+        "plugins may be selected by database id as well as name")
+    (is (= "base" (prompt []))
+        "an empty selection disables plugins")
+    (is (= "base" (prompt ["missing"])))))
+
 (deftest failing-hooks-are-ignored
   (plugins/register! (plugin-row "failing")
                      {:hooks {:system-prompt
@@ -177,6 +201,27 @@
   (is (= [{:role "user" :content "post"}]
          (plugins/user-prompt-post {:sessionId "s"}
                                    [{:role "user" :content "hello"}]))))
+
+(deftest message-hooks-honor-the-session-active-plugin-selection
+  (plugins/register! (plugin-row "alpha")
+                     {:hooks {:user-prompt-pre
+                              (fn [{:keys [messages]}]
+                                (conj messages {:role "user"
+                                                :content "alpha"}))}})
+  (plugins/register! (plugin-row "beta")
+                     {:hooks {:user-prompt-pre
+                              (fn [{:keys [messages]}]
+                                (conj messages {:role "user"
+                                                :content "beta"}))}})
+  (is (= [{:role "user" :content "hello"}
+          {:role "user" :content "alpha"}]
+         (plugins/user-prompt-pre {:sessionId "s" :plugins ["alpha"]}
+                                  [{:role "user" :content "hello"}]))
+      "only the plugins selected by the session run")
+  (is (= [{:role "user" :content "hello"}]
+         (plugins/user-prompt-pre {:sessionId "s" :plugins []}
+                                  [{:role "user" :content "hello"}]))
+      "an empty selection disables every plugin"))
 
 (deftest agent-message-hooks-can-rewrite-the-persisted-message-and-event
   (plugins/register! (plugin-row "messages")

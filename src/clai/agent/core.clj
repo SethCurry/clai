@@ -40,6 +40,7 @@
             [clai.events.schema :as events]
             [clai.log]
             [clai.plugins :as plugins]
+            [clai.plugins.store :as plugins-store]
             [clai.util :as util]
             [clojure.java.io :as io]
             [clojure.string :as str]
@@ -87,16 +88,17 @@
     (str/join "\n\n" (remove nil? [sys-prompt agents-md]))))
 
 (defn- system-prompt-for
-  "Build a session's system prompt from the configured `sys-prompt` and the
-  `AGENTS.md` in `cwd`.
+  "Build a session's system prompt from the configured `sys-prompt`, the
+  `AGENTS.md` in `cwd`, and the `plugins` active for the session.
 
   The default assembly is wrapped by the `:system-prompt` plugin hooks, which
   may add to, replace, or post-process the result."
-  [sys-prompt cwd]
+  [sys-prompt cwd plugins]
   (plugins/assemble-system-prompt
    {:sys-prompt sys-prompt
     :cwd        cwd
-    :agents-md  (read-agents-md cwd)}
+    :agents-md  (read-agents-md cwd)
+    :plugins    plugins}
    default-system-prompt))
 
 ;; ---------------------------------------------------------------------------
@@ -114,9 +116,9 @@
 (defn- system-history
   "The opening history for a session: a system message built from the
   configured `sys-prompt` plus any `AGENTS.md` in `cwd`, or nothing when
-  neither is present."
-  [sys-prompt cwd]
-  (if-let [prompt (system-prompt-for sys-prompt cwd)]
+  neither is present. `plugins` selects the `:system-prompt` hooks that run."
+  [sys-prompt cwd plugins]
+  (if-let [prompt (system-prompt-for sys-prompt cwd plugins)]
     [{:role "system" :content prompt}]
     []))
 
@@ -165,7 +167,10 @@
 (defn new-session!
   "Create a session for `{:keys [cwd title configId]}` and record its system
   prompt (the selected agent configuration's prompt, or the configured prompt,
-  plus any `AGENTS.md`). Returns `{:sessionId id :configId id}`."
+  plus any `AGENTS.md`). The selected configuration's `:plugins` choose the
+  plugins active for the session; when it has none, the agent's `:plugins`
+  apply (nil means every enabled plugin). Returns `{:sessionId id :configId
+  id}`."
   {:malli/schema [:-> :map [:map
                             [:cwd {:optional true} [:maybe :string]]
                             [:title {:optional true} [:maybe :string]]
@@ -179,13 +184,16 @@
                      (or (agent-configs/load-config postgres (str configId))
                          (throw (ex-info (str "No agent configuration " configId)
                                          {:configId configId}))))
+        plugins    (if (and config (contains? config :plugins))
+                     (:plugins config)
+                     (:plugins agent))
         session    (sessions/create-session postgres
                                             {:cwd      cwd
                                              :title    title
                                              :configId (:configId config)})
         sys-prompt (or (:system-prompt config) sys-prompt)]
     (run! #(sessions/append-history postgres (:sessionId session) %)
-          (system-history sys-prompt (:cwd session)))
+          (system-history sys-prompt (:cwd session) plugins))
     (cond-> {:sessionId (:sessionId session)}
       (some? (:configId session)) (assoc :configId (:configId session)))))
 
@@ -235,6 +243,25 @@
                :data  {:count (count configs)}}
               "Listed agent configurations")
     {:configs configs}))
+
+(defn- plugin-summary
+  "Shape one installed plugin row for the plugin picker."
+  [plugin]
+  (select-keys plugin [:pluginId :name :enabled :priority]))
+
+(defn list-plugins!
+  "List the plugins installed in PostgreSQL so a client can choose which ones
+  an agent configuration activates. Returns `{:plugins [summary ...]}`."
+  {:malli/schema [:-> :map [:map] :map]}
+  [agent _opts]
+  (let [installed (if-let [postgres (:postgres agent)]
+                    (plugins-store/list-plugins postgres)
+                    [])]
+    (tel/log! {:level :debug
+               :id    ::plugin-list
+               :data  {:count (count installed)}}
+              "Listed installed plugins")
+    {:plugins (mapv plugin-summary installed)}))
 
 (defn load-agent-config!
   "Load one stored agent configuration by `:configId` or `:name`, returning
@@ -318,7 +345,9 @@
   "Return `agent` with the settings in `config` applied over its defaults.
 
   A nil configuration is a no-op. Tool selection starts from the agent's full
-  registry so a session configuration can choose any tool the daemon allows."
+  registry so a session configuration can choose any tool the daemon allows.
+  A `:plugins` list in `config` replaces the agent's active plugins; nil means
+  every enabled plugin and an empty list disables plugins."
   [agent config]
   (if (nil? config)
     agent
@@ -333,7 +362,10 @@
                                    (util/select-present config
                                                         [:options :think :format]))
              :tool-registry tool-registry
-             :tool-specs    (tools-registry/specs tool-registry)))))
+             :tool-specs    (tools-registry/specs tool-registry)
+             :plugins       (if (contains? config :plugins)
+                              (:plugins config)
+                              (:plugins agent))))))
 
 (defn delete-session!
   "Delete the session named by `opts`'s `:sessionId`."
@@ -660,6 +692,7 @@
   (let [postgres (:postgres agent)]
     (if-let [session (sessions/load-session postgres sessionId)]
       (let [agent    (apply-agent-config agent (session-agent-config agent session))
+            session  (assoc session :plugins (:plugins agent))
             incoming (plugins/user-prompt-pre
                       session
                       (ollama-prompt/prompt->messages prompt {:cwd (:cwd session)}))]
@@ -698,9 +731,9 @@
   "Resolve `opts` and the loaded config into the agent's configuration map.
 
   The map holds everything the prompt loop needs: the clients, model, tool
-  registry and its specs, the tool-round cap, the system prompt, and extra
-  chat options. It is plain data, so the operations above can be written as
-  ordinary functions of it."
+  registry and its specs, the tool-round cap, the system prompt, the active
+  plugin names, and extra chat options. It is plain data, so the operations
+  above can be written as ordinary functions of it."
   [opts]
   (let [cfg                (or (:cfg opts) (config/load-config))
         client             (or (:client opts) (config/make-ollama-client cfg))
@@ -712,13 +745,15 @@
         tool-specs         (tools-registry/specs tool-registry)
         max-rounds         (config/resolve-max-tool-rounds cfg)
         sys-prompt         (:system-prompt cfg)
-        chat-opts          (config/chat-options cfg)]
+        chat-opts          (config/chat-options cfg)
+        plugins            (or (:plugins opts) (:plugins cfg))]
     (tel/log! {:level :info
                :id    ::agent-configured
                :data  {:model          model
                        :tools          (count tool-specs)
                        :max-rounds     max-rounds
                        :system-prompt? (some? sys-prompt)
+                       :plugins        (if (nil? plugins) :all (count plugins))
                        :host           (:host client)}}
               "Configured clai agent")
     {:cfg                cfg
@@ -731,6 +766,7 @@
      :max-rounds         max-rounds
      :sys-prompt         sys-prompt
      :chat-opts          chat-opts
+     :plugins            plugins
      :openproject        (:openproject cfg)}))
 
 (defn ollama-agent
@@ -756,13 +792,19 @@
                     the environment. The storage schema is created lazily on
                     the first session operation (`clai.daemon.postgres.sessions`
                     ensures it).
+    :plugins        plugin names (or ids) active for the agent's sessions, or
+                    nil for every enabled plugin. Defaults to `cfg`'s
+                    `:plugins`; an empty vector disables plugins.
 
   A new session can select a stored `agent_config` with `:configId`. That
   configuration's model, system prompt, tool-round cap, chat options, response
-  format, and tool list override the agent's defaults for as long as the
-  session lives. A new session's system prompt is the selected configuration's
-  `:system-prompt`, or the agent's configured prompt, followed by the contents
-  of an `AGENTS.md` in the session's `cwd`, if one exists."
+  format, tool list, and active plugin list override the agent's defaults for
+  as long as the session lives. A new session's system prompt is the selected
+  configuration's `:system-prompt`, or the agent's configured prompt, followed
+  by the contents of an `AGENTS.md` in the session's `cwd`, if one exists.
+  System-prompt and message hooks run only for the active plugins; when the
+  agent and its configuration both leave `:plugins` nil, every enabled plugin
+  runs."
   ([] (ollama-agent nil))
   ([opts]
    (build-agent opts)))

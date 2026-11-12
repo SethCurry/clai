@@ -75,6 +75,7 @@ export function useClaiSocket() {
   })
   const [sessions, setSessions] = useState([])
   const [agentConfigs, setAgentConfigs] = useState([])
+  const [plugins, setPlugins] = useState([])
   const [selectedConfigId, setSelectedConfigId] = useState('')
   const [currentSession, setCurrentSession] = useState(null)
   const [updates, setUpdates] = useState([])
@@ -130,6 +131,7 @@ export function useClaiSocket() {
         setEvalRunning(false)
         send({ type: 'list_sessions' })
         send({ type: 'list_agent_configs' })
+        send({ type: 'list_plugins' })
         // After a reconnect, replay the active conversation. The prompt may
         // have finished while the socket was down.
         if (activeSession.current) {
@@ -160,6 +162,10 @@ export function useClaiSocket() {
 
           case 'agent_configs':
             setAgentConfigs(message.configs ?? [])
+            break
+
+          case 'plugins':
+            setPlugins(message.plugins ?? [])
             break
 
           case 'agent_config':
@@ -439,6 +445,7 @@ export function useClaiSocket() {
     sessionInfo,
     sessions,
     agentConfigs,
+    plugins,
     selectedConfigId,
     currentSession,
     updates,

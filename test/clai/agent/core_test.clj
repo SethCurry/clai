@@ -7,6 +7,7 @@
             [clai.agent.providers.ollama :as ollama]
             [clai.daemon.postgres.sessions :as sessions]
             [clai.events.schema :as events]
+            [clai.plugins :as plugins]
             [clai.test-support :refer [quiet-logs instrument memory-session-store]]
             [clojure.string :as str]
             [clojure.test :refer :all]
@@ -148,6 +149,75 @@
              (is (= {:temperature 0} (:options request)))
              (is (true? (:think request)))
              (is (= "json" (:format request))))))))))
+
+(deftest new-session-selects-active-plugins-from-config
+  (plugins/clear!)
+  (try
+    (plugins/register! {:name "alpha" :priority 10}
+                       {:hooks {:system-prompt
+                                (fn [ctx next] (str (next ctx) "|alpha"))}})
+    (plugins/register! {:name "beta" :priority 20}
+                       {:hooks {:system-prompt
+                                (fn [ctx next] (str (next ctx) "|beta"))}})
+    (let [system-prompt (fn [config]
+                          (with-redefs [agent-configs/load-config
+                                        (fn [_ _] config)]
+                            (run-with-stubbed-ollama
+                             "pong"
+                             {:cfg {:system-prompt "base"}}
+                             (fn [handler _requests _updates]
+                               (let [{:keys [sessionId]}
+                                     (agent/new-session!
+                                      handler
+                                      {:cwd      "/tmp"
+                                       :configId (:configId config)})]
+                                 (-> (sessions/load-session test-client
+                                                            sessionId)
+                                     :history
+                                     first
+                                     :content))))))]
+      (is (= "base|beta|alpha"
+             (system-prompt {:configId "5" :name "all"}))
+          "without :plugins every registered plugin stays active")
+      (is (= "base|alpha"
+             (system-prompt {:configId "6"
+                             :name "only-alpha"
+                             :plugins ["alpha"]})))
+      (is (= "base"
+             (system-prompt {:configId "7" :name "none" :plugins []}))
+          "an empty plugin list disables plugins for the session"))
+    (finally
+      (plugins/clear!))))
+
+(deftest prompt-runs-only-the-sessions-active-plugins
+  (plugins/clear!)
+  (try
+    (plugins/register! {:name "tag" :priority 10}
+                       {:hooks {:agent-message-post
+                                (fn [{:keys [update]}]
+                                  (assoc-in update [:content 0 :content]
+                                            (str (-> update :content first :content)
+                                                 "|tag")))}})
+    (let [reply (fn [config]
+                  (with-redefs [agent-configs/load-config
+                                (fn [_ _] config)]
+                    (run-with-stubbed-ollama
+                     "pong"
+                     {}
+                     (fn [handler _requests updates]
+                       (let [{:keys [sessionId]}
+                             (agent/new-session!
+                              handler
+                              {:cwd "/tmp" :configId (:configId config)})]
+                         (prompt! handler sessionId "ping" updates)
+                         (events/content->text
+                          (:content (last @updates))))))))]
+      (is (= "pong|tag"
+             (reply {:configId "8" :name "tagged" :plugins ["tag"]})))
+      (is (= "pong"
+             (reply {:configId "9" :name "plain" :plugins []}))))
+    (finally
+      (plugins/clear!))))
 
 (deftest new-session-rejects-unknown-agent-configuration
   (with-redefs [agent-configs/load-config (constantly nil)]

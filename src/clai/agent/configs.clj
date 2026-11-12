@@ -34,9 +34,11 @@
 (def AgentConfigInput
   "A configuration accepted by [[create-config]] and [[update-config]].
 
-  `:options`, `:format`, and `:tools` use the same shapes as the config file
-  keys documented in `clai.config`. A missing or nil value clears the
-  corresponding override, except `:options`, which defaults to `{}`."
+  `:options`, `:format`, `:tools`, and `:plugins` use the same shapes as the
+  config file keys documented in `clai.config`. A missing or nil value clears
+  the corresponding override, except `:options`, which defaults to `{}`.
+  `:plugins` names the plugins a session may run; nil means every enabled
+  plugin, while an empty list disables plugins."
   [:map
    [:name non-empty-string]
    [:model {:optional true} [:maybe :string]]
@@ -45,14 +47,15 @@
    [:think {:optional true} [:maybe boolean?]]
    [:options {:optional true} [:maybe [:map]]]
    [:format {:optional true} [:maybe [:or :string [:map]]]]
-   [:tools {:optional true} [:maybe [:sequential :string]]]])
+   [:tools {:optional true} [:maybe [:sequential :string]]]
+   [:plugins {:optional true} [:maybe [:sequential :string]]]])
 
 (def agent-config
   "An agent configuration row, as returned by [[list-configs]],
   [[load-config]], and [[select-config]].
 
-  `:options`, `:format`, and `:tools` use the same shapes as the config file
-  keys documented in `clai.config`."
+  `:options`, `:format`, `:tools`, and `:plugins` use the same shapes as the
+  config file keys documented in `clai.config`."
   [:map
    [:configId non-empty-string]
    [:name non-empty-string]
@@ -63,6 +66,7 @@
    [:options {:optional true} [:map]]
    [:format {:optional true} [:maybe [:or :string [:map]]]]
    [:tools {:optional true} [:maybe [:sequential :string]]]
+   [:plugins {:optional true} [:maybe [:sequential :string]]]
    [:createdAt {:optional true} [:maybe :string]]
    [:updatedAt {:optional true} [:maybe :string]]])
 
@@ -94,9 +98,9 @@
 (defn ^:no-doc prepare-config
   "Validate and normalize a configuration input for storage.
 
-  Names and models are trimmed, blank models become NULL, tool ids are
-  trimmed, and `:options` defaults to an empty map. Missing optional keys are
-  treated as cleared overrides."
+  Names and models are trimmed, blank models become NULL, tool ids and plugin
+  names are trimmed, and `:options` defaults to an empty map. Missing optional
+  keys are treated as cleared overrides."
   {:malli/schema [:-> :map #'AgentConfigInput]}
   [config]
   (let [blank->nil (fn [value]
@@ -113,6 +117,10 @@
                      (update :tools #(when (some? %)
                                        (mapv (comp str/trim str) %)))
 
+                     (contains? config :plugins)
+                     (update :plugins #(when (some? %)
+                                         (mapv (comp str/trim str) %)))
+
                      true
                      (update :options #(or % {})))]
     (postgres/validate! AgentConfigInput config "agent configuration")))
@@ -120,11 +128,15 @@
 (defn- config-params
   "The SQL parameters shared by [[create-config]] and [[update-config]].
 
-  The tools list is passed twice as JSON because PostgreSQL statements cannot
-  reuse a positional parameter: the first copy decides whether the column is
-  NULL (all tools) and the second expands the array."
+  The tools and plugins lists are each passed twice as JSON because
+  PostgreSQL statements cannot reuse a positional parameter: the first copy
+  decides whether the column is NULL (every tool/plugin) and the second
+  expands the array."
   [config]
-  (let [tools-json (some-> (:tools config) (postgres/->json "Agent config tools"))]
+  (let [tools-json   (some-> (:tools config)
+                             (postgres/->json "Agent config tools"))
+        plugins-json (some-> (:plugins config)
+                             (postgres/->json "Agent config plugins"))]
     [(:name config)
      (:model config)
      (:system-prompt config)
@@ -133,7 +145,9 @@
      (postgres/->json (or (:options config) {}) "Agent config options")
      (some-> (:format config) (postgres/->json "Agent config format"))
      tools-json
-     tools-json]))
+     tools-json
+     plugins-json
+     plugins-json]))
 
 ;; ---------------------------------------------------------------------------
 ;; Row conversion
@@ -187,6 +201,9 @@
       (some? (:tools row))
       (assoc :tools (text-array->vec (:tools row)))
 
+      (some? (:plugins row))
+      (assoc :plugins (text-array->vec (:plugins row)))
+
       (some? (:created-at row))
       (assoc :createdAt (postgres/timestamp->iso (:created-at row)))
 
@@ -208,6 +225,7 @@
    model_options::text AS model_options,
    response_format::text AS response_format,
    tools,
+   plugins,
    created_at,
    updated_at")
 
@@ -227,8 +245,12 @@
 (def ^:private insert-config-sql
   (str "INSERT INTO agent_config
           (name, model, system_prompt, max_tool_rounds, think,
-           model_options, response_format, tools)
+           model_options, response_format, tools, plugins)
         VALUES (?, ?, ?, ?, ?, CAST(? AS jsonb), CAST(? AS jsonb),
+                CASE WHEN ?::jsonb IS NULL
+                     THEN NULL
+                     ELSE ARRAY(SELECT jsonb_array_elements_text(?::jsonb))
+                END,
                 CASE WHEN ?::jsonb IS NULL
                      THEN NULL
                      ELSE ARRAY(SELECT jsonb_array_elements_text(?::jsonb))
@@ -248,6 +270,10 @@
                             THEN NULL
                             ELSE ARRAY(SELECT jsonb_array_elements_text(?::jsonb))
                        END,
+               plugins = CASE WHEN ?::jsonb IS NULL
+                              THEN NULL
+                              ELSE ARRAY(SELECT jsonb_array_elements_text(?::jsonb))
+                         END,
                updated_at = now()
          WHERE id = ?
          RETURNING " config-columns))

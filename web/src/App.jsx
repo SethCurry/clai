@@ -123,6 +123,7 @@ export default function App() {
       {configManagerOpen && (
         <AgentConfigManager
           configs={clai.agentConfigs}
+          plugins={clai.plugins}
           onSave={clai.saveAgentConfig}
           onDelete={clai.deleteAgentConfig}
           onClose={() => setConfigManagerOpen(false)}

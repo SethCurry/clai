@@ -132,6 +132,10 @@
               statements))
     (is (some #(re-find #"(?is)^CREATE TABLE IF NOT EXISTS plugin\b" %)
               statements))
+    (is (some #(re-find #"(?is)^CREATE TABLE IF NOT EXISTS git_repo\b" %)
+              statements))
+    (is (some #(re-find #"(?is)^CREATE TABLE IF NOT EXISTS git_worktree\b" %)
+              statements))
     (is (some #(re-find #"agent_session_event_type_t" %) statements)
         "the event-type enum is declared")))
 
@@ -184,6 +188,8 @@
         (is (relation-exists? client "agent_session"))
         (is (relation-exists? client "agent_session_event"))
         (is (relation-exists? client "plugin"))
+        (is (relation-exists? client "git_repo"))
+        (is (relation-exists? client "git_worktree"))
         (is (relation-exists? client "agent_session_event_type_t"))
 
         ;; The DDL is idempotent, so applying it again is a no-op

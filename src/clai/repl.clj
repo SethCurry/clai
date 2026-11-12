@@ -253,13 +253,15 @@
 
   `:session` is the session the namespace belongs to. `:namespace` overrides
   the default `sessions.<id>` name, `:cwd` overrides the working directory
-  stored on the namespace's `*cwd*` Var, and `:seed-from` names the namespace
+  stored on the namespace's `*cwd*` Var, `:plugins` selects the
+  `:namespace-builder` plugins that run, and `:seed-from` names the namespace
   whose public Vars and aliases a fresh session namespace is seeded from
   (defaults to `user`)."
   [:map
    [:session Session]
    [:namespace {:optional true} [:maybe :symbol]]
    [:cwd {:optional true} [:maybe :string]]
+   [:plugins {:optional true} [:maybe [:sequential :string]]]
    [:seed-from {:optional true} [:maybe :symbol]]])
 
 (defn- refer-publics!

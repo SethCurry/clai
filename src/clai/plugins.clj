@@ -20,6 +20,11 @@
 
   Hooks run in plugin priority order (lower first, then by plugin name).
 
+  Every hook receives a `:plugins` selection from its context: a collection of
+  plugin names (or ids). `nil` runs every registered plugin, while an empty
+  collection disables plugins for that invocation. Agent configurations use
+  this to choose the active plugins for their sessions.
+
     :namespace-builder  Middleware around `clai.repl/namespace-builder`.
                         `(fn [ctx next] ...)`, where `ctx` has `:opts` (the
                         namespace-builder options) and `:plugin`. Call
@@ -105,6 +110,11 @@
    [:priority {:optional true} [:maybe int?]]
    [:createdAt {:optional true} [:maybe :string]]
    [:updatedAt {:optional true} [:maybe :string]]])
+
+(def ActivePlugins
+  "The plugins active for one hook invocation: plugin names or ids. `nil`
+  means every registered plugin, and an empty collection disables plugins."
+  [:maybe [:sequential :string]])
 
 (def LoadResult
   "The result of [[load-configured!]]."
@@ -199,11 +209,22 @@
 ;; Hook resolution
 ;; ---------------------------------------------------------------------------
 
+(defn- plugin-selected?
+  "True when `entry` should run for the `active` plugin selection. A nil
+  selection runs everything; otherwise a plugin matches by name or id."
+  [active {:keys [name id]}]
+  (or (nil? active)
+      (let [wanted (into #{} (map str) active)]
+        (or (contains? wanted (str name))
+            (and (some? id) (contains? wanted (str id)))))))
+
 (defn- resolve-hooks
-  "The hook functions registered for `hook-name`, in run order, annotated with
-  their plugin name, configuration, and position within the plugin."
-  [hook-name]
+  "The hook functions registered for `hook-name` that are selected by
+  `active`, in run order, annotated with their plugin name, configuration, and
+  position within the plugin."
+  [hook-name active]
   (->> @registry
+       (filter #(plugin-selected? active %))
        (mapcat (fn [{:keys [name config priority hooks]}]
                  (map-indexed (fn [index hook-fn]
                                 {:fn     hook-fn
@@ -231,8 +252,9 @@
 
 (defn- compose-middleware
   "Compose plugin middleware around `base`. Lower-priority middleware is
-  outermost and therefore runs first."
-  [hook-name base]
+  outermost and therefore runs first; `active` selects the plugins that
+  participate."
+  [hook-name active base]
   (reduce (fn [next-hook hook]
             (fn [ctx]
               (try
@@ -241,25 +263,26 @@
                   (warn-hook-failure! hook-name hook e)
                   (next-hook ctx)))))
           base
-          (reverse (resolve-hooks hook-name))))
+          (reverse (resolve-hooks hook-name active))))
 
 (defn build-namespace
   "Run the `:namespace-builder` hooks around `base` and return the resulting
   namespace. `opts` is the map normally passed to
-  `clai.repl/namespace-builder`."
+  `clai.repl/namespace-builder`; its `:plugins` key selects the active
+  plugins."
   {:malli/schema [:-> :map [:fn fn?] [:fn #(instance? clojure.lang.Namespace %)]]}
   [opts base]
-  ((compose-middleware :namespace-builder
+  ((compose-middleware :namespace-builder (:plugins opts)
                        (fn [ctx] (base (:opts ctx))))
    {:opts opts}))
 
 (defn assemble-system-prompt
   "Run the `:system-prompt` hooks around `base` and return the assembled
-  prompt. `ctx` carries `:sys-prompt`, `:cwd`, and `:agents-md`; `base` turns
-  a (possibly modified) context into the default prompt."
+  prompt. `ctx` carries `:sys-prompt`, `:cwd`, `:agents-md`, and `:plugins`;
+  `base` turns a (possibly modified) context into the default prompt."
   {:malli/schema [:-> :map [:fn fn?] [:maybe :string]]}
   [ctx base]
-  ((compose-middleware :system-prompt base) ctx))
+  ((compose-middleware :system-prompt (:plugins ctx) base) ctx))
 
 (defn- normalize-messages
   "Interpret a hook return value as a sequence of messages. `nil` means no
@@ -276,7 +299,8 @@
                                          {:value result}))))
 
 (defn user-prompt-pre
-  "Run the `:user-prompt-pre` hooks and return the messages to persist."
+  "Run the `:user-prompt-pre` hooks selected by the session's `:plugins` and
+  return the messages to persist."
   {:malli/schema [:-> :map [:sequential :map] [:sequential :map]]}
   [session messages]
   (reduce (fn [messages hook]
@@ -292,11 +316,11 @@
                 (warn-hook-failure! :user-prompt-pre hook e)
                 messages)))
           (vec messages)
-          (resolve-hooks :user-prompt-pre)))
+          (resolve-hooks :user-prompt-pre (:plugins session))))
 
 (defn user-prompt-post
-  "Run the `:user-prompt-post` hooks and return any additional messages to
-  append after the user prompt."
+  "Run the `:user-prompt-post` hooks selected by the session's `:plugins` and
+  return any additional messages to append after the user prompt."
   {:malli/schema [:-> :map [:sequential :map] [:sequential :map]]}
   [session messages]
   (reduce (fn [appended hook]
@@ -312,10 +336,11 @@
                 (warn-hook-failure! :user-prompt-post hook e)
                 appended)))
           []
-          (resolve-hooks :user-prompt-post)))
+          (resolve-hooks :user-prompt-post (:plugins session))))
 
 (defn agent-message-pre
-  "Run the `:agent-message-pre` hooks and return the message to persist."
+  "Run the `:agent-message-pre` hooks selected by the session's `:plugins`
+  and return the message to persist."
   {:malli/schema [:-> :map :map :map]}
   [session message]
   (reduce (fn [message hook]
@@ -333,10 +358,11 @@
                 (warn-hook-failure! :agent-message-pre hook e)
                 message)))
           message
-          (resolve-hooks :agent-message-pre)))
+          (resolve-hooks :agent-message-pre (:plugins session))))
 
 (defn agent-message-post
-  "Run the `:agent-message-post` hooks and return the event update to send."
+  "Run the `:agent-message-post` hooks selected by the session's `:plugins`
+  and return the event update to send."
   {:malli/schema [:-> [:maybe :map] :map :map :map]}
   [session message update]
   (reduce (fn [update hook]
@@ -355,7 +381,7 @@
                 (warn-hook-failure! :agent-message-post hook e)
                 update)))
           update
-          (resolve-hooks :agent-message-post)))
+          (resolve-hooks :agent-message-post (:plugins session))))
 
 ;; ---------------------------------------------------------------------------
 ;; Jar loading

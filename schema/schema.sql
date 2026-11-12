@@ -21,6 +21,9 @@ CREATE TABLE IF NOT EXISTS agent_config (
     response_format JSONB,
     -- NULL means every tool in the agent's registry; [] disables tools.
     tools TEXT[],
+    -- Plugin names (or ids) active for sessions using this configuration.
+    -- NULL means every enabled plugin; [] disables plugins.
+    plugins TEXT[],
     created_at TIMESTAMPTZ DEFAULT now(),
     updated_at TIMESTAMPTZ DEFAULT now()
 );
@@ -66,6 +69,9 @@ ALTER TABLE agent_session
 ALTER TABLE agent_session
     ADD COLUMN IF NOT EXISTS title TEXT;
 
+ALTER TABLE agent_config
+    ADD COLUMN IF NOT EXISTS plugins TEXT[];
+
 -- PostgreSQL has no `CREATE TYPE IF NOT EXISTS`, so guard the enum by hand.
 DO $$
 BEGIN
@@ -89,4 +95,35 @@ CREATE TABLE IF NOT EXISTS agent_session_event (
     content jsonb NOT NULL,
     agent_session_id INT NOT NULL
         REFERENCES agent_session(id) ON DELETE CASCADE
+);
+
+-- Git repositories registered with clai, for example so the daemon can create
+-- worktrees from them. `url` is the remote (or local) repository URL, and
+-- `name` is the short, human-readable label users and the UI address it by.
+CREATE TABLE IF NOT EXISTS git_repo (
+    id BIGSERIAL PRIMARY KEY,
+    -- Human-readable name; unique so a repository can be addressed by name.
+    name TEXT NOT NULL UNIQUE,
+    -- Repository URL (https, ssh, or a local path), passed to git as-is.
+    url TEXT NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT now(),
+    updated_at TIMESTAMPTZ DEFAULT now()
+);
+
+-- Git worktrees checked out from a registered repository. A worktree belongs
+-- to exactly one `git_repo` row and is removed with it.
+CREATE TABLE IF NOT EXISTS git_worktree (
+    id BIGSERIAL PRIMARY KEY,
+    git_repo_id BIGINT NOT NULL
+        REFERENCES git_repo(id) ON DELETE CASCADE,
+    -- Branch checked out in the worktree.
+    branch TEXT NOT NULL,
+    -- Absolute path of the worktree's directory.
+    directory TEXT NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT now(),
+    updated_at TIMESTAMPTZ DEFAULT now(),
+    -- git checks a branch out in at most one worktree per repository, and a
+    -- directory holds at most one worktree.
+    UNIQUE (git_repo_id, branch),
+    UNIQUE (directory)
 );

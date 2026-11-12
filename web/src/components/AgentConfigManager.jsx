@@ -11,12 +11,17 @@ const EMPTY_FORM = {
   format: '',
   toolsMode: 'default',
   toolIds: '',
+  pluginsMode: 'default',
+  pluginNames: '',
 }
 
 function configToForm(config) {
   const tools = config.tools
   const toolsMode =
     tools == null ? 'default' : tools.length === 0 ? 'none' : 'custom'
+  const plugins = config.plugins
+  const pluginsMode =
+    plugins == null ? 'default' : plugins.length === 0 ? 'none' : 'custom'
   return {
     configId: config.configId,
     name: config.name ?? '',
@@ -39,6 +44,8 @@ function configToForm(config) {
           : JSON.stringify(config.format, null, 2),
     toolsMode,
     toolIds: toolsMode === 'custom' ? tools.join(', ') : '',
+    pluginsMode,
+    pluginNames: pluginsMode === 'custom' ? plugins.join(', ') : '',
   }
 }
 
@@ -46,6 +53,19 @@ function toolsLabel(config) {
   if (config.tools == null) return 'agent default tools'
   if (config.tools.length === 0) return 'no tools'
   return `${config.tools.length} tool${config.tools.length === 1 ? '' : 's'}`
+}
+
+function pluginsLabel(config) {
+  if (config.plugins == null) return 'all plugins'
+  if (config.plugins.length === 0) return 'no plugins'
+  return `${config.plugins.length} plugin${config.plugins.length === 1 ? '' : 's'}`
+}
+
+function splitNames(text) {
+  return text
+    .split(/[\s,]+/)
+    .map((name) => name.trim())
+    .filter(Boolean)
 }
 
 function parseOptions(text) {
@@ -74,14 +94,21 @@ function parseFormat(text) {
 function parseTools(form) {
   if (form.toolsMode === 'default') return null
   if (form.toolsMode === 'none') return []
-  const tools = form.toolIds
-    .split(/[\s,]+/)
-    .map((id) => id.trim())
-    .filter(Boolean)
+  const tools = splitNames(form.toolIds)
   if (tools.length === 0) {
     throw new Error('Add at least one tool id, or choose "Agent default".')
   }
   return tools
+}
+
+function parsePlugins(form) {
+  if (form.pluginsMode === 'default') return null
+  if (form.pluginsMode === 'none') return []
+  const plugins = [...new Set(splitNames(form.pluginNames))]
+  if (plugins.length === 0) {
+    throw new Error('Add at least one plugin name, or choose "All enabled".')
+  }
+  return plugins
 }
 
 function formToConfig(form) {
@@ -107,6 +134,7 @@ function formToConfig(form) {
     options: parseOptions(form.options),
     format: parseFormat(form.format),
     tools: parseTools(form),
+    plugins: parsePlugins(form),
   }
 }
 
@@ -115,13 +143,31 @@ function formToConfig(form) {
  * same shapes as `/api/agent-configs`; this dialog keeps the sidebar's config
  * picker in sync through the hook that owns it.
  */
-export function AgentConfigManager({ configs, onSave, onDelete, onClose }) {
+export function AgentConfigManager({
+  configs,
+  plugins = [],
+  onSave,
+  onDelete,
+  onClose,
+}) {
   const [form, setForm] = useState(null)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
 
   const updateField = (field, value) => {
     setForm((previous) => ({ ...previous, [field]: value }))
+  }
+
+  const selectedPluginNames = new Set(splitNames(form?.pluginNames ?? ''))
+
+  const togglePlugin = (name) => {
+    const next = new Set(selectedPluginNames)
+    if (next.has(name)) {
+      next.delete(name)
+    } else {
+      next.add(name)
+    }
+    updateField('pluginNames', [...next].join(', '))
   }
 
   const startCreate = () => {
@@ -225,7 +271,8 @@ export function AgentConfigManager({ configs, onSave, onDelete, onClose }) {
                     >
                       <span className="config-row__name">{config.name}</span>
                       <span className="config-row__meta">
-                        {config.model || 'daemon model'} · {toolsLabel(config)}
+                        {config.model || 'daemon model'} · {toolsLabel(config)} ·{' '}
+                        {pluginsLabel(config)}
                       </span>
                     </button>
                     <button
@@ -364,6 +411,52 @@ export function AgentConfigManager({ configs, onSave, onDelete, onClose }) {
                       }
                       placeholder="read_file, run_command, write_file"
                     />
+                  )}
+                </div>
+
+                <div className="config-form__field">
+                  <span>Plugins</span>
+                  <select
+                    value={form.pluginsMode}
+                    onChange={(event) =>
+                      updateField('pluginsMode', event.target.value)
+                    }
+                  >
+                    <option value="default">All enabled plugins</option>
+                    <option value="none">No plugins</option>
+                    <option value="custom">Selected plugins</option>
+                  </select>
+                  {form.pluginsMode === 'custom' && (
+                    <>
+                      {plugins.length > 0 && (
+                        <div className="config-form__plugins">
+                          {plugins.map((plugin) => (
+                            <label
+                              className="config-form__plugin"
+                              key={plugin.pluginId ?? plugin.name}
+                            >
+                              <input
+                                type="checkbox"
+                                checked={selectedPluginNames.has(plugin.name)}
+                                onChange={() => togglePlugin(plugin.name)}
+                              />
+                              <span>
+                                {plugin.name}
+                                {plugin.enabled === false ? ' (disabled)' : ''}
+                              </span>
+                            </label>
+                          ))}
+                        </div>
+                      )}
+                      <input
+                        className="config-form__code"
+                        value={form.pluginNames}
+                        onChange={(event) =>
+                          updateField('pluginNames', event.target.value)
+                        }
+                        placeholder="todays-date, my-plugin"
+                      />
+                    </>
                   )}
                 </div>
 

@@ -4,8 +4,8 @@
   The browser cannot speak nREPL's bencode transport, so this namespace
   serves two things from the same JVM as the agent:
 
-    * a JSON HTTP API for sessions and agent configurations
-      (`/api/sessions`, `/api/agent-configs`, `/api/health`), and
+    * a JSON HTTP API for sessions, agent configurations, and plugins
+      (`/api/sessions`, `/api/agent-configs`, `/api/plugins`, `/api/health`), and
     * a WebSocket at `/ws` that streams agent updates and forwards Clojure
       evaluations to the running nREPL server.
 
@@ -172,6 +172,11 @@
   [agent]
   (:configs (agent/list-agent-configs! agent {})))
 
+(defn- list-plugins
+  "List the installed plugins for the UI's plugin picker."
+  [agent]
+  (:plugins (agent/list-plugins! agent {})))
+
 (defn- update-agent-config-from-request!
   "Update configuration `config-id` from the JSON request/body `config`."
   [agent config-id config]
@@ -306,6 +311,7 @@
       {\"type\": \"list_agent_configs\"}
       {\"type\": \"load_agent_config\", \"configId\": \"3\"}
       {\"type\": \"load_agent_config\", \"name\": \"fast\"}
+      {\"type\": \"list_plugins\"}
       {\"type\": \"prompt\", \"sessionId\": \"12\", \"prompt\": \"...\"}
       {\"type\": \"eval\", \"code\": \"(+ 1 1)\", \"ns\": \"user\"}
 
@@ -330,6 +336,11 @@
         (send! conn {:type      "agent_configs"
                      :requestId requestId
                      :configs   (list-agent-configs (:agent state))})
+
+        "list_plugins"
+        (send! conn {:type      "plugins"
+                     :requestId requestId
+                     :plugins   (list-plugins (:agent state))})
 
         "load_agent_config"
         (if-let [config (agent/load-agent-config! (:agent state)
@@ -508,6 +519,9 @@
 
       (and (= method :get) (= uri "/api/agent-configs"))
       (json-response 200 {:configs (list-agent-configs agent)})
+
+      (and (= method :get) (= uri "/api/plugins"))
+      (json-response 200 {:plugins (list-plugins agent)})
 
       (and (= method :get) (re-matches agent-config-path uri))
       (let [config-id (second (re-matches agent-config-path uri))]

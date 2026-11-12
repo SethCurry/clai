@@ -71,4 +71,11 @@
                   ;; "openproject_list_work_packages"
                   ;; "openproject_create_work_package"
                   ;; "openproject_update_work_package"
-                  ]}
+                  ]
+
+ ;; Which installed plugins are active for the agent's sessions. Plugin names
+ ;; (or database ids) are accepted. Omit the key to run every enabled plugin;
+ ;; set it to [] to disable plugins. A session's agent configuration can
+ ;; override this list.
+ ;; :plugins     ["todays-date"]
+ }

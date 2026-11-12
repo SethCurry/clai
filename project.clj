@@ -16,15 +16,33 @@
                  [ring/ring-jetty-adapter "1.15.4"]
                  [hiccup/hiccup "2.0.0"]
                  [com.datomic/local "1.0.301"]]
-  :main clai.core
   ;; `schema/` holds the canonical storage DDL, which `clai.daemon.postgres`
   ;; loads from the classpath at runtime (and the uberjar must carry).
   :resource-paths ["resources" "schema"]
   :target-path "target/%s"
   :repl-options {:init-ns user}
+  ;; Build the example today's-date plugin on its own with `lein plugin-jar`.
+  ;; The plugin source lives under `src/` so the main project can also load and
+  ;; test it directly; the profile packages only that namespace.
+  :aliases {"plugin-jar" ["with-profile" "plugin" "jar"]}
   :profiles
-  {:uberjar
-   {;; AOT'd `clai` classes refer to classes that dependency namespaces
+  {;; `:main` lives in the dev and uberjar profiles so plugin-only builds do
+   ;; not implicitly AOT-compile and package `clai.core`.
+   :dev
+   {:main clai.core}
+
+   :plugin
+   {:target-path "target/plugin"
+    :resource-paths ^:replace []
+    :aot [clai-plugin-todays-date.plugin]
+    :jar-name "clai-plugin-todays-date.jar"
+    ;; The source path is the project's `src/`, but only the plugin namespace
+    ;; belongs in the plugin jar.
+    :jar-exclusions [#"^(?!clai_plugin_todays_date/).*$"]}
+
+   :uberjar
+   {:main clai.core
+    ;; AOT'd `clai` classes refer to classes that dependency namespaces
     ;; generate with `defrecord`/`deftype`/`defprotocol` -- for example
     ;; `taoensso.telemere.impl.WrappedSignal`. Those classes are only written
     ;; into the jar when the namespace that defines them is AOT compiled as

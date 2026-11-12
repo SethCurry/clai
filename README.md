@@ -80,8 +80,22 @@ the daemon at `http://127.0.0.1:8080`. Override the proxy target with
 
 Plugins are Clojure jars configured in PostgreSQL. They can change session
 namespace creation, system-prompt assembly, and the handling of user prompts
-and agent messages. See [doc/plugins.md](doc/plugins.md) for the hook contract,
-the `plugin` table, and a complete example.
+and agent messages. Each agent configuration chooses its active plugins with
+the `plugins` list (the web UI exposes it in the configuration dialog); see
+[doc/plugins.md](doc/plugins.md) for the hook contract, the `plugin` table, and
+a complete example.
+
+The repository includes an example plugin that prepends today's date to the
+system prompt. Build it into a standalone jar with:
+
+```sh
+lein plugin-jar
+```
+
+The jar is written to `target/plugin/clai-plugin-todays-date.jar`; register it
+with entry namespace `clai-plugin-todays-date.plugin`. An optional
+`:date-format` setting accepts a `java.time.format` pattern (for example,
+`{:date-format "EEEE, MMMM d, yyyy"}`).
 
 ## cljdocs
 
