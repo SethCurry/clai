@@ -19,7 +19,8 @@
       (configs/list-configs client)
       (configs/load-config client \"1\")
       (configs/select-config client \"fast\")"
-  (:require [clai.daemon.postgres :as postgres])
+  (:require [clai.daemon.postgres :as postgres]
+            [clojure.string :as str])
   (:import [java.sql Array]))
 
 ;; ---------------------------------------------------------------------------
@@ -29,6 +30,22 @@
 (def non-empty-string
   "A string of at least one character."
   postgres/non-empty-string)
+
+(def AgentConfigInput
+  "A configuration accepted by [[create-config]] and [[update-config]].
+
+  `:options`, `:format`, and `:tools` use the same shapes as the config file
+  keys documented in `clai.config`. A missing or nil value clears the
+  corresponding override, except `:options`, which defaults to `{}`."
+  [:map
+   [:name non-empty-string]
+   [:model {:optional true} [:maybe :string]]
+   [:system-prompt {:optional true} [:maybe :string]]
+   [:max-tool-rounds {:optional true} [:maybe pos-int?]]
+   [:think {:optional true} [:maybe boolean?]]
+   [:options {:optional true} [:maybe [:map]]]
+   [:format {:optional true} [:maybe [:or :string [:map]]]]
+   [:tools {:optional true} [:maybe [:sequential :string]]]])
 
 (def agent-config
   "An agent configuration row, as returned by [[list-configs]],
@@ -69,6 +86,54 @@
         (postgres/ensure-schema! client)
         (swap! schema-ready conj client))))
   client)
+
+;; ---------------------------------------------------------------------------
+;; Input normalization
+;; ---------------------------------------------------------------------------
+
+(defn ^:no-doc prepare-config
+  "Validate and normalize a configuration input for storage.
+
+  Names and models are trimmed, blank models become NULL, tool ids are
+  trimmed, and `:options` defaults to an empty map. Missing optional keys are
+  treated as cleared overrides."
+  {:malli/schema [:-> :map #'AgentConfigInput]}
+  [config]
+  (let [blank->nil (fn [value]
+                     (let [text (some-> value str str/trim)]
+                       (when-not (str/blank? text) text)))
+        config     (cond-> config
+                     (contains? config :name)
+                     (update :name blank->nil)
+
+                     (contains? config :model)
+                     (update :model blank->nil)
+
+                     (contains? config :tools)
+                     (update :tools #(when (some? %)
+                                       (mapv (comp str/trim str) %)))
+
+                     true
+                     (update :options #(or % {})))]
+    (postgres/validate! AgentConfigInput config "agent configuration")))
+
+(defn- config-params
+  "The SQL parameters shared by [[create-config]] and [[update-config]].
+
+  The tools list is passed twice as JSON because PostgreSQL statements cannot
+  reuse a positional parameter: the first copy decides whether the column is
+  NULL (all tools) and the second expands the array."
+  [config]
+  (let [tools-json (some-> (:tools config) (postgres/->json "Agent config tools"))]
+    [(:name config)
+     (:model config)
+     (:system-prompt config)
+     (:max-tool-rounds config)
+     (:think config)
+     (postgres/->json (or (:options config) {}) "Agent config options")
+     (some-> (:format config) (postgres/->json "Agent config format"))
+     tools-json
+     tools-json]))
 
 ;; ---------------------------------------------------------------------------
 ;; Row conversion
@@ -132,20 +197,23 @@
 ;; Configuration SQL
 ;; ---------------------------------------------------------------------------
 
+(def ^:private config-columns
+  "The column list shared by every configuration query."
+  "id,
+   name,
+   model,
+   system_prompt,
+   max_tool_rounds,
+   think,
+   model_options::text AS model_options,
+   response_format::text AS response_format,
+   tools,
+   created_at,
+   updated_at")
+
 (def ^:private select-config-columns
-  "The columns shared by every configuration query."
-  "SELECT id,
-          name,
-          model,
-          system_prompt,
-          max_tool_rounds,
-          think,
-          model_options::text AS model_options,
-          response_format::text AS response_format,
-          tools,
-          created_at,
-          updated_at
-     FROM agent_config")
+  "A SELECT of the configuration columns, before any WHERE clause."
+  (str "SELECT " config-columns " FROM agent_config"))
 
 (def ^:private list-configs-sql
   (str select-config-columns " ORDER BY name, id"))
@@ -155,6 +223,34 @@
 
 (def ^:private select-config-sql
   (str select-config-columns " WHERE name = ?"))
+
+(def ^:private insert-config-sql
+  (str "INSERT INTO agent_config
+          (name, model, system_prompt, max_tool_rounds, think,
+           model_options, response_format, tools)
+        VALUES (?, ?, ?, ?, ?, CAST(? AS jsonb), CAST(? AS jsonb),
+                CASE WHEN ?::jsonb IS NULL
+                     THEN NULL
+                     ELSE ARRAY(SELECT jsonb_array_elements_text(?::jsonb))
+                END)
+        RETURNING " config-columns))
+
+(def ^:private update-config-sql
+  (str "UPDATE agent_config
+           SET name = ?,
+               model = ?,
+               system_prompt = ?,
+               max_tool_rounds = ?,
+               think = ?,
+               model_options = CAST(? AS jsonb),
+               response_format = CAST(? AS jsonb),
+               tools = CASE WHEN ?::jsonb IS NULL
+                            THEN NULL
+                            ELSE ARRAY(SELECT jsonb_array_elements_text(?::jsonb))
+                       END,
+               updated_at = now()
+         WHERE id = ?
+         RETURNING " config-columns))
 
 (defn- query-configs
   "Run `sql` with `params` and convert the rows to configurations."
@@ -195,6 +291,49 @@
     (some-> (postgres/exec-one! (:datasource client) ::select-config
                                 select-config-sql [name])
             row->config)))
+
+(defn create-config
+  "Store a new agent configuration and return it.
+
+  `config` is validated with [[AgentConfigInput]]; names are unique, so a
+  duplicate name makes the database reject the insert."
+  {:malli/schema [:-> #'postgres/client-schema #'AgentConfigInput #'agent-config]}
+  [client config]
+  (let [client (ready client)
+        config (prepare-config config)]
+    (row->config
+     (postgres/exec-one! (:datasource client) ::create-config
+                         insert-config-sql (config-params config)))))
+
+(defn update-config
+  "Replace the configuration named by `config-id` and return the updated row,
+  or nil when no such configuration exists."
+  {:malli/schema [:-> #'postgres/client-schema #'non-empty-string
+                  #'AgentConfigInput [:maybe #'agent-config]]}
+  [client config-id config]
+  (let [client (ready client)
+        config (prepare-config config)]
+    (when-let [id (config-key config-id)]
+      (some-> (postgres/exec-one! (:datasource client) ::update-config
+                                  update-config-sql
+                                  (conj (config-params config) id))
+              row->config))))
+
+(defn delete-config
+  "Delete the configuration named by `config-id`.
+
+  Sessions that selected it fall back to their own agent configuration
+  (`agent_session.agent_config_id` is `ON DELETE SET NULL`). Returns true when
+  a row was deleted."
+  {:malli/schema [:-> #'postgres/client-schema #'non-empty-string boolean?]}
+  [client config-id]
+  (let [client (ready client)]
+    (boolean
+     (when-let [id (config-key config-id)]
+       (pos? (postgres/updated-count
+              (postgres/exec-one! (:datasource client) ::delete-config
+                                  "DELETE FROM agent_config WHERE id = ?"
+                                  [id])))))))
 
 (defn config-exists?
   "Return true when `config-id` names a stored configuration."

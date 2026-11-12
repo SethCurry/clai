@@ -23,7 +23,19 @@
                         :user     \"clai\"
                         :password \"...\"
                         :ssl-mode \"prefer\"}
+       :openproject    {:url      \"https://openproject.example.com\"
+                        :api-key  \"opapi-...\"
+                        :project  \"my-project\" ; default for new tasks
+                        :type     \"Task\"}
        :tools          [\"read_file\" \"write_file\" ...]}
+
+  `:openproject` configures the OpenProject work-package tools. `:url` (or
+  `:base-url`) is the instance root or its `/api/v3` API root. Authenticate
+  with `:api-key` (an OpenProject API token, sent as a bearer token) or with
+  `:username`/`:password` (HTTP basic auth). `:project` and `:type` are
+  optional defaults for newly created work packages; `:timeout` is in
+  milliseconds. Omitted values fall back to the `OPENPROJECT_*` environment
+  variables documented in `clai.agent.tools.builtin.openproject`.
 
   `:tools` is a vector of tool ids (see `clai.agent.tools.builtin/built-in-tools`) to
   enable. When omitted, every tool in the agent's registry is enabled; when
@@ -86,6 +98,21 @@
    [:socket-timeout {:optional true} pos-int?]
    [:application-name {:optional true} non-empty-string]])
 
+(def openproject-config
+  "The `:openproject` sub-map of a config file, read by the OpenProject
+  work-package tools. Omitted keys fall back to `OPENPROJECT_*` environment
+  variables."
+  [:map
+   [:url {:optional true} non-empty-string]
+   [:base-url {:optional true} non-empty-string]
+   [:api-key {:optional true} [:maybe :string]]
+   [:token {:optional true} [:maybe :string]]
+   [:username {:optional true} [:maybe :string]]
+   [:password {:optional true} [:maybe :string]]
+   [:project {:optional true} [:maybe [:or non-empty-string :int]]]
+   [:type {:optional true} [:maybe [:or non-empty-string :int]]]
+   [:timeout {:optional true} pos-int?]])
+
 (def config
   "An agent config map as returned by `load-config`. Every key is optional
   (omitted keys fall back to environment variables and defaults), and unknown
@@ -99,6 +126,7 @@
    [:format {:optional true} [:or :string [:map]]]
    [:ollama {:optional true} ollama-config]
    [:postgres {:optional true} postgres-config]
+   [:openproject {:optional true} openproject-config]
    [:tools {:optional true} [:sequential :string]]])
 
 ;; ---------------------------------------------------------------------------

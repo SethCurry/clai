@@ -1,3 +1,5 @@
+import { Markdown } from './Markdown.jsx'
+
 /**
  * Flatten an event's content, which may be a string, a content block, or a
  * list of blocks, into display text.
@@ -70,7 +72,9 @@ export function UpdateView({ update }) {
     return (
       <div className="message message--user">
         <div className="message__label">You</div>
-        <div className="message__body">{text}</div>
+        <div className="message__body">
+          <Markdown text={text} />
+        </div>
       </div>
     )
   }
@@ -79,7 +83,9 @@ export function UpdateView({ update }) {
     return (
       <div className="message message--agent">
         <div className="message__label">clai</div>
-        <div className="message__body">{text}</div>
+        <div className="message__body">
+          <Markdown text={text} />
+        </div>
       </div>
     )
   }

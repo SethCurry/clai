@@ -1,8 +1,9 @@
 (ns clai.repl
   "A REPL-friendly, in-process client for the `clai` agent.
 
-  [[current-agent]] is a plain agent map built by
-  `clai.agent.core/ollama-agent`.
+  [[current-agent]] is a delay producing a plain agent map built by
+  `clai.agent.core/ollama-agent`, so loading this namespace does not create an
+  agent by itself.
   The helpers here call its session and prompt operations directly; nothing
   goes through stdio or a wire protocol, so the agent can be driven from a
   REPL while stdout stays available for the conversation itself.
@@ -51,10 +52,11 @@
   nil)
 
 (def current-agent
-  "The in-process agent [[connect!]] uses. It is read when the connection is
-  established, so redefining or rebinding it takes effect on the next
-  connection."
-  (agent/ollama-agent))
+  "A delay producing the in-process agent [[connect!]] uses. It is forced
+  when the connection is established, so redefining or rebinding it takes
+  effect on the next connection and loading this namespace does not create an
+  agent (or a database client) by itself."
+  (delay (agent/ollama-agent)))
 
 (defonce ^:private runtime
   ;; The live in-process agent, or nil: `{:agent <agent map>}`.
@@ -167,7 +169,7 @@
 
   The optional `agent` argument is an agent map to use instead of
   [[current-agent]]; it is used only when a new connection is created."
-  ([] (connect! (deref #'current-agent)))
+  ([] (connect! (force (deref #'current-agent))))
   ([agent]
    (or (:agent @runtime)
        (do

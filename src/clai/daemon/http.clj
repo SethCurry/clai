@@ -23,6 +23,7 @@
             [clai.daemon.nrepl :as nrepl-bridge]
             [clai.events.schema :as events]
             [clai.log]
+            [clai.repl :as repl]
             [clai.util :as util]
             [clojure.java.io :as io]
             [clojure.string :as str]
@@ -149,9 +150,14 @@
 
 (defn- session-payload
   "Load `session-id` and return the summary plus the event updates a chat view
-  should replay. Returns nil when the session does not exist."
+  should replay. Returns nil when the session does not exist.
+
+  The session's REPL namespace (`sessions.<id>`) is created or refreshed as a
+  side effect, so the web REPL can evaluate in the namespace attached to the
+  session."
   [agent session-id]
   (when-let [session (agent/load-session! agent {:sessionId (str session-id)})]
+    (repl/namespace-builder {:session (select-keys session [:sessionId :cwd])})
     (assoc (session-summary session)
            :updates (ollama-prompt/history->updates (:history session)))))
 
@@ -164,6 +170,11 @@
   "List the stored agent configurations for the UI."
   [agent]
   (:configs (agent/list-agent-configs! agent {})))
+
+(defn- update-agent-config-from-request!
+  "Update configuration `config-id` from the JSON request/body `config`."
+  [agent config-id config]
+  (agent/update-agent-config! agent (assoc config :configId (str config-id))))
 
 ;; ---------------------------------------------------------------------------
 ;; WebSocket message handling
@@ -488,6 +499,32 @@
         (if-let [config (agent/load-agent-config! agent {:configId config-id})]
           (json-response 200 config)
           (json-response 404 {:error (str "No agent configuration " config-id)})))
+
+      (and (= method :post) (= uri "/api/agent-configs"))
+      (try
+        (let [config (read-json-body request)]
+          (json-response 201 (agent/create-agent-config! agent config)))
+        (catch Throwable e
+          (json-response 400 {:error (util/error-message e)})))
+
+      (and (= method :put) (re-matches agent-config-path uri))
+      (let [config-id (second (re-matches agent-config-path uri))]
+        (try
+          (let [config (read-json-body request)]
+            (if-let [updated (update-agent-config-from-request!
+                              agent config-id config)]
+              (json-response 200 updated)
+              (json-response 404
+                             {:error (str "No agent configuration " config-id)})))
+          (catch Throwable e
+            (json-response 400 {:error (util/error-message e)}))))
+
+      (and (= method :delete) (re-matches agent-config-path uri))
+      (let [config-id (second (re-matches agent-config-path uri))]
+        (if (agent/delete-agent-config! agent {:configId config-id})
+          (json-response 200 {:deleted config-id})
+          (json-response 404
+                         {:error (str "No agent configuration " config-id)})))
 
       (and (= method :post) (= uri "/api/sessions"))
       (try

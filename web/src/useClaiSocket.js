@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { sessionNamespace } from './sessionNamespace.js'
 
 // Reconnect quickly at first, then back off so a daemon restart is picked up
 // without hammering it.
@@ -24,6 +25,41 @@ function applyUpdate(updates, update) {
 
 function errorId() {
   return `${Date.now()}-${Math.random().toString(16).slice(2)}`
+}
+
+/**
+ * Append one nREPL response to the REPL entry for `requestId`, preserving the
+ * form the user submitted. An eval produces several responses (a value and a
+ * trailing `done` status, for example), so entries collect all of them.
+ */
+function appendEvalResponse(entries, requestId, response) {
+  const index = entries.findIndex((entry) => entry.requestId === requestId)
+  if (index === -1) {
+    return [
+      ...entries,
+      { id: errorId(), requestId, code: '', responses: [response] },
+    ]
+  }
+  const next = entries.slice()
+  next[index] = {
+    ...next[index],
+    responses: [...(next[index].responses ?? []), response],
+  }
+  return next
+}
+
+async function responseBody(response) {
+  const text = await response.text()
+  if (!text) return {}
+  try {
+    return JSON.parse(text)
+  } catch {
+    return {}
+  }
+}
+
+function sortConfigs(configs) {
+  return [...configs].sort((a, b) => a.name.localeCompare(b.name))
 }
 
 /**
@@ -181,14 +217,9 @@ export function useClaiSocket() {
             break
 
           case 'eval':
-            setReplEntries((previous) => [
-              ...previous,
-              {
-                id: errorId(),
-                requestId: message.requestId,
-                response: message.response,
-              },
-            ])
+            setReplEntries((previous) =>
+              appendEvalResponse(previous, message.requestId, message.response),
+            )
             break
 
           case 'eval_done':
@@ -267,6 +298,73 @@ export function useClaiSocket() {
     [send],
   )
 
+  const saveAgentConfig = useCallback(
+    async (config, configId) => {
+      const path = configId
+        ? `/api/agent-configs/${encodeURIComponent(configId)}`
+        : '/api/agent-configs'
+      try {
+        const response = await fetch(path, {
+          method: configId ? 'PUT' : 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(config),
+        })
+        const body = await responseBody(response)
+        if (!response.ok) {
+          throw new Error(
+            body.error ||
+              `Could not save agent configuration (${response.status}).`,
+          )
+        }
+        setAgentConfigs((previous) =>
+          sortConfigs([
+            ...previous.filter(
+              (saved) => saved.configId !== body.configId,
+            ),
+            body,
+          ]),
+        )
+        if (!configId) setSelectedConfigId(body.configId)
+        return body
+      } catch (failure) {
+        pushError(failure.message || String(failure))
+        throw failure
+      }
+    },
+    [pushError],
+  )
+
+  const deleteAgentConfig = useCallback(
+    async (configId) => {
+      try {
+        const response = await fetch(
+          `/api/agent-configs/${encodeURIComponent(configId)}`,
+          { method: 'DELETE' },
+        )
+        const body = await responseBody(response)
+        if (!response.ok) {
+          throw new Error(
+            body.error ||
+              `Could not delete agent configuration (${response.status}).`,
+          )
+        }
+        setAgentConfigs((previous) =>
+          previous.filter((config) => config.configId !== String(configId)),
+        )
+        setSelectedConfigId((previous) =>
+          previous === String(configId) ? '' : previous,
+        )
+        // Deleting a configuration clears it from sessions that selected it.
+        send({ type: 'list_sessions' })
+        return body
+      } catch (failure) {
+        pushError(failure.message || String(failure))
+        throw failure
+      }
+    },
+    [pushError, send],
+  )
+
   const runPrompt = useCallback(
     (prompt) => {
       if (!currentSession || !prompt.trim()) return false
@@ -289,18 +387,29 @@ export function useClaiSocket() {
     (code, namespace) => {
       if (!code.trim()) return false
       setEvalRunning(true)
+      const evalNamespace = namespace?.trim() || sessionNamespace(currentSession)
       const requestId = send({
         type: 'eval',
         code,
-        ns: namespace?.trim() || 'user',
+        ns: evalNamespace,
       })
       if (!requestId) {
         setEvalRunning(false)
         return false
       }
+      setReplEntries((previous) => [
+        ...previous,
+        {
+          id: errorId(),
+          requestId,
+          code,
+          namespace: evalNamespace,
+          responses: [],
+        },
+      ])
       return true
     },
-    [send],
+    [currentSession, send],
   )
 
   const clearRepl = useCallback(() => setReplEntries([]), [])
@@ -322,6 +431,8 @@ export function useClaiSocket() {
     refreshSessions,
     loadSession,
     deleteSession,
+    saveAgentConfig,
+    deleteAgentConfig,
     runPrompt,
     evalForm,
     clearRepl,

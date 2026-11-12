@@ -64,6 +64,20 @@
   (let [path (write-cfg "{:tools [\"read_file\" \"run_command\"]}")]
     (is (= ["read_file" "run_command"] (:tools (config/load-config path))))))
 
+(deftest load-config-openproject-submap
+  (let [path (write-cfg
+              "{:openproject {:url \"https://op.example.com\"
+                              :api-key \"tok\"
+                              :project \"demo\"
+                              :type \"Task\"
+                              :timeout 1000}}")]
+    (is (= {:url     "https://op.example.com"
+            :api-key "tok"
+            :project "demo"
+            :type    "Task"
+            :timeout 1000}
+           (:openproject (config/load-config path))))))
+
 (deftest load-config-malformed-throws
   (let [path (write-cfg "{:model ")]          ; unterminated
     (is (thrown-with-msg?

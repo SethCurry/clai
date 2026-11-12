@@ -22,6 +22,7 @@ export function SessionSidebar({
   sessionInfo,
   onNewSession,
   onSelectConfig,
+  onManageConfigs,
   onRefresh,
   onLoadSession,
   onDeleteSession,
@@ -41,7 +42,16 @@ export function SessionSidebar({
       </div>
 
       <div className="sidebar__config">
-        <label htmlFor="agent-config">Agent config</label>
+        <div className="sidebar__config-head">
+          <label htmlFor="agent-config">Agent config</label>
+          <button
+            type="button"
+            className="sidebar__config-manage"
+            onClick={onManageConfigs}
+          >
+            Manage
+          </button>
+        </div>
         <select
           id="agent-config"
           value={selectedConfigId}

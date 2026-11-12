@@ -174,6 +174,30 @@
              (agent/load-agent-config! handler {:name "careful"})))
       (is (nil? (agent/load-agent-config! handler {}))))))
 
+(deftest agent-configurations-can-be-created-updated-and-deleted
+  (let [handler {:postgres ::postgres}]
+    (with-redefs [agent-configs/create-config
+                  (fn [_ config]
+                    (assoc config :configId "10"))
+
+                  agent-configs/update-config
+                  (fn [_ config-id config]
+                    (when (= "10" config-id)
+                      (assoc config :configId config-id)))
+
+                  agent-configs/delete-config
+                  (fn [_ config-id]
+                    (= "10" config-id))]
+      (is (= {:name "fast" :configId "10"}
+             (agent/create-agent-config! handler {:name "fast"})))
+      (is (= {:name "slow" :configId "10"}
+             (agent/update-agent-config! handler {:configId "10"
+                                                  :name     "slow"})))
+      (is (nil? (agent/update-agent-config! handler {:configId "99"
+                                                     :name     "missing"})))
+      (is (true? (agent/delete-agent-config! handler {:configId "10"})))
+      (is (false? (agent/delete-agent-config! handler {:configId "99"}))))))
+
 (deftest new-session-appends-agents-md-to-system-prompt
   (let [dir    (temp-dir)
         agents (File. dir "AGENTS.md")]

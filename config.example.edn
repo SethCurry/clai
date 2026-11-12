@@ -45,6 +45,18 @@
                   :connect-timeout 10      ; seconds
                   :socket-timeout  30}
 
+ ;; OpenProject work-package tools. Uncomment and configure to let the agent
+ ;; list projects, list tasks, create tasks, and update tasks. :url may be the
+ ;; instance root or its /api/v3 API root. Authenticate with :api-key (an
+ ;; OpenProject API token) or :username/:password. Omitted keys fall back to
+ ;; OPENPROJECT_URL / OPENPROJECT_API_KEY / OPENPROJECT_USERNAME /
+ ;; OPENPROJECT_PASSWORD / OPENPROJECT_PROJECT / OPENPROJECT_TYPE /
+ ;; OPENPROJECT_TIMEOUT.
+ ;; :openproject {:url     "https://openproject.example.com"
+ ;;               :api-key "opapi-..."
+ ;;               :project "my-project" ; default project for new tasks
+ ;;               :type    "Task"}      ; default type for new tasks
+
  ;; Which built-in tools to expose to the model, in this order. Unknown ids
  ;; are skipped. Omit the key entirely to enable every built-in tool; set it
  ;; to [] to disable tools entirely.
@@ -53,4 +65,10 @@
                   "list_directory"
                   "run_command"
                   "eval_clojure"
-                  "spawn_agent"]}
+                  "spawn_agent"
+                  ;; OpenProject tools (configure :openproject above first):
+                  ;; "openproject_list_projects"
+                  ;; "openproject_list_work_packages"
+                  ;; "openproject_create_work_package"
+                  ;; "openproject_update_work_package"
+                  ]}

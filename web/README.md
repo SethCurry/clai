@@ -31,12 +31,34 @@ Client messages:
 
 ```json
 {"type":"list_sessions"}
-{"type":"new_session","cwd":"/optional/working/directory"}
+{"type":"new_session","cwd":"/optional/working/directory","configId":"3"}
 {"type":"load_session","sessionId":"..."}
 {"type":"delete_session","sessionId":"..."}
+{"type":"list_agent_configs"}
+{"type":"load_agent_config","configId":"3"}
+{"type":"load_agent_config","name":"fast"}
 {"type":"prompt","sessionId":"...","prompt":"..."}
-{"type":"eval","code":"(+ 1 2)","ns":"user"}
+{"type":"eval","code":"(+ 1 2)","ns":"sessions.123"}
 ```
+
+An `eval` without `ns` defaults to the namespace attached to the active
+session (`sessions.<session-id>`), or `user` when no session is selected.
+
+Agent configurations can also be managed over HTTP; the sidebar's
+**Manage** button uses these endpoints:
+
+```text
+GET    /api/agent-configs
+GET    /api/agent-configs/:id
+POST   /api/agent-configs
+PUT    /api/agent-configs/:id
+DELETE /api/agent-configs/:id
+```
+
+Request and response bodies use the same shape as the `agent-config` rows,
+with kebab-case keys such as `system-prompt` and `max-tool-rounds`. A `null`
+`tools` value means the agent's default registry, while an empty array
+disables tools for sessions that select the configuration.
 
 Server messages:
 
@@ -59,9 +81,15 @@ card until the status becomes `completed` or `failed`.
 ## Layout
 
 - `src/useClaiSocket.js` owns the WebSocket, reconnects, and reduces server
-  messages into app state.
-- `src/App.jsx` is the shell: top bar, sidebar, chat, and optional REPL.
+  messages into app state. Agent-configuration writes go through the HTTP API
+  and update the same state.
+- `src/App.jsx` is the shell: top bar, sidebar, chat, optional REPL, and the
+  agent-configuration dialog.
+- `src/components/AgentConfigManager.jsx` creates, edits, and deletes stored
+  agent configurations.
 - `src/components/UpdateView.jsx` renders messages, thoughts, and tool calls.
 - `src/components/Chat.jsx` is the prompt timeline and composer.
 - `src/components/ReplPanel.jsx` evaluates Clojure through the daemon's nREPL
-  connection.
+  connection, defaulting to the selected session's `sessions.<id>` namespace.
+- `src/sessionNamespace.js` derives that namespace from a session id, matching
+  `clai.repl/session-ns`.

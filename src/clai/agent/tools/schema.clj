@@ -66,6 +66,7 @@
    [:chat-opts {:optional true} [:map]]
    [:max-rounds {:optional true} [:maybe pos-int?]]
    [:agent-depth {:optional true} [:maybe :int]]
+   [:openproject {:optional true} [:maybe [:map]]]
    [:on-output {:optional true} [:maybe fn?]]])
 
 (def tool-result

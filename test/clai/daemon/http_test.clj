@@ -181,6 +181,44 @@
                    (response-body (handler (request :get "/api/agent-configs/1")))))
             (is (= 404 (:status (handler (request :get "/api/agent-configs/999")))))))))))
 
+(deftest agent-configurations-can-be-created-updated-and-deleted
+  (with-fake-agent (atom {})
+    (fn []
+      (with-redefs [agent/create-agent-config!
+                    (fn [_ config]
+                      (assoc config :configId "10"))
+
+                    agent/update-agent-config!
+                    (fn [_ {:keys [configId] :as config}]
+                      (when (= "10" configId)
+                        (assoc config :configId configId)))
+
+                    agent/delete-agent-config!
+                    (fn [_ {:keys [configId]}]
+                      (= "10" configId))]
+        (let [handler (http/handler (state (atom {})))
+              created (handler (request :post "/api/agent-configs"
+                                        {:name "fast" :model "gemma3"}))]
+          (is (= 201 (:status created)))
+          (is (= {:configId "10" :name "fast" :model "gemma3"}
+                 (response-body created)))
+
+          (let [updated (handler (request :put "/api/agent-configs/10"
+                                          {:name "fast" :model "tiny"}))]
+            (is (= 200 (:status updated)))
+            (is (= {:configId "10" :name "fast" :model "tiny"}
+                   (response-body updated))))
+
+          (is (= 404 (:status (handler (request :put "/api/agent-configs/99"
+                                                {:name "missing"})))))
+
+          (let [deleted (handler (request :delete "/api/agent-configs/10"))]
+            (is (= 200 (:status deleted)))
+            (is (= "10" (:deleted (response-body deleted)))))
+
+          (is (= 404 (:status (handler (request :delete
+                                                "/api/agent-configs/99"))))))))))
+
 (deftest sessions-remember-their-agent-configuration
   (let [store (atom {})]
     (with-fake-agent store

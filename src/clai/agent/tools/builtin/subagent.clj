@@ -99,7 +99,8 @@
    :tool-registry registry
    :chat-opts    chat-opts
    :max-rounds   max-rounds
-   :agent-depth  (inc depth)})
+   :agent-depth  (inc depth)
+   :openproject  (:openproject ctx)})
 
 ;; ---------------------------------------------------------------------------
 ;; Conversation loop

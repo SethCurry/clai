@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { AgentConfigManager } from './components/AgentConfigManager.jsx'
 import { Chat } from './components/Chat.jsx'
 import { ErrorToasts } from './components/ErrorToasts.jsx'
 import { ReplPanel } from './components/ReplPanel.jsx'
@@ -40,6 +41,7 @@ function EmptyState({ hasSessions, onNewSession }) {
 export default function App() {
   const clai = useClaiSocket()
   const [replOpen, setReplOpen] = useState(true)
+  const [configManagerOpen, setConfigManagerOpen] = useState(false)
   const statusLabel = STATUS_LABELS[clai.status] || clai.status
 
   return (
@@ -82,6 +84,7 @@ export default function App() {
           sessionInfo={clai.sessionInfo}
           onNewSession={clai.newSession}
           onSelectConfig={clai.selectAgentConfig}
+          onManageConfigs={() => setConfigManagerOpen(true)}
           onRefresh={clai.refreshSessions}
           onLoadSession={clai.loadSession}
           onDeleteSession={clai.deleteSession}
@@ -104,6 +107,7 @@ export default function App() {
         {replOpen && (
           <ReplPanel
             nreplPort={clai.sessionInfo.nreplPort}
+            currentSession={clai.currentSession}
             entries={clai.replEntries}
             running={clai.evalRunning}
             onEval={clai.evalForm}
@@ -114,6 +118,15 @@ export default function App() {
       </div>
 
       <ErrorToasts errors={clai.errors} onDismiss={clai.dismissError} />
+
+      {configManagerOpen && (
+        <AgentConfigManager
+          configs={clai.agentConfigs}
+          onSave={clai.saveAgentConfig}
+          onDelete={clai.deleteAgentConfig}
+          onClose={() => setConfigManagerOpen(false)}
+        />
+      )}
     </div>
   )
 }

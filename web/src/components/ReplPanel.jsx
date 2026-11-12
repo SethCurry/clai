@@ -1,9 +1,18 @@
 import { useEffect, useRef, useState } from 'react'
+import { sessionNamespace } from '../sessionNamespace.js'
 
 function Response({ response }) {
   if (!response) return null
   const hasStatusError =
     Array.isArray(response.status) && response.status.includes('eval-error')
+  const hasContent =
+    response.out ||
+    response.err ||
+    response.value != null ||
+    response.ex ||
+    hasStatusError
+  // nREPL sends a trailing response that only carries a `done` status.
+  if (!hasContent) return null
   return (
     <div className="repl__response">
       {response.out && <pre className="repl__out">{response.out}</pre>}
@@ -20,11 +29,33 @@ function Response({ response }) {
 }
 
 /**
+ * One submitted form and the responses it produced. The form stays visible so
+ * the REPL output reads as a history of commands, not just their results.
+ */
+function Entry({ entry }) {
+  return (
+    <article className="repl__entry">
+      <header className="repl__entry-header">
+        {entry.namespace && (
+          <span className="repl__entry-ns">{entry.namespace}</span>
+        )}
+        <pre className="repl__code">{entry.code}</pre>
+      </header>
+      {(entry.responses ?? []).map((response, index) => (
+        <Response key={index} response={response} />
+      ))}
+    </article>
+  )
+}
+
+/**
  * A Clojure REPL backed by the daemon's nREPL connection. It shares the
  * WebSocket with the chat, so evaluations run in the same JVM as the agent.
+ * The namespace defaults to the one attached to the selected session.
  */
 export function ReplPanel({
   nreplPort,
+  currentSession,
   entries,
   running,
   onEval,
@@ -32,8 +63,13 @@ export function ReplPanel({
   onClose,
 }) {
   const [code, setCode] = useState('(+ 1 2)')
-  const [namespace, setNamespace] = useState('user')
+  const defaultNamespace = sessionNamespace(currentSession)
+  const [namespace, setNamespace] = useState(defaultNamespace)
   const outputRef = useRef(null)
+
+  useEffect(() => {
+    setNamespace(defaultNamespace)
+  }, [defaultNamespace])
 
   useEffect(() => {
     const node = outputRef.current
@@ -80,9 +116,7 @@ export function ReplPanel({
             already loaded.
           </p>
         ) : (
-          entries.map((entry) => (
-            <Response key={entry.id} response={entry.response} />
-          ))
+          entries.map((entry) => <Entry key={entry.id} entry={entry} />)
         )}
         {running && <div className="repl__running">evaluating…</div>}
       </div>

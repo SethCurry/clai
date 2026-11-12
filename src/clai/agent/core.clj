@@ -240,6 +240,59 @@
 
       :else nil)))
 
+(defn create-agent-config!
+  "Create a stored agent configuration and return it."
+  {:malli/schema [:-> :map #'agent-configs/AgentConfigInput :map]}
+  [agent config]
+  (let [config (agent-configs/create-config (:postgres agent) config)]
+    (tel/log! {:level :info
+               :id    ::agent-config-created
+               :data  {:configId (:configId config)
+                       :name     (:name config)}}
+              "Created agent configuration")
+    config))
+
+(defn update-agent-config!
+  "Replace the stored agent configuration named by `opts`'s `:configId`.
+
+  Returns the updated configuration, or nil when no such configuration
+  exists."
+  {:malli/schema [:-> :map [:map
+                            [:configId {:optional true}
+                             [:maybe [:or :string :int]]]
+                            [:name {:optional true} :string]]
+                  [:maybe :map]]}
+  [agent {:keys [configId] :as config}]
+  (when-not (str/blank? (str configId))
+    (when-let [updated (agent-configs/update-config (:postgres agent)
+                                                    (str configId)
+                                                    (dissoc config :configId))]
+      (tel/log! {:level :info
+                 :id    ::agent-config-updated
+                 :data  {:configId (:configId updated)
+                         :name     (:name updated)}}
+                "Updated agent configuration")
+      updated)))
+
+(defn delete-agent-config!
+  "Delete the stored agent configuration named by `opts`'s `:configId`.
+
+  Returns true when a configuration was deleted, false when none matched."
+  {:malli/schema [:-> :map [:map
+                            [:configId {:optional true}
+                             [:maybe [:or :string :int]]]]
+                  boolean?]}
+  [agent {:keys [configId]}]
+  (let [deleted? (and (not (str/blank? (str configId)))
+                      (agent-configs/delete-config (:postgres agent)
+                                                   (str configId)))]
+    (tel/log! {:level (if deleted? :info :warn)
+               :id    ::agent-config-deleted
+               :data  {:configId configId
+                       :deleted? deleted?}}
+              "Deleted agent configuration")
+    (boolean deleted?)))
+
 (defn- session-agent-config
   "The stored configuration selected by `session`, or nil."
   [agent session]
@@ -358,7 +411,7 @@
   the `:cwd`, it carries the loop's live client, model, registry, and limits so
   tools like `spawn_agent` can run their own conversations."
   [session-id {:keys [postgres client model tool-registry chat-opts max-rounds
-                      agent-depth]}]
+                      agent-depth openproject]}]
   {:cwd           (:cwd (sessions/load-session postgres session-id))
    :session-id    session-id
    :client        client
@@ -366,7 +419,8 @@
    :tool-registry tool-registry
    :chat-opts     chat-opts
    :max-rounds    max-rounds
-   :agent-depth   (long (or agent-depth 0))})
+   :agent-depth   (long (or agent-depth 0))
+   :openproject   openproject})
 
 (defn- call-tool-ctx
   "Build the context for one tool call: the session context plus an
@@ -627,7 +681,8 @@
      :tool-specs         tool-specs
      :max-rounds         max-rounds
      :sys-prompt         sys-prompt
-     :chat-opts          chat-opts}))
+     :chat-opts          chat-opts
+     :openproject        (:openproject cfg)}))
 
 (defn ollama-agent
   "Build an in-process agent that answers prompts using an Ollama chat model.
