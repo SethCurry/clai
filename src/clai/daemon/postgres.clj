@@ -16,13 +16,19 @@
       :port  CLAI_POSTGRES_PORT, PGPORT       (default 5432)
       :database CLAI_POSTGRES_DATABASE,
                 CLAI_POSTGRES_DB, PGDATABASE (default \"clai\")
-      :user  CLAI_POSTGRES_USER, PGUSER
-      :password CLAI_POSTGRES_PASSWORD, PGPASSWORD
+      :user  CLAI_POSTGRES_USER, PGUSER       (default \"clai\")
+      :password CLAI_POSTGRES_PASSWORD, PGPASSWORD (default \"secret\")
       :ssl-mode CLAI_POSTGRES_SSL_MODE,
                 CLAI_POSTGRES_SSLMODE, PGSSLMODE
       :connect-timeout CLAI_POSTGRES_CONNECT_TIMEOUT (seconds)
       :socket-timeout  CLAI_POSTGRES_SOCKET_TIMEOUT  (seconds)
       :application-name CLAI_POSTGRES_APPLICATION_NAME (default \"clai\")
+
+  The default user and password match the local development database in
+  `docker-compose.yml`, so a fresh checkout can connect without a config file.
+  They are only used when no `:url` is given; a full JDBC URL supplies its own
+  credentials. Set `:user`/`:password` or the environment variables above to
+  connect anywhere else.
 
   A full JDBC URL can be given as `:url` (or `CLAI_POSTGRES_URL` /
   `DATABASE_URL`). When present it wins over the individual host/port/database
@@ -107,6 +113,8 @@
 (def ^:private default-host "localhost")
 (def ^:private default-port 5432)
 (def ^:private default-database "clai")
+(def ^:private default-user "clai")
+(def ^:private default-password "secret")
 (def ^:private default-application-name "clai")
 
 (defn ^:no-doc validate!
@@ -176,11 +184,16 @@
                                             "CLAI_POSTGRES_DB"
                                             "PGDATABASE")
                              default-database)
+        ;; A JDBC URL carries its own target and credentials, so the local
+        ;; development user/password defaults only apply to the
+        ;; host/port/database form.
         user             (or (:user opts)
-                             (env-non-blank "CLAI_POSTGRES_USER" "PGUSER"))
+                             (env-non-blank "CLAI_POSTGRES_USER" "PGUSER")
+                             (when-not url default-user))
         password         (if (contains? opts :password)
                            (:password opts)
-                           (env-raw "CLAI_POSTGRES_PASSWORD" "PGPASSWORD"))
+                           (or (env-raw "CLAI_POSTGRES_PASSWORD" "PGPASSWORD")
+                               (when-not url default-password)))
         ssl-mode         (or (:ssl-mode opts)
                              (env-non-blank "CLAI_POSTGRES_SSL_MODE"
                                             "CLAI_POSTGRES_SSLMODE"
@@ -245,9 +258,11 @@
 
   Options (all optional) are described by [[client-options]]. Individual
   connection settings fall back to `CLAI_POSTGRES_*` / standard `PG*`
-  environment variables and then to localhost:5432/clai. Pass `:url` for a
-  complete JDBC URL, or `:datasource` to use an existing `javax.sql.DataSource`
-  (for example a HikariCP pool) instead of building one.
+  environment variables and then to the local development database
+  (localhost:5432/clai as user `clai`, password `secret`, matching
+  `docker-compose.yml`). Pass `:url` for a complete JDBC URL (which supplies
+  its own credentials), or `:datasource` to use an existing
+  `javax.sql.DataSource` (for example a HikariCP pool) instead of building one.
 
   No connection is opened by this function; the first query does that. Call
   [[ensure-schema!]] before using the storage functions."

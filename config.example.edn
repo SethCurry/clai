@@ -29,11 +29,13 @@
                   :timeout  600000}           ; milliseconds
 
  ;; PostgreSQL storage for agent sessions and their event logs. Omitted keys
- ;; fall back to CLAI_POSTGRES_* / PG* environment variables and then
- ;; localhost:5432/clai. :url may be used instead of :host/:port/:database for
- ;; a full JDBC URL. The agent connects lazily and applies schema/schema.sql on
- ;; the first session operation; call clai.daemon.postgres/ensure-schema! to fail
- ;; fast at startup instead.
+ ;; fall back to CLAI_POSTGRES_* / PG* environment variables and then to the
+ ;; local development database (localhost:5432/clai as clai/secret, matching
+ ;; docker-compose.yml). :url may be used instead of :host/:port/:database for
+ ;; a full JDBC URL; its credentials replace the user/password defaults. The
+ ;; agent connects lazily and applies schema/schema.sql on the first session
+ ;; operation; call clai.daemon.postgres/ensure-schema! to fail fast at startup
+ ;; instead.
  :postgres       {:host     "localhost"
                   :port     5432
                   :database "clai"

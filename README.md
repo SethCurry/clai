@@ -37,10 +37,13 @@ storage schema on startup when the tables are missing:
 docker compose up -d
 ```
 
-Copy `config.example.edn` to `./clai.edn` (or export the corresponding
-`CLAI_POSTGRES_*` variables) so clai connects with those credentials. The
-data directory is owned by the container's `postgres` user; to reset it, run
-`docker compose down` and remove `./local/postgres` as root.
+Copy `config.example.edn` to `./clai.edn` only if you want to change those
+settings. The daemon's built-in connection defaults already match the
+container (`localhost:5432`, database `clai`, user `clai`, password `secret`),
+so `task web` and `lein run` connect without any extra configuration. You can
+also override individual values with the corresponding `CLAI_POSTGRES_*`
+variables. The data directory is owned by the container's `postgres` user; to
+reset it, run `docker compose down` and remove `./local/postgres` as root.
 
 ## Web UI
 

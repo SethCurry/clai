@@ -52,9 +52,9 @@
       (is (= "localhost" (get-in client [:options :host])))
       (is (= 5432 (get-in client [:options :port])))
       (is (= "clai" (get-in client [:options :database])))
+      (is (= "clai" (get-in client [:options :user])))
+      (is (= "secret" (get-in client [:options :password])))
       (is (= "clai" (get-in client [:options :application-name])))
-      (is (nil? (get-in client [:options :user])))
-      (is (nil? (get-in client [:options :password])))
       (is (nil? (get-in client [:options :url]))))))
 
 (deftest make-client-reads-environment
@@ -90,7 +90,18 @@
   (let [client (pg/make-client {:url  "jdbc:postgresql://elsewhere:5432/other"
                                 :host "ignored"})]
     (is (= "jdbc:postgresql://elsewhere:5432/other"
-           (get-in client [:options :url])))))
+           (get-in client [:options :url])))
+    ;; A URL carries its own credentials; the local development defaults must
+    ;; not override them.
+    (is (nil? (get-in client [:options :user])))
+    (is (nil? (get-in client [:options :password])))))
+
+(deftest make-client-url-keeps-explicit-credentials
+  (let [client (pg/make-client {:url      "jdbc:postgresql://elsewhere:5432/other"
+                                :user     "alice"
+                                :password "s3cret"})]
+    (is (= "alice" (get-in client [:options :user])))
+    (is (= "s3cret" (get-in client [:options :password])))))
 
 (deftest make-client-accepts-existing-datasource
   (let [datasource (jdbc/get-datasource {:dbtype "postgresql" :dbname "clai"})
