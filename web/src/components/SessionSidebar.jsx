@@ -16,13 +16,20 @@ function folderName(cwd) {
 export function SessionSidebar({
   sessions,
   currentSession,
+  agentConfigs,
+  selectedConfigId,
   status,
   sessionInfo,
   onNewSession,
+  onSelectConfig,
   onRefresh,
   onLoadSession,
   onDeleteSession,
 }) {
+  const configNames = new Map(
+    agentConfigs.map((config) => [config.configId, config.name]),
+  )
+
   return (
     <aside className="sidebar">
       <div className="sidebar__heading">
@@ -33,8 +40,27 @@ export function SessionSidebar({
         <span className={`status-dot status-dot--${status}`} title={status} />
       </div>
 
+      <div className="sidebar__config">
+        <label htmlFor="agent-config">Agent config</label>
+        <select
+          id="agent-config"
+          value={selectedConfigId}
+          onChange={(event) => onSelectConfig(event.target.value)}
+        >
+          <option value="">Daemon defaults</option>
+          {agentConfigs.map((config) => (
+            <option key={config.configId} value={config.configId}>
+              {config.name}
+            </option>
+          ))}
+        </select>
+      </div>
+
       <div className="sidebar__actions">
-        <button className="button button--primary" onClick={onNewSession}>
+        <button
+          className="button button--primary"
+          onClick={() => onNewSession()}
+        >
           + New session
         </button>
         <button
@@ -70,6 +96,12 @@ export function SessionSidebar({
                   <span className="session-row__cwd">
                     {folderName(session.cwd)}
                   </span>
+                  {session.configId && (
+                    <span className="session-row__config">
+                      {configNames.get(session.configId) ||
+                        `config #${shortId(session.configId)}`}
+                    </span>
+                  )}
                 </button>
                 <button
                   className="session-row__delete"

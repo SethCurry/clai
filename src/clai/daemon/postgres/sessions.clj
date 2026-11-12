@@ -76,6 +76,7 @@
   [:map
    [:sessionId non-empty-string]
    [:cwd :string]
+   [:configId {:optional true} [:maybe non-empty-string]]
    [:createdAt {:optional true} [:maybe :string]]
    [:history {:optional true} [:vector message]]])
 
@@ -84,18 +85,21 @@
   [:map
    [:sessionId non-empty-string]
    [:cwd :string]
+   [:configId {:optional true} [:maybe non-empty-string]]
    [:createdAt {:optional true} [:maybe :string]]])
 
 (def create-session-opts
   "Options accepted by [[create-session]]."
   [:map
-   [:cwd {:optional true} [:or :string [:fn #(instance? File %)]]]])
+   [:cwd {:optional true} [:or :string [:fn #(instance? File %)]]]
+   [:configId {:optional true} [:maybe [:or non-empty-string :int]]]])
 
 (def save-session-state
   "A session map accepted by [[save-session]]: the history is replaced and a
   missing `:sessionId` creates a new session."
   [:map
    [:sessionId {:optional true} [:maybe [:or non-empty-string :int]]]
+   [:configId {:optional true} [:maybe [:or non-empty-string :int]]]
    [:cwd [:or :string [:fn #(instance? File %)]]]
    [:createdAt {:optional true} [:maybe :string]]
    [:history {:optional true} [:vector message]]])
@@ -128,9 +132,13 @@
 (defn- row->summary
   "Convert an `agent_session` row to the session summary shape."
   [row]
-  {:sessionId (str (:id row))
-   :cwd       (:working-directory row)
-   :createdAt (postgres/timestamp->iso (:created-at row))})
+  (cond-> {:sessionId (str (:id row))
+           :cwd       (:working-directory row)}
+    (some? (:agent-config-id row))
+    (assoc :configId (str (:agent-config-id row)))
+
+    (some? (:created-at row))
+    (assoc :createdAt (postgres/timestamp->iso (:created-at row)))))
 
 (defn- row->session
   "Convert an `agent_session` row plus its `history` to a session state map."
@@ -172,23 +180,23 @@
 ;; ---------------------------------------------------------------------------
 
 (def ^:private select-session-sql
-  "SELECT id, working_directory, created_at
+  "SELECT id, working_directory, agent_config_id, created_at
      FROM agent_session
     WHERE id = ?")
 
 (def ^:private list-sessions-sql
-  "SELECT id, working_directory, created_at
+  "SELECT id, working_directory, agent_config_id, created_at
      FROM agent_session
     ORDER BY created_at, id")
 
 (def ^:private insert-session-sql
-  "INSERT INTO agent_session (working_directory)
-   VALUES (?)
-   RETURNING id, working_directory, created_at")
+  "INSERT INTO agent_session (working_directory, agent_config_id)
+   VALUES (?, ?)
+   RETURNING id, working_directory, agent_config_id, created_at")
 
 (def ^:private update-session-sql
   "UPDATE agent_session
-      SET working_directory = ?
+      SET working_directory = ?, agent_config_id = ?
     WHERE id = ?")
 
 (def ^:private select-history-sql
@@ -268,17 +276,19 @@
         _       (postgres/validate! save-session-state state "save-session")
         given   (:sessionId state)
         id      (session-key given)
+        config  (session-key (:configId state))
         history (:history state)]
     (jdbc/with-transaction [tx (:datasource client)]
       (if-let [row (cond
                      (nil? given)
                      (postgres/exec-one! tx ::create-session
-                                         insert-session-sql [(:cwd state)])
+                                         insert-session-sql
+                                         [(:cwd state) config])
 
                      id
                      (let [result (postgres/exec-one! tx ::save-session
                                                       update-session-sql
-                                                      [(:cwd state) id])]
+                                                      [(:cwd state) config id])]
                        (when (pos? (postgres/updated-count result))
                          (postgres/exec-one! tx ::reload-session
                                              select-session-sql [id]))))]
@@ -299,20 +309,26 @@
 
   Options:
 
-    :cwd  the working directory for the session (defaults to the JVM's
-          current directory). The agent also reads `<cwd>/AGENTS.md` for
-          project instructions."
+    :cwd       the working directory for the session (defaults to the JVM's
+               current directory). The agent also reads `<cwd>/AGENTS.md` for
+               project instructions.
+    :configId  an `agent_config` id to associate with the session. The row is
+               validated by the database's foreign key."
   {:malli/schema [:function
                   [:=> [:cat #'postgres/client-schema] #'session]
                   [:=> [:cat #'postgres/client-schema
                          [:maybe #'create-session-opts]]
                    #'session]]}
   ([client] (create-session client nil))
-  ([client {:keys [cwd]}]
-   (let [session (save-session client {:cwd (canonical-cwd cwd) :history []})]
+  ([client {:keys [cwd configId]}]
+   (let [session (save-session client {:cwd      (canonical-cwd cwd)
+                                       :configId configId
+                                       :history  []})]
      (tel/log! {:level :info
                 :id    ::session-created
-                :data  {:sessionId (:sessionId session) :cwd (:cwd session)}}
+                :data  {:sessionId (:sessionId session)
+                        :cwd       (:cwd session)
+                        :configId  (:configId session)}}
                "Created PostgreSQL session")
      session)))
 

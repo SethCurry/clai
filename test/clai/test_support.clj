@@ -92,10 +92,11 @@
 
 (defn- memory-create-session
   ([store client] (memory-create-session store client nil))
-  ([store _client {:keys [cwd]}]
+  ([store _client {:keys [cwd configId]}]
    (memory-save-session store nil
-                        (memory-normalize-session {:cwd     cwd
-                                                   :history []}))))
+                        (memory-normalize-session {:cwd      cwd
+                                                   :configId configId
+                                                   :history  []}))))
 
 (defn- memory-load-session
   [store _client session-id]

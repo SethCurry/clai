@@ -22,7 +22,10 @@ function EmptyState({ hasSessions, onNewSession }) {
           Sessions hold a conversation with the agent. Each one can use the
           repository tools and the live Clojure runtime behind the daemon.
         </p>
-        <button className="button button--primary" onClick={onNewSession}>
+        <button
+          className="button button--primary"
+          onClick={() => onNewSession()}
+        >
           + New session
         </button>
       </div>
@@ -73,9 +76,12 @@ export default function App() {
         <SessionSidebar
           sessions={clai.sessions}
           currentSession={clai.currentSession}
+          agentConfigs={clai.agentConfigs}
+          selectedConfigId={clai.selectedConfigId}
           status={clai.status}
           sessionInfo={clai.sessionInfo}
           onNewSession={clai.newSession}
+          onSelectConfig={clai.selectAgentConfig}
           onRefresh={clai.refreshSessions}
           onLoadSession={clai.loadSession}
           onDeleteSession={clai.deleteSession}

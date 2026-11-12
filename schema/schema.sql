@@ -7,12 +7,39 @@
 -- Every statement is idempotent, so this file is safe to apply on every
 -- process start and against a database whose tables already exist.
 
+-- Agent configurations. One row names a reusable set of model and tool
+-- settings that a session can select. A NULL column falls back to the daemon's
+-- own configuration.
+CREATE TABLE IF NOT EXISTS agent_config (
+    id BIGSERIAL PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    model TEXT,
+    system_prompt TEXT,
+    max_tool_rounds INT,
+    think BOOLEAN,
+    model_options JSONB NOT NULL DEFAULT '{}'::jsonb,
+    response_format JSONB,
+    -- NULL means every tool in the agent's registry; [] disables tools.
+    tools TEXT[],
+    created_at TIMESTAMPTZ DEFAULT now(),
+    updated_at TIMESTAMPTZ DEFAULT now()
+);
+
 CREATE TABLE IF NOT EXISTS agent_session (
     id BIGSERIAL PRIMARY KEY,
     -- Must be an absolute path
     working_directory TEXT NOT NULL,
+    -- The selected agent configuration, when the session has one.
+    agent_config_id BIGINT REFERENCES agent_config(id) ON DELETE SET NULL,
     created_at TIMESTAMPTZ DEFAULT now()
 );
+
+-- `CREATE TABLE IF NOT EXISTS` does not add columns to an existing table, so
+-- the session/config link is added explicitly for databases created before it
+-- existed.
+ALTER TABLE agent_session
+    ADD COLUMN IF NOT EXISTS agent_config_id BIGINT
+        REFERENCES agent_config(id) ON DELETE SET NULL;
 
 -- PostgreSQL has no `CREATE TYPE IF NOT EXISTS`, so guard the enum by hand.
 DO $$

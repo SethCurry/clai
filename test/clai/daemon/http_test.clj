@@ -19,20 +19,24 @@
 
 (defn- new-session
   "Create a stub session in `store` with a random id."
-  [store cwd]
-  (let [id      (str (UUID/randomUUID))
-        session {:sessionId id
-                 :cwd       (or cwd (str (.getCanonicalFile (io/file "."))))
-                 :history   []}]
-    (swap! store assoc id session)
-    session))
+  ([store cwd] (new-session store cwd nil))
+  ([store cwd config-id]
+   (let [id      (str (UUID/randomUUID))
+         session (cond-> {:sessionId id
+                          :cwd       (or cwd (str (.getCanonicalFile (io/file "."))))
+                          :history   []}
+                   config-id (assoc :configId config-id))]
+     (swap! store assoc id session)
+     session)))
 
 (defn- with-fake-agent
   "Run `f` with the agent operations replaced by an atom-backed store."
   [store f]
   (with-redefs [agent/new-session!
-                (fn [_ {:keys [cwd]}]
-                  {:sessionId (:sessionId (new-session store cwd))})
+                (fn [_ {:keys [cwd configId]}]
+                  (let [session (new-session store cwd configId)]
+                    (cond-> {:sessionId (:sessionId session)}
+                      configId (assoc :configId configId))))
 
                 agent/load-session!
                 (fn [_ {:keys [sessionId]}]
@@ -40,7 +44,7 @@
 
                 agent/list-sessions!
                 (fn [_ _]
-                  {:sessions (mapv #(select-keys % [:sessionId :cwd])
+                  {:sessions (mapv #(select-keys % [:sessionId :cwd :configId])
                                    (vals @store))})
 
                 agent/delete-session!
@@ -155,6 +159,44 @@
             (is (= id (:deleted (response-body deleted)))))
           (is (= 404 (:status (handler (request :get (str "/api/sessions/" id)))))))))))
 
+
+(deftest agent-configurations-can-be-listed-and-loaded
+  (let [configs [{:configId "1" :name "fast" :model "gemma3"}
+                 {:configId "2" :name "careful"}]]
+    (with-fake-agent (atom {})
+      (fn []
+        (with-redefs [agent/list-agent-configs!
+                      (fn [_ _] {:configs configs})
+                      agent/load-agent-config!
+                      (fn [_ {:keys [configId name]}]
+                        (cond
+                          configId (first (filter #(= configId (:configId %))
+                                                  configs))
+                          name     (first (filter #(= name (:name %)) configs))
+                          :else    nil))]
+          (let [handler (http/handler (state (atom {})))]
+            (is (= {:configs configs}
+                   (response-body (handler (request :get "/api/agent-configs")))))
+            (is (= (first configs)
+                   (response-body (handler (request :get "/api/agent-configs/1")))))
+            (is (= 404 (:status (handler (request :get "/api/agent-configs/999")))))))))))
+
+(deftest sessions-remember-their-agent-configuration
+  (let [store (atom {})]
+    (with-fake-agent store
+      (fn []
+        (let [handler (http/handler (state store))
+              created (handler (request :post "/api/sessions"
+                                        {:cwd "/tmp/project" :configId "3"}))
+              session (response-body created)]
+          (is (= 201 (:status created)))
+          (is (= "3" (:configId session)))
+          (is (= [{:sessionId (:sessionId session)
+                   :cwd       "/tmp/project"
+                   :configId  "3"}]
+                 (:sessions (response-body
+                             (handler (request :get "/api/sessions")))))))))))
+
 (deftest websocket-upgrades-only-from-loopback-browsers
   (let [store (atom {})]
     (with-fake-agent store
@@ -210,6 +252,15 @@
           (is (= {:type "sessions" :requestId "r1" :sessions []}
                  (first @sent)))
 
+          (reset! sent [])
+          (with-redefs [agent/list-agent-configs!
+                        (fn [_ _] {:configs [{:configId "3" :name "fast"}]})]
+            (http/handle-message! daemon-state conn
+                                  "{\"type\":\"list_agent_configs\",\"requestId\":\"r-config\"}")
+            (is (= {:type "agent_configs"
+                    :requestId "r-config"
+                    :configs [{:configId "3" :name "fast"}]}
+                   (first @sent))))
           (reset! sent [])
           (http/handle-message! daemon-state conn
                                 "{\"type\":\"new_session\",\"requestId\":\"r2\",\"cwd\":\"/tmp\"}")

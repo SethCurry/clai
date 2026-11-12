@@ -4,7 +4,8 @@
   The browser cannot speak nREPL's bencode transport, so this namespace
   serves two things from the same JVM as the agent:
 
-    * a JSON HTTP API for sessions (`/api/sessions`, `/api/health`), and
+    * a JSON HTTP API for sessions and agent configurations
+      (`/api/sessions`, `/api/agent-configs`, `/api/health`), and
     * a WebSocket at `/ws` that streams agent updates and forwards Clojure
       evaluations to the running nREPL server.
 
@@ -141,9 +142,10 @@
 ;; ---------------------------------------------------------------------------
 
 (defn- session-summary
-  "The public shape of a session: identifiers and cwd, without history."
+  "The public shape of a session: identifiers, cwd, and selected config,
+  without history."
   [session]
-  (select-keys session [:sessionId :cwd :createdAt]))
+  (select-keys session [:sessionId :cwd :configId :createdAt]))
 
 (defn- session-payload
   "Load `session-id` and return the summary plus the event updates a chat view
@@ -157,6 +159,11 @@
   "List sessions for the UI."
   [agent]
   (:sessions (agent/list-sessions! agent {})))
+
+(defn- list-agent-configs
+  "List the stored agent configurations for the UI."
+  [agent]
+  (:configs (agent/list-agent-configs! agent {})))
 
 ;; ---------------------------------------------------------------------------
 ;; WebSocket message handling
@@ -280,9 +287,12 @@
   Client messages are:
 
       {\"type\": \"list_sessions\"}
-      {\"type\": \"new_session\", \"cwd\": \"/path\"}
+      {\"type\": \"new_session\", \"cwd\": \"/path\", \"configId\": \"3\"}
       {\"type\": \"load_session\", \"sessionId\": \"12\"}
       {\"type\": \"delete_session\", \"sessionId\": \"12\"}
+      {\"type\": \"list_agent_configs\"}
+      {\"type\": \"load_agent_config\", \"configId\": \"3\"}
+      {\"type\": \"load_agent_config\", \"name\": \"fast\"}
       {\"type\": \"prompt\", \"sessionId\": \"12\", \"prompt\": \"...\"}
       {\"type\": \"eval\", \"code\": \"(+ 1 1)\", \"ns\": \"user\"}
 
@@ -292,7 +302,8 @@
   {:malli/schema [:-> #'State #'Connection :any :nil]}
   [state conn raw]
   (try
-    (let [{:keys [type requestId cwd sessionId prompt code ns] :as _message}
+    (let [{:keys [type requestId cwd sessionId configId name prompt code ns]
+           :as _message}
           (if (string? raw)
             (json/parse-string raw true)
             (throw (ex-info "WebSocket messages must be text" {})))]
@@ -302,9 +313,24 @@
                      :requestId requestId
                      :sessions  (list-sessions (:agent state))})
 
+        "list_agent_configs"
+        (send! conn {:type      "agent_configs"
+                     :requestId requestId
+                     :configs   (list-agent-configs (:agent state))})
+
+        "load_agent_config"
+        (if-let [config (agent/load-agent-config! (:agent state)
+                                                  {:configId configId
+                                                   :name     name})]
+          (send! conn {:type      "agent_config"
+                       :requestId requestId
+                       :config    config})
+          (send-error! conn requestId "No matching agent configuration"))
+
         "new_session"
         (let [{:keys [sessionId]} (agent/new-session! (:agent state)
-                                                      {:cwd (some-> cwd str)})]
+                                                      {:cwd      (some-> cwd str)
+                                                       :configId (some-> configId str)})]
           (send! conn {:type      "session"
                        :requestId requestId
                        :session   (session-payload (:agent state) sessionId)}))
@@ -385,6 +411,10 @@
   "Regex matching `/api/sessions/<id>`."
   #"^/api/sessions/([^/]+)$")
 
+(def ^:private agent-config-path
+  "Regex matching `/api/agent-configs/<id>`."
+  #"^/api/agent-configs/([^/]+)$")
+
 (def ^:private static-index
   "The file served for `/` and client-side routes."
   "index.html")
@@ -450,11 +480,21 @@
       (and (= method :get) (= uri "/api/sessions"))
       (json-response 200 {:sessions (list-sessions agent)})
 
+      (and (= method :get) (= uri "/api/agent-configs"))
+      (json-response 200 {:configs (list-agent-configs agent)})
+
+      (and (= method :get) (re-matches agent-config-path uri))
+      (let [config-id (second (re-matches agent-config-path uri))]
+        (if-let [config (agent/load-agent-config! agent {:configId config-id})]
+          (json-response 200 config)
+          (json-response 404 {:error (str "No agent configuration " config-id)})))
+
       (and (= method :post) (= uri "/api/sessions"))
       (try
-        (let [{:keys [cwd]} (read-json-body request)
+        (let [{:keys [cwd configId]} (read-json-body request)
               {:keys [sessionId]} (agent/new-session! agent
-                                                      {:cwd (some-> cwd str)})]
+                                                      {:cwd      (some-> cwd str)
+                                                       :configId (some-> configId str)})]
           (json-response 201 (session-payload agent sessionId)))
         (catch Throwable e
           (json-response 400 {:error (util/error-message e)})))

@@ -38,6 +38,8 @@ export function useClaiSocket() {
     nreplPort: null,
   })
   const [sessions, setSessions] = useState([])
+  const [agentConfigs, setAgentConfigs] = useState([])
+  const [selectedConfigId, setSelectedConfigId] = useState('')
   const [currentSession, setCurrentSession] = useState(null)
   const [updates, setUpdates] = useState([])
   const [promptRunning, setPromptRunning] = useState(false)
@@ -91,6 +93,7 @@ export function useClaiSocket() {
         setPromptRunning(false)
         setEvalRunning(false)
         send({ type: 'list_sessions' })
+        send({ type: 'list_agent_configs' })
         // After a reconnect, replay the active conversation. The prompt may
         // have finished while the socket was down.
         if (activeSession.current) {
@@ -119,6 +122,24 @@ export function useClaiSocket() {
             setSessions(message.sessions ?? [])
             break
 
+          case 'agent_configs':
+            setAgentConfigs(message.configs ?? [])
+            break
+
+          case 'agent_config':
+            if (message.config?.configId) {
+              setAgentConfigs((previous) => {
+                const next = previous.filter(
+                  (config) => config.configId !== message.config.configId,
+                )
+                return [...next, message.config].sort((a, b) =>
+                  a.name.localeCompare(b.name),
+                )
+              })
+              setSelectedConfigId(message.config.configId)
+            }
+            break
+
           case 'session': {
             const session = message.session
             if (!session?.sessionId) break
@@ -126,6 +147,7 @@ export function useClaiSocket() {
             setCurrentSession({
               sessionId: session.sessionId,
               cwd: session.cwd,
+              configId: session.configId,
               createdAt: session.createdAt,
             })
             setUpdates(session.updates ?? [])
@@ -213,7 +235,22 @@ export function useClaiSocket() {
     }
   }, [pushError, send])
 
-  const newSession = useCallback(() => send({ type: 'new_session' }), [send])
+  const newSession = useCallback(
+    (configId = selectedConfigId) =>
+      send({
+        type: 'new_session',
+        ...(configId ? { configId: String(configId) } : {}),
+      }),
+    [selectedConfigId, send],
+  )
+
+  const selectAgentConfig = useCallback(
+    (configId) => {
+      setSelectedConfigId(configId)
+      if (configId) send({ type: 'load_agent_config', configId })
+    },
+    [send],
+  )
 
   const refreshSessions = useCallback(
     () => send({ type: 'list_sessions' }),
@@ -272,6 +309,8 @@ export function useClaiSocket() {
     status,
     sessionInfo,
     sessions,
+    agentConfigs,
+    selectedConfigId,
     currentSession,
     updates,
     promptRunning,
@@ -279,6 +318,7 @@ export function useClaiSocket() {
     evalRunning,
     errors,
     newSession,
+    selectAgentConfig,
     refreshSessions,
     loadSession,
     deleteSession,

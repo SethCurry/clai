@@ -242,6 +242,36 @@ pre {
   background: var(--danger);
 }
 
+.sidebar__config {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px 12px 0;
+}
+
+.sidebar__config label {
+  color: var(--muted-2);
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.sidebar__config select {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel-3);
+  color: var(--text);
+  font-size: 0.8rem;
+}
+
+.sidebar__config select:focus {
+  border-color: rgba(56, 189, 248, 0.55);
+  outline: none;
+}
+
 .sidebar__actions {
   display: flex;
   gap: 8px;
@@ -310,6 +340,14 @@ pre {
   overflow: hidden;
   color: var(--muted);
   font-size: 0.75rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-row__config {
+  overflow: hidden;
+  color: var(--accent);
+  font-size: 0.68rem;
   text-overflow: ellipsis;
   white-space: nowrap;
 }

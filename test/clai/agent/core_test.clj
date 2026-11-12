@@ -2,7 +2,8 @@
   "Tests for the in-process agent in `clai.agent.core`, in particular that a
   prompt actually reaches the model and that streamed updates validate against
   the canonical session event schema."
-  (:require [clai.agent.core :as agent]
+  (:require [clai.agent.configs :as agent-configs]
+            [clai.agent.core :as agent]
             [clai.agent.providers.ollama :as ollama]
             [clai.daemon.postgres.sessions :as sessions]
             [clai.events.schema :as events]
@@ -114,6 +115,64 @@
                   "clai-agent-test"
                   (make-array java.nio.file.attribute.FileAttribute 0)))
     (.deleteOnExit)))
+
+(deftest new-session-uses-selected-agent-configuration
+  (let [config {:configId      "42"
+                :name          "fast"
+                :model         "tiny"
+                :system-prompt "config prompt"
+                :max-tool-rounds 2
+                :think         true
+                :options       {:temperature 0}
+                :format        "json"
+                :tools         []}]
+    (with-redefs [agent-configs/load-config
+                  (fn [_ id] (when (= "42" id) config))]
+      (run-with-stubbed-ollama
+       "pong"
+       {:cfg {:system-prompt "daemon prompt"}}
+       (fn [handler requests updates]
+         (let [{:keys [sessionId configId]}
+               (agent/new-session! handler {:cwd "/tmp" :configId "42"})]
+           (is (= "42" configId)
+               "the session records the selected configuration")
+           (is (= [{:role "system" :content "config prompt"}]
+                  (take 1 (:history (sessions/load-session test-client
+                                                       sessionId))))
+               "the configuration's prompt replaces the daemon prompt")
+           (prompt! handler sessionId "ping" updates)
+           (let [request (first @requests)]
+             (is (= "tiny" (:model request)))
+             (is (= [] (:tools request))
+                 "an empty tool list disables every tool")
+             (is (= {:temperature 0} (:options request)))
+             (is (true? (:think request)))
+             (is (= "json" (:format request))))))))))
+
+(deftest new-session-rejects-unknown-agent-configuration
+  (with-redefs [agent-configs/load-config (constantly nil)]
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo
+                          #"No agent configuration 99"
+                          (agent/new-session! {:postgres ::postgres}
+                                              {:configId "99"})))))
+
+(deftest agent-configurations-can-be-listed-and-loaded
+  (let [configs [{:configId "1" :name "fast"}
+                 {:configId "2" :name "careful"}]
+        handler {:postgres ::postgres}]
+    (with-redefs [agent-configs/list-configs (fn [_] configs)
+                  agent-configs/load-config  (fn [_ id]
+                                               (first (filter #(= id (:configId %))
+                                                              configs)))
+                  agent-configs/select-config (fn [_ name]
+                                                (first (filter #(= name (:name %))
+                                                               configs)))]
+      (is (= {:configs configs} (agent/list-agent-configs! handler {})))
+      (is (= (first configs)
+             (agent/load-agent-config! handler {:configId "1"})))
+      (is (= (second configs)
+             (agent/load-agent-config! handler {:name "careful"})))
+      (is (nil? (agent/load-agent-config! handler {}))))))
 
 (deftest new-session-appends-agents-md-to-system-prompt
   (let [dir    (temp-dir)

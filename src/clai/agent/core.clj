@@ -16,6 +16,8 @@
 
   Supporting pieces live in sibling namespaces under `clai.agent.*`:
 
+    * `clai.agent.configs`                 -- stored per-session agent
+                                              configurations.
     * `clai.agent.providers.ollama`        -- the Ollama HTTP client.
     * `clai.agent.providers.ollama.prompt` -- prompt/history conversion.
     * `clai.agent.resources`               -- resource blocks rendered as text
@@ -27,7 +29,8 @@
     * `clai.config`                        -- config/env resolution for the
                                               agent's model, client, tools, and
                                               chat options."
-  (:require [clai.agent.providers.ollama :as ollama]
+  (:require [clai.agent.configs :as agent-configs]
+            [clai.agent.providers.ollama :as ollama]
             [clai.agent.providers.ollama.prompt :as ollama-prompt]
             [clai.agent.tools.builtin :as tools-builtin]
             [clai.agent.tools.invoke :as tool-invoke]
@@ -110,9 +113,10 @@
 
   Sessions carry `createdAt` rather than an update timestamp, so that is what
   the picker sorts and displays."
-  [{:keys [sessionId cwd createdAt]}]
+  [{:keys [sessionId cwd configId createdAt]}]
   (cond-> {:sessionId sessionId
            :cwd       (or cwd "")}
+    (some? configId)  (assoc :configId configId)
     (some? createdAt) (assoc :createdAt createdAt)))
 
 ;; ---------------------------------------------------------------------------
@@ -134,12 +138,11 @@
     (tools-builtin/built-in-registry)))
 
 (defn- resolve-tool-registry
-  "Build this agent's private tool registry from `opts` and `cfg`.
-
-  When `cfg` contains a `:tools` vector, the registry is narrowed to those
-  ids."
-  [cfg opts]
-  (cond-> (base-registry opts)
+  "Narrow the full `base-registry` to the ids in `cfg`'s `:tools` vector,
+  when it has one. The full registry is kept so a session's agent
+  configuration can select a different subset."
+  [base-registry cfg]
+  (cond-> base-registry
     (contains? cfg :tools) (tools-registry/select-tools (:tools cfg))))
 
 ;; ---------------------------------------------------------------------------
@@ -147,15 +150,29 @@
 ;; ---------------------------------------------------------------------------
 
 (defn new-session!
-  "Create a session for `{:keys [cwd]}` and record its system prompt
-  (configured prompt plus any `AGENTS.md`). Returns `{:sessionId id}`."
-  {:malli/schema [:-> :map [:map [:cwd {:optional true} [:maybe :string]]] :map]}
-  [agent {:keys [cwd]}]
+  "Create a session for `{:keys [cwd configId]}` and record its system prompt
+  (the selected agent configuration's prompt, or the configured prompt, plus
+  any `AGENTS.md`). Returns `{:sessionId id :configId id}`."
+  {:malli/schema [:-> :map [:map
+                            [:cwd {:optional true} [:maybe :string]]
+                            [:configId {:optional true}
+                             [:maybe [:or :string :int]]]]
+                  :map]}
+  [agent {:keys [cwd configId]}]
   (let [{:keys [postgres sys-prompt]} agent
-        session (sessions/create-session postgres {:cwd cwd})]
+        config     (if (str/blank? (str configId))
+                     nil
+                     (or (agent-configs/load-config postgres (str configId))
+                         (throw (ex-info (str "No agent configuration " configId)
+                                         {:configId configId}))))
+        session    (sessions/create-session postgres
+                                            {:cwd      cwd
+                                             :configId (:configId config)})
+        sys-prompt (or (:system-prompt config) sys-prompt)]
     (run! #(sessions/append-history postgres (:sessionId session) %)
           (system-history sys-prompt (:cwd session)))
-    {:sessionId (:sessionId session)}))
+    (cond-> {:sessionId (:sessionId session)}
+      (some? (:configId session)) (assoc :configId (:configId session)))))
 
 (defn load-session!
   "Load and optionally re-root a persisted session.
@@ -192,6 +209,63 @@
                :data  {:count (count summaries)}}
               "Listed sessions")
     {:sessions (mapv session-summary summaries)}))
+
+(defn list-agent-configs!
+  "List the stored agent configurations. Returns `{:configs [config ...]}`."
+  {:malli/schema [:-> :map [:map] :map]}
+  [agent _opts]
+  (let [configs (agent-configs/list-configs (:postgres agent))]
+    (tel/log! {:level :debug
+               :id    ::agent-config-list
+               :data  {:count (count configs)}}
+              "Listed agent configurations")
+    {:configs configs}))
+
+(defn load-agent-config!
+  "Load one stored agent configuration by `:configId` or `:name`, returning
+  it or nil when no matching configuration exists."
+  {:malli/schema [:-> :map [:map
+                            [:configId {:optional true}
+                             [:maybe [:or :string :int]]]
+                            [:name {:optional true} [:maybe :string]]]
+                  [:maybe :map]]}
+  [agent {:keys [configId name]}]
+  (let [postgres (:postgres agent)]
+    (cond
+      (not (str/blank? (str configId)))
+      (agent-configs/load-config postgres (str configId))
+
+      (not (str/blank? (str name)))
+      (agent-configs/select-config postgres (str name))
+
+      :else nil)))
+
+(defn- session-agent-config
+  "The stored configuration selected by `session`, or nil."
+  [agent session]
+  (when-let [config-id (:configId session)]
+    (agent-configs/load-config (:postgres agent) (str config-id))))
+
+(defn- apply-agent-config
+  "Return `agent` with the settings in `config` applied over its defaults.
+
+  A nil configuration is a no-op. Tool selection starts from the agent's full
+  registry so a session configuration can choose any tool the daemon allows."
+  [agent config]
+  (if (nil? config)
+    agent
+    (let [base-registry (or (:base-tool-registry agent) (:tool-registry agent))
+          tool-registry (if (contains? config :tools)
+                          (tools-registry/select-tools base-registry (:tools config))
+                          (:tool-registry agent))]
+      (assoc agent
+             :model         (or (:model config) (:model agent))
+             :max-rounds    (or (:max-tool-rounds config) (:max-rounds agent))
+             :chat-opts     (merge (:chat-opts agent)
+                                   (util/select-present config
+                                                        [:options :think :format]))
+             :tool-registry tool-registry
+             :tool-specs    (tools-registry/specs tool-registry)))))
 
 (defn delete-session!
   "Delete the session named by `opts`'s `:sessionId`."
@@ -488,7 +562,8 @@
   [agent {:keys [sessionId prompt on-update]}]
   (let [postgres (:postgres agent)]
     (if-let [session (sessions/load-session postgres sessionId)]
-      (let [incoming (ollama-prompt/prompt->messages prompt {:cwd (:cwd session)})]
+      (let [agent    (apply-agent-config agent (session-agent-config agent session))
+            incoming (ollama-prompt/prompt->messages prompt {:cwd (:cwd session)})]
         (run! #(sessions/append-history postgres sessionId %) incoming)
         (tel/log! {:level :info
                    :id    ::prompt-received
@@ -524,16 +599,17 @@
   chat options. It is plain data, so the operations above can be written as
   ordinary functions of it."
   [opts]
-  (let [cfg           (or (:cfg opts) (config/load-config))
-        client        (or (:client opts) (config/make-ollama-client cfg))
-        postgres      (or (:postgres opts)
-                          (config/make-postgres-client cfg))
-        model         (or (:model opts) (config/resolve-model cfg))
-        tool-registry (resolve-tool-registry cfg opts)
-        tool-specs    (tools-registry/specs tool-registry)
-        max-rounds    (config/resolve-max-tool-rounds cfg)
-        sys-prompt    (:system-prompt cfg)
-        chat-opts     (config/chat-options cfg)]
+  (let [cfg                (or (:cfg opts) (config/load-config))
+        client             (or (:client opts) (config/make-ollama-client cfg))
+        postgres           (or (:postgres opts)
+                               (config/make-postgres-client cfg))
+        model              (or (:model opts) (config/resolve-model cfg))
+        base-tool-registry (base-registry opts)
+        tool-registry      (resolve-tool-registry base-tool-registry cfg)
+        tool-specs         (tools-registry/specs tool-registry)
+        max-rounds         (config/resolve-max-tool-rounds cfg)
+        sys-prompt         (:system-prompt cfg)
+        chat-opts          (config/chat-options cfg)]
     (tel/log! {:level :info
                :id    ::agent-configured
                :data  {:model          model
@@ -542,15 +618,16 @@
                        :system-prompt? (some? sys-prompt)
                        :host           (:host client)}}
               "Configured clai agent")
-    {:cfg           cfg
-     :client        client
-     :postgres      postgres
-     :model         model
-     :tool-registry tool-registry
-     :tool-specs    tool-specs
-     :max-rounds    max-rounds
-     :sys-prompt    sys-prompt
-     :chat-opts     chat-opts}))
+    {:cfg                cfg
+     :client             client
+     :postgres           postgres
+     :model              model
+     :base-tool-registry base-tool-registry
+     :tool-registry      tool-registry
+     :tool-specs         tool-specs
+     :max-rounds         max-rounds
+     :sys-prompt         sys-prompt
+     :chat-opts          chat-opts}))
 
 (defn ollama-agent
   "Build an in-process agent that answers prompts using an Ollama chat model.
@@ -576,8 +653,12 @@
                     the first session operation (`clai.daemon.postgres.sessions`
                     ensures it).
 
-  A new session's system prompt is the configured `:system-prompt` followed by
-  the contents of an `AGENTS.md` in the session's `cwd`, if one exists."
+  A new session can select a stored `agent_config` with `:configId`. That
+  configuration's model, system prompt, tool-round cap, chat options, response
+  format, and tool list override the agent's defaults for as long as the
+  session lives. A new session's system prompt is the selected configuration's
+  `:system-prompt`, or the agent's configured prompt, followed by the contents
+  of an `AGENTS.md` in the session's `cwd`, if one exists."
   ([] (ollama-agent nil))
   ([opts]
    (build-agent opts)))
