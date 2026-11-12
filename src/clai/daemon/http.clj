@@ -4,8 +4,9 @@
   The browser cannot speak nREPL's bencode transport, so this namespace
   serves two things from the same JVM as the agent:
 
-    * a JSON HTTP API for sessions, agent configurations, and plugins
-      (`/api/sessions`, `/api/agent-configs`, `/api/plugins`, `/api/health`), and
+    * a JSON HTTP API for sessions, agent configurations, plugins, and
+      session-scoped file completion (`/api/sessions`, `/api/agent-configs`,
+      `/api/plugins`, `/api/sessions/<id>/completions`, `/api/health`), and
     * a WebSocket at `/ws` that streams agent updates and forwards Clojure
       evaluations to the running nREPL server.
 
@@ -20,6 +21,7 @@
   (:require [cheshire.core :as json]
             [clai.agent.core :as agent]
             [clai.agent.providers.ollama.prompt :as ollama-prompt]
+            [clai.daemon.files :as files]
             [clai.daemon.nrepl :as nrepl-bridge]
             [clai.events.schema :as events]
             [clai.log]
@@ -29,6 +31,7 @@
             [clojure.java.io :as io]
             [clojure.string :as str]
             [ring.adapter.jetty :as jetty]
+            [ring.util.codec :as codec]
             [ring.util.mime-type :as mime]
             [ring.util.response :as response]
             [ring.websocket :as ws]
@@ -139,6 +142,15 @@
       (throw (ex-info "Request body must be a JSON object"
                       {:body value})))))
 
+(defn- parse-limit
+  "Parse a `limit` query parameter, returning nil when it is absent or not a
+  number so [[files/list-entries]] falls back to its default."
+  [value]
+  (when (string? value)
+    (try
+      (parse-long (str/trim value))
+      (catch Throwable _ nil))))
+
 ;; ---------------------------------------------------------------------------
 ;; Session helpers
 ;; ---------------------------------------------------------------------------
@@ -176,6 +188,15 @@
   "List the installed plugins for the UI's plugin picker."
   [agent]
   (:plugins (agent/list-plugins! agent {})))
+
+(defn- completions
+  "Resolve `request`'s `path` and `limit` query parameters into filesystem
+  completion entries relative to `cwd`."
+  [cwd request]
+  (let [params (codec/form-decode (or (:query-string request) ""))]
+    (files/list-entries {:root  cwd
+                         :path  (get params "path")
+                         :limit (parse-limit (get params "limit"))})))
 
 (defn- update-agent-config-from-request!
   "Update configuration `config-id` from the JSON request/body `config`."
@@ -452,6 +473,11 @@
   "Regex matching `/api/agent-configs/<id>`."
   #"^/api/agent-configs/([^/]+)$")
 
+(def ^:private session-completions-path
+  "Regex matching `/api/sessions/<id>/completions`, the `@`-mention completion
+  endpoint for a session's working directory."
+  #"^/api/sessions/([^/]+)/completions$")
+
 (def ^:private static-index
   "The file served for `/` and client-side routes."
   "index.html")
@@ -564,6 +590,12 @@
           (json-response 201 (session-payload agent sessionId)))
         (catch Throwable e
           (json-response 400 {:error (util/error-message e)})))
+
+      (and (= method :get) (re-matches session-completions-path uri))
+      (let [session-id (second (re-matches session-completions-path uri))]
+        (if-let [cwd (agent/session-cwd! agent {:sessionId session-id})]
+          (json-response 200 (completions cwd request))
+          (json-response 404 {:error (str "No session " session-id)})))
 
       (and (= method :get) (re-matches session-path uri))
       (let [session-id (second (re-matches session-path uri))]

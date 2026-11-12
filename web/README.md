@@ -11,6 +11,7 @@ npm install
 npm run dev     # Vite on :5173, proxying /api and /ws to :8080
 npm run build   # writes dist/, which `lein run web` serves by default
 npm run preview # serve dist/ with Vite
+npm test        # unit tests for the pure helpers (node:test)
 ```
 
 Start the daemon separately while developing:
@@ -55,6 +56,7 @@ POST   /api/agent-configs
 PUT    /api/agent-configs/:id
 DELETE /api/agent-configs/:id
 GET    /api/plugins
+GET    /api/sessions/:id/completions?path=src/cl&limit=50
 ```
 
 Request and response bodies use the same shape as the `agent-config` rows,
@@ -62,6 +64,17 @@ with kebab-case keys such as `system-prompt` and `max-tool-rounds`. A `null`
 `tools` value means the agent's default registry, while an empty array
 disables tools for sessions that select the configuration. A `null` `plugins`
 value means every enabled plugin, while an empty array disables plugins.
+
+The completions endpoint powers the composer's `@` mentions. `path` is the
+text typed after the `@`: everything before the last `/` picks the directory
+to list (relative to the session's `cwd`) and the final segment is a
+case-insensitive name prefix. Directories are listed first and their `path`
+ends in `/` so the UI can keep descending. Paths that escape the session's
+`cwd` return no entries.
+
+```json
+{"directory":"src/clai","prefix":"da","entries":[{"name":"daemon","path":"src/clai/daemon/","type":"directory"}]}
+```
 
 Server messages:
 
@@ -92,7 +105,12 @@ card until the status becomes `completed` or `failed`.
 - `src/components/AgentConfigManager.jsx` creates, edits, and deletes stored
   agent configurations, including their active-plugin list.
 - `src/components/UpdateView.jsx` renders messages, thoughts, and tool calls.
-- `src/components/Chat.jsx` is the prompt timeline and composer.
+- `src/components/Chat.jsx` is the prompt timeline and composer. Typing `@`
+  in the composer opens the file/folder completion popup.
+- `src/usePathAutocomplete.js` owns that popup's state: debounced requests to
+  the completions endpoint, keyboard navigation, and inserting the picked
+  path into the draft. `src/mentions.js` holds the pure caret/token helpers
+  it builds on, and `src/components/PathAutocomplete.jsx` renders the list.
 - `src/components/ReplPanel.jsx` evaluates Clojure through the daemon's nREPL
   connection, defaulting to the selected session's `sessions.<id>` namespace.
 - `src/sessionNamespace.js` derives that namespace from a session id, matching

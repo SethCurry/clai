@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
+import { usePathAutocomplete } from '../usePathAutocomplete.js'
 import { EditableTitle } from './EditableTitle.jsx'
+import { PathAutocomplete } from './PathAutocomplete.jsx'
 import { UpdateView } from './UpdateView.jsx'
 
 function shortId(id) {
@@ -10,10 +12,19 @@ function shortId(id) {
 /**
  * The conversation timeline and composer. Updates are appended in stream order
  * by `useClaiSocket`; tool-call fragments are merged before they reach here.
+ * Typing `@` in the composer offers files and folders from the session's
+ * working directory.
  */
 export function Chat({ session, updates, promptRunning, onPrompt, onRename }) {
   const [draft, setDraft] = useState('')
   const endRef = useRef(null)
+  const textareaRef = useRef(null)
+  const autocomplete = usePathAutocomplete({
+    sessionId: session.sessionId,
+    value: draft,
+    onChange: setDraft,
+    textareaRef,
+  })
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' })
@@ -21,10 +32,14 @@ export function Chat({ session, updates, promptRunning, onPrompt, onRename }) {
 
   function submit() {
     if (promptRunning || !draft.trim()) return
-    if (onPrompt(draft)) setDraft('')
+    if (onPrompt(draft)) {
+      setDraft('')
+      autocomplete.close()
+    }
   }
 
   function onKeyDown(event) {
+    if (autocomplete.onKeyDown(event)) return
     if (event.key === 'Enter' && !event.shiftKey) {
       event.preventDefault()
       submit()
@@ -87,17 +102,29 @@ export function Chat({ session, updates, promptRunning, onPrompt, onRename }) {
           submit()
         }}
       >
+        {autocomplete.completion && (
+          <PathAutocomplete
+            completion={autocomplete.completion}
+            onPick={autocomplete.pick}
+            onHover={autocomplete.setIndex}
+          />
+        )}
         <textarea
+          ref={textareaRef}
           value={draft}
-          onChange={(event) => setDraft(event.target.value)}
+          onChange={autocomplete.onChange}
           onKeyDown={onKeyDown}
+          onBlur={autocomplete.onBlur}
           placeholder="Ask clai to do something..."
           rows={3}
           disabled={promptRunning}
           aria-label="Prompt"
         />
         <div className="composer__footer">
-          <span className="composer__hint">Enter to send · Shift+Enter for a newline</span>
+          <span className="composer__hint">
+            Enter to send · Shift+Enter for a newline · @ to mention a file or
+            folder
+          </span>
           <button
             className="button button--primary"
             type="submit"

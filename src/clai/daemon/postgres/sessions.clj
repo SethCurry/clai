@@ -439,6 +439,22 @@
                            "SELECT 1 AS one FROM agent_session WHERE id = ?"
                            [id])))))
 
+(defn session-cwd
+  "Return the working directory recorded for `session-id`, or nil when no such
+  session is recorded.
+
+  Reads only the session's metadata row, so this is much cheaper than
+  [[load-session]] for callers that do not need the conversation -- the web
+  UI's `@`-mention completion runs on every keystroke."
+  {:malli/schema [:-> #'postgres/client-schema #'non-empty-string [:maybe :string]]}
+  [client session-id]
+  (let [client (ready client)]
+    (when-let [id (session-key session-id)]
+      (some-> (postgres/exec-one! (:datasource client) ::load-session
+                                  select-session-sql [id])
+              row->summary
+              :cwd))))
+
 (defn list-sessions
   "Return every session state map, sorted by `:createdAt` ascending, with full
   histories. Use [[list-session-summaries]] for metadata only."

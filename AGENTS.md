@@ -16,17 +16,18 @@ its nice for a user to use from the REPL.
 
 ## Functionality Locations
 
-| Functionality       | Location                              |
-| ------------------- | ------------------------------------- |
-| Ollama API client   | ./src/clai/agent/providers/ollama.clj |
-| Logging             | ./src/clai/log.clj                    |
-| Plugin runtime      | ./src/clai/plugins.clj                |
-| Today's date plugin | ./src/clai_plugin_todays_date/plugin.clj |
-| PostgreSQL client   | ./src/clai/daemon/postgres.clj        |
-| Session storage     | ./src/clai/daemon/postgres/sessions.clj |
-| Git repo/worktree storage | ./src/clai/daemon/postgres/git.clj |
-| Storage DDL         | ./schema/schema.sql                   |
-| Web UI              | ./web                                 |
+| Functionality               | Location                                 |
+| --------------------------- | ---------------------------------------- |
+| Ollama API client           | ./src/clai/agent/providers/ollama.clj    |
+| Logging                     | ./src/clai/log.clj                       |
+| Plugin runtime              | ./src/clai/plugins.clj                   |
+| Today's date plugin         | ./src/clai_plugin_todays_date/plugin.clj |
+| PostgreSQL client           | ./src/clai/daemon/postgres.clj           |
+| Session storage             | ./src/clai/daemon/postgres/sessions.clj  |
+| Git repo/worktree storage   | ./src/clai/daemon/postgres/git.clj       |
+| `@`-mention file completion | ./src/clai/daemon/files.clj              |
+| Storage DDL                 | ./schema/schema.sql                      |
+| Web UI                      | ./web                                    |
 
 Make sure to maintain files like this that list major file and subdirectories and what they contain.
 

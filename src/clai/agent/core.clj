@@ -219,6 +219,19 @@
                     "Loaded session")
           session)))))
 
+(defn session-cwd!
+  "Return `sessionId`'s working directory, or nil when no such session is
+  recorded.
+
+  Reads only the session's metadata row, so callers that do not need the
+  conversation -- such as the web UI's `@`-mention completion -- avoid loading
+  its history or triggering [[load-session!]]'s side effects."
+  {:malli/schema [:-> :map [:map [:sessionId {:optional true} [:maybe :string]]]
+                  [:maybe :string]]}
+  [agent {:keys [sessionId]}]
+  (when-not (str/blank? (str sessionId))
+    (sessions/session-cwd (:postgres agent) (str sessionId))))
+
 (defn list-sessions!
   "List recorded sessions, optionally filtered to `opts`'s exact `:cwd`.
   Returns `{:sessions [summary ...]}`."

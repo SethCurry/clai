@@ -12,6 +12,8 @@
             [clojure.test :refer :all]
             [ring.websocket :as ws])
   (:import [java.io File]
+           [java.nio.file Files]
+           [java.nio.file.attribute FileAttribute]
            [java.time Instant]
            [java.util UUID]))
 
@@ -47,6 +49,10 @@
                 (fn [_ _]
                   {:sessions (mapv #(select-keys % [:sessionId :cwd :configId])
                                    (vals @store))})
+
+                agent/session-cwd!
+                (fn [_ {:keys [sessionId]}]
+                  (get-in @store [(str sessionId) :cwd]))
 
                 agent/list-plugins!
                 (fn [_ _] {:plugins []})
@@ -85,15 +91,18 @@
     :prompts     (atom #{})}))
 
 (defn- request
-  "Build a minimal Ring request. `body`, when present, is encoded as JSON."
+  "Build a minimal Ring request. `body`, when present, is encoded as JSON.
+  A `?query` suffix in `uri` is moved to `:query-string`."
   ([method uri] (request method uri nil))
   ([method uri body]
-   {:request-method method
-    :uri            uri
-    :path-info      uri
-    :headers        {"content-type" "application/json"}
-    :body           (when (some? body)
-                      (java.io.StringReader. (json/generate-string body)))}))
+   (let [[path query] (str/split uri #"\?" 2)]
+     {:request-method method
+      :uri            path
+      :path-info      path
+      :query-string   query
+      :headers        {"content-type" "application/json"}
+      :body           (when (some? body)
+                        (java.io.StringReader. (json/generate-string body)))})))
 
 (defn- body-text
   "Read a response body, whether it is a string or a `File` from
@@ -437,3 +446,31 @@
 (deftest json-encoding-handles-instants
   (is (= {"start_time" "1970-01-01T00:00:00Z"}
          (#'http/json-safe {:start_time (Instant/ofEpochMilli 0)}))))
+
+(deftest session-completions-list-the-working-directory
+  (let [store (atom {})
+        root  (.toFile (Files/createTempDirectory
+                        "clai-completions-" (make-array FileAttribute 0)))]
+    (try
+      (spit (io/file root "README.md") "")
+      (.mkdirs (io/file root "src"))
+      (with-fake-agent store
+        (fn []
+          (let [handler (http/handler (state store))
+                session (new-session store (str root))
+                id      (:sessionId session)
+                response (handler (request :get
+                                           (str "/api/sessions/" id
+                                                "/completions?path=s")))
+                body     (response-body response)]
+            (is (= 200 (:status response)))
+            (is (= {:directory ""
+                    :prefix    "s"
+                    :entries   [{:name "src" :path "src/" :type "directory"}]}
+                   body))
+
+            (is (= 404 (:status (handler (request :get
+                                                  "/api/sessions/nope/completions"))))))))
+      (finally
+        (doseq [file (reverse (file-seq root))]
+          (io/delete-file file true))))))

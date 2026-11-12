@@ -849,6 +849,7 @@ pre {
 /* ---------------------------------------------------------------- composer */
 
 .composer {
+  position: relative;
   flex: 0 0 auto;
   padding: 14px;
   border-top: 1px solid var(--border);
@@ -895,6 +896,78 @@ pre {
 .composer__hint {
   color: var(--muted-2);
   font-size: 0.7rem;
+}
+
+/* -------------------------------------------------------- @ mentions popup */
+
+.autocomplete {
+  position: absolute;
+  right: 14px;
+  bottom: 100%;
+  left: 14px;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 280px;
+  margin-bottom: 6px;
+  padding: 6px;
+  overflow-y: auto;
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  background: var(--panel-2);
+  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.45);
+}
+
+.autocomplete__item {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 9px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  font-size: 0.79rem;
+  text-align: left;
+}
+
+.autocomplete__item--active,
+.autocomplete__item:hover {
+  background: rgba(56, 189, 248, 0.14);
+}
+
+.autocomplete__icon {
+  flex: 0 0 14px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.autocomplete__name {
+  overflow: hidden;
+  font-family: var(--mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.autocomplete__dir {
+  margin-left: auto;
+  overflow: hidden;
+  color: var(--muted-2);
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.autocomplete__empty {
+  margin: 0;
+  padding: 8px 10px;
+  color: var(--muted);
+  font-size: 0.76rem;
 }
 
 /* ----------------------------------------------------------------- buttons */
