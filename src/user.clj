@@ -24,3 +24,12 @@
 ;; Switch handlers before loading `clai.repl`: loading it creates the default
 ;; agent, which emits a configuration signal.
 (log-to-file!)
+
+(require '[clai.repl :refer :all])
+(require '[clai.shell.browser :as browser])
+(require '[clai.shell.cli :as cli])
+(require '[clai.shell.docker :as docker])
+(require '[clai.shell.git :as git])
+(require '[clai.shell.task :as task])
+(require '[clai.shell.help :refer [help!]])
+(require '[clojure.pprint :refer [pprint]])

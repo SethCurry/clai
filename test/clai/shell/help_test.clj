@@ -2,7 +2,7 @@
   "Tests for the REPL help command in `clai.shell.help`."
   (:require [clai.shell.cli :as cli]
             [clai.shell.git :as git]
-            [clai.shell.help :as help :refer [help]]
+            [clai.shell.help :as help :refer [help help!]]
             [clojure.string :as str]
             [clojure.test :refer :all]))
 
@@ -77,7 +77,18 @@
 (deftest help-text-describes-a-namespace
   (let [text (help/help-text 'clai.shell.git)]
     (is (str/starts-with? text "clai.shell.git (namespace)"))
-    (is (str/includes? text "REPL-friendly helpers for driving the `git` CLI."))))
+    (is (str/includes? text "REPL-friendly helpers for driving the `git` CLI."))
+    (is (str/includes? text "\n\nPublic vars:\n"))
+    (is (some #(= "  commit" %) (str/split-lines text)))))
+
+(deftest help-text-lists-public-vars-without-their-docstrings
+  (let [text (help/help-text 'clai.shell.git)]
+    (is (str/includes? text "\n  commit\n"))
+    (is (not (str/includes? text "Commit staged changes")))))
+
+(deftest help-text-describes-a-namespace-object
+  (is (= (help/help-text 'clai.shell.git)
+         (help/help-text (the-ns 'clai.shell.git)))))
 
 (deftest help-text-reports-an-unknown-target
   (in-test-ns
@@ -122,6 +133,14 @@
   (let [out (with-out-str (help clai.shell.git))]
     (is (str/starts-with? out "clai.shell.git (namespace)\n"))
     (is (str/includes? out "REPL-friendly helpers for driving the `git` CLI."))))
+
+(deftest help-with-no-argument-describes-the-current-namespace
+  (in-test-ns
+    (fn []
+      (let [out (with-out-str (help!))]
+        (is (str/starts-with? out "clai.shell.help-test (namespace)\n"))
+        (is (str/includes? out "Public vars:\n"))
+        (is (str/includes? out "\n  unbound-helper\n"))))))
 
 (deftest help-with-no-argument-describes-itself
   (let [out (with-out-str (help))]

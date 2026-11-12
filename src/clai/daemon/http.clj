@@ -630,7 +630,7 @@
   The server does not block; pass the returned `:server` to [[stop-server!]]."
   {:malli/schema [:-> [:maybe #'StartOptions] :map]}
   [{:keys [host port root nrepl-port agent]
-    :or   {host "127.0.0.1" port 8080 root "web/dist"}}]
+    :or   {host "0.0.0.0" port 8080 root "web/dist"}}]
   (let [agent (or agent (agent/ollama-agent))
          _     (when-let [postgres (:postgres agent)]
                  (plugins/load-configured! postgres))

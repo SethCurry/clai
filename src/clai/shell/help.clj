@@ -20,10 +20,16 @@
       (help \"git/commit\")
       (help #'git/commit)
 
-  A symbol naming a namespace prints that namespace's docstring, which is how
-  each integration documents its options:
+  A symbol naming a namespace prints that namespace's docstring followed by
+  the names of its public Vars, which is how each integration documents its
+  options and lists what it offers:
 
       (help clai.shell.git)
+
+  [[help!]] behaves the same, and called with no argument it lists the current
+  namespace, which is handy for exploring a session:
+
+      (help!)
 
   Aliases are resolved in the namespace the call is written in, so
   `(help git/commit)` works from `user` where `git` is an alias, and
@@ -58,6 +64,11 @@
   "True when `x` is a Var, the target type [[help*]] prints directly."
   [x]
   (instance? clojure.lang.Var x))
+
+(defn- namespace-target?
+  "True when `x` is a Namespace, which [[help*]] prints as a namespace."
+  [x]
+  (instance? clojure.lang.Namespace x))
 
 (defn- var-symbol
   "The fully qualified symbol naming `v`."
@@ -154,29 +165,51 @@
       (str (str/join "\n" header) "\n\n" (indent doc))
       (str/join "\n" header))))
 
-(defn- namespace-help-text
-  "Render the help for a namespace."
+(defn- public-var-lines
+  "Render the name of every public Var in namespace `n`, sorted by name and
+  without its docstring."
   [n]
-  (if-let [doc (doc-text (meta n))]
-    (str (ns-name n) " (namespace)\n\n" doc)
-    (str (ns-name n) " (namespace)")))
+  (->> (keys (ns-publics n))
+       (sort-by str)
+       (mapv #(str "  " %))))
+
+(defn- namespace-help-text
+  "Render the help for a namespace: its docstring followed by the names of
+  its public Vars."
+  [n]
+  (let [doc  (doc-text (meta n))
+        vars (public-var-lines n)]
+    (->> [(str (ns-name n) " (namespace)")
+          doc
+          (when (seq vars)
+            (str "Public vars:\n" (str/join "\n" vars)))]
+         (remove nil?)
+         (str/join "\n\n"))))
 
 (defn help-text
   "Return the help text for `target` as a string, without printing it.
 
-  `target` may be a Var, a symbol, or a string. A symbol or string naming a
-  Var is resolved in the current namespace (`*ns*`), so aliases work and an
-  explicit namespace prefix is loaded on demand; a symbol or string naming a
-  namespace prints that namespace's docstring. An unresolvable target returns
-  a short message instead of throwing."
+  `target` may be a Var, a Namespace, a symbol, or a string. A symbol or
+  string naming a Var is resolved in the current namespace (`*ns*`), so
+  aliases work and an explicit namespace prefix is loaded on demand; a symbol,
+  string, or Namespace naming a namespace prints that namespace's docstring
+  followed by the names of its public Vars. An unresolvable target returns a
+  short message instead of throwing."
   [target]
-  (if-let [v (if (var-target? target)
-               target
-               (some-> (target-symbol target) resolve-var))]
-    (var-help-text v)
-    (if-let [n (some-> (target-symbol target) resolve-namespace)]
-      (namespace-help-text n)
-      (str "No Var or namespace found for " target "."))))
+  (cond
+    (var-target? target)
+    (var-help-text target)
+
+    (namespace-target? target)
+    (namespace-help-text target)
+
+    :else
+    (let [sym (target-symbol target)]
+      (if-let [v (some-> sym resolve-var)]
+        (var-help-text v)
+        (if-let [n (some-> sym resolve-namespace)]
+          (namespace-help-text n)
+          (str "No Var or namespace found for " target "."))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Printing
@@ -187,7 +220,8 @@
 
   [[help]] expands to a call to this function with the symbol already
   resolved to a Var; calling it directly is useful for a target computed at
-  runtime, in which case a symbol is resolved in the current namespace."
+  runtime, in which case a symbol is resolved in the current namespace. A Var,
+  a Namespace, a symbol, or a string are all accepted."
   [target]
   (println (help-text target))
   nil)
@@ -225,6 +259,12 @@
      `(help* ~sym))))
 
 (defmacro help!
-  "Alias for [[help]], kept for callers that use the side-effecting name."
-  [& args]
-  `(help ~@args))
+  "Alias for [[help]], kept for callers that use the side-effecting name.
+
+  With no argument it prints the help for the current namespace (`*ns*`): the
+  namespace's docstring followed by the names of its public Vars. A namespace
+  target prints the same listing for that namespace."
+  ([]
+   `(help* *ns*))
+  ([target]
+   `(help ~target)))
