@@ -4,8 +4,9 @@
   Prompts use the content vocabulary from `clai.events.schema` and may include
   resource blocks. Ollama's chat API only accepts text, so this namespace
   flattens those parts into `{:role ... :content ...}` maps and turns persisted
-  history back into event-shaped updates for the REPL."
-  (:require [clai.agent.resources :as resources]
+  history back into event-shaped updates for the REPL and the web UI."
+  (:require [clai.agent.providers.ollama.messages :as messages]
+            [clai.agent.resources :as resources]
             [clai.events.schema :as events]
             [clojure.string :as str]))
 
@@ -100,28 +101,82 @@
 ;; Ollama history -> event updates
 ;; ---------------------------------------------------------------------------
 
+(defn- tool-result-texts
+  "Map each tool call id in `history` to the text of the `tool`-role message
+  that recorded its result."
+  [history]
+  (into {}
+        (keep (fn [{:keys [role tool_call_id content]}]
+                (when (and (= "tool" (name->str role)) (some? tool_call_id))
+                  [tool_call_id (events/content->text content)])))
+        history))
+
+(defn- tool-call-updates
+  "Replay the tool calls requested by assistant `message` as `tool_call`
+  updates, filling in the output that `results` (a call-id -> text map) holds
+  for each. A call with no recorded result stays `running`, so a conversation
+  interrupted mid-tool still shows what it was doing."
+  [message results]
+  (mapv (fn [call]
+          (let [id     (messages/tool-call-id call)
+                input  (messages/tool-call-arguments call)
+                output (get results id)]
+            (cond-> {:type   "tool_call"
+                     :id     id
+                     :name   (messages/tool-call-name call)
+                     :title  (messages/tool-call-title call)
+                     :status "running"}
+              (some? input)
+              (assoc :input input)
+
+              (some? output)
+              (assoc :output output
+                     :status (messages/tool-result-status output)))))
+        (:tool_calls message)))
+
+(defn- assistant-updates
+  "Replay one persisted assistant `message` as the updates the agent streamed
+  while producing it: its reasoning, its text, and its tool calls.
+
+  Blank text produces no `agent_message`, so the tool-call-only turns Ollama
+  emits do not leave empty bubbles in a reloaded conversation."
+  [results message]
+  (let [text    (events/content->text (:content message))
+        thought (str (:thinking message))]
+    (cond-> []
+      (not (str/blank? thought))
+      (conj (events/text-event "agent_thought" thought))
+
+      (not (str/blank? text))
+      (conj (events/text-event "agent_message" text))
+
+      (seq (:tool_calls message))
+      (into (tool-call-updates message results)))))
+
 (defn- history-message->updates
   "Convert one persisted history message to the event updates a viewer should
   see when a session is loaded.
 
-  System and tool messages are internal and are not replayed. User messages
-  become user prompts. Assistant messages become an `agent_thought` event
-  (when the stored message carries reasoning in `:thinking`) followed by an
-  `agent_message`."
-  [{:keys [role content thinking]}]
-  (let [role    (name->str role)
-        text    (events/content->text content)
-        thought (when-not (str/blank? (str thinking))
-                  (events/text-event "agent_thought" (str thinking)))
-        message (events/text-event "agent_message" text)]
-    (case role
-      "user"                [(events/text-event "user_prompt" text)]
-      ("assistant" "agent") (if thought [thought message] [message])
-      [])))
+  User turns become `user_prompt` events and assistant turns are replayed by
+  [[assistant-updates]]. System messages (the internal instructions that open
+  a session) are dropped, and `tool` results are not updates of their own:
+  [[tool-result-texts]] folds each one into the tool call it answers."
+  [results message]
+  (case (name->str (:role message))
+    "user"                [(events/text-event "user_prompt"
+                                              (events/content->text
+                                               (:content message)))]
+    ("assistant" "agent") (assistant-updates results message)
+    []))
 
 (defn history->updates
-  "Convert persisted `history` into the event updates a viewer should render.
-  Returns a vector in conversation order."
+  "Convert persisted `history` into the event updates a viewer should render,
+  in conversation order.
+
+  A reloaded conversation therefore looks like it did while it streamed:
+  thoughts, text, and tool calls in the order the agent produced them, with
+  each tool call's output attached."
   {:malli/schema [:-> [:maybe [:sequential :map]] [:vector :map]]}
   [history]
-  (into [] (mapcat history-message->updates) history))
+  (let [results (tool-result-texts history)]
+    (into [] (mapcat #(history-message->updates results %)) history)))

@@ -42,6 +42,7 @@
             [clai.agent.providers.ollama.messages :as messages]
             [clai.agent.providers.ollama.models :as models]
             [clai.agent.providers.ollama.schemas :as schemas]
+            [clai.events.schema :as events]
             [clai.log]
             [taoensso.telemere :as tel]))
 
@@ -420,6 +421,11 @@
 (def ^{:malli/schema [:-> #'schemas/tool-call string?]} tool-call-title
   "Render a short human-readable title for an Ollama tool call."
   messages/tool-call-title)
+
+(def ^{:malli/schema [:-> :any #'events/ToolCallStatus]} tool-result-status
+  "The terminal status a tool call's recorded `result` implies: `failed` when
+  the result is an error message, `completed` otherwise."
+  messages/tool-result-status)
 
 ;; ---------------------------------------------------------------------------
 ;; Convenience: bind a default client

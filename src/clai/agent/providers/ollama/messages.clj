@@ -1,6 +1,8 @@
 (ns clai.agent.providers.ollama.messages
   "Helpers for normalizing Ollama chat responses and tool calls."
-  (:require [clai.agent.providers.ollama.schemas :as schemas])
+  (:require [clai.agent.providers.ollama.schemas :as schemas]
+            [clai.events.schema :as events]
+            [clojure.string :as str])
   (:import [java.util UUID]))
 
 (defn assistant-message
@@ -32,6 +34,13 @@
   [call]
   (or (get-in call [:function :name]) (:name call)))
 
+(defn tool-call-arguments
+  "Extract the arguments map from an Ollama `tool_calls` entry, falling back to
+  the canonical `ToolCallContent` `:input` field."
+  {:malli/schema [:-> #'schemas/tool-call :any]}
+  [call]
+  (or (get-in call [:function :arguments]) (:arguments call) (:input call)))
+
 (defn tool-call-title
   "Render a short human-readable title for a tool call.
 
@@ -39,7 +48,12 @@
   `ToolCallContent` maps, using `:input` as the arguments for the latter."
   {:malli/schema [:-> #'schemas/tool-call string?]}
   [call]
-  (str (or (tool-call-name call) "?")
-       " " (pr-str (or (get-in call [:function :arguments])
-                       (:arguments call)
-                       (:input call)))))
+  (str (or (tool-call-name call) "?") " " (pr-str (tool-call-arguments call))))
+
+(defn tool-result-status
+  "The terminal `clai.events.schema/ToolCallStatus` a tool call's recorded
+  `result` implies: `failed` when the result is an error message, `completed`
+  otherwise."
+  {:malli/schema [:-> :any #'events/ToolCallStatus]}
+  [result]
+  (if (str/starts-with? (str result) "Error:") "failed" "completed"))

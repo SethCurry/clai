@@ -466,9 +466,7 @@
          {:type   "tool_call"
           :id     id
           :output (str result)
-          :status (if (str/starts-with? (str result) "Error:")
-                    "failed"
-                    "completed")}))
+          :status (ollama/tool-result-status result)}))
 
 (defn- send-thought
   "Relay the model's reasoning text in `msg` as an `agent_thought` event.

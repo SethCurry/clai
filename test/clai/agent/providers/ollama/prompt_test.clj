@@ -131,3 +131,66 @@
                   {:role "tool" :content "internal"}
                   {:role "assistant" :content "hello"}])]
     (is (= ["user_prompt" "agent_message"] (mapv :type updates)))))
+
+(deftest history-drops-assistant-turns-with-nothing-visible
+  ;; Ollama's tool-call-only assistant messages carry empty content; replaying
+  ;; them as agent messages left blank bubbles in a reloaded conversation. A
+  ;; message with neither text nor thinking contributes no updates.
+  (is (= [] (ollama-prompt/history->updates
+             [{:role "assistant" :content ""}
+              {:role "assistant" :content "   "}])))
+  (is (= [] (ollama-prompt/history->updates [{:role "assistant"}]))))
+
+(deftest history-replays-tool-calls-with-their-results
+  (let [updates (ollama-prompt/history->updates
+                 [{:role "user" :content "list the files"}
+                  {:role "assistant"
+                   :content ""
+                   :thinking "I should look"
+                   :tool_calls [{:id "call_1"
+                                 :function {:name "run_command"
+                                            :arguments {:command "ls"}}}]}
+                  {:role "tool"
+                   :name "run_command"
+                   :content "a.txt\nb.txt"
+                   :tool_call_id "call_1"}
+                  {:role "assistant" :content "Two files."}])]
+    (is (= ["user_prompt" "agent_thought" "tool_call" "agent_message"]
+           (mapv :type updates)))
+    (is (= {:type   "tool_call"
+            :id     "call_1"
+            :name   "run_command"
+            :title  "run_command {:command \"ls\"}"
+            :input  {:command "ls"}
+            :status "completed"
+            :output "a.txt\nb.txt"}
+           (nth updates 2)))))
+
+(deftest history-marks-failed-tool-calls
+  (let [updates (ollama-prompt/history->updates
+                 [{:role "assistant"
+                   :content ""
+                   :tool_calls [{:id "call_1" :function {:name "run_command"}}]}
+                  {:role "tool"
+                   :name "run_command"
+                   :content "Error: exit 1"
+                   :tool_call_id "call_1"}])]
+    (is (= "failed" (:status (first updates))))
+    (is (= "Error: exit 1" (:output (first updates))))))
+
+(deftest history-keeps-tool-calls-that-never-returned
+  ;; An interrupted session has an assistant message whose tool call has no
+  ;; result; it is still worth showing as running.
+  (let [updates (ollama-prompt/history->updates
+                 [{:role "assistant"
+                   :content ""
+                   :tool_calls [{:id "call_1"
+                                 :function {:name "run_command"
+                                            :arguments {:command "sleep 100"}}}]}])]
+    (is (= [{:type   "tool_call"
+             :id     "call_1"
+             :name   "run_command"
+             :title  "run_command {:command \"sleep 100\"}"
+             :input  {:command "sleep 100"}
+             :status "running"}]
+           updates))))

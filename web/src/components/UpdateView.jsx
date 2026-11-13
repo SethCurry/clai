@@ -80,6 +80,9 @@ export function UpdateView({ update }) {
   }
 
   if (update.type === 'agent_message') {
+    // Ollama's tool-call-only turns carry no text, so replaying or streaming
+    // one would otherwise leave an empty bubble in the timeline.
+    if (!text.trim()) return null
     return (
       <div className="message message--agent">
         <div className="message__label">clai</div>
