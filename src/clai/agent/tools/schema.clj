@@ -53,6 +53,15 @@
   agent loop also supplies the live session's client, model, tool registry,
   and limits so tools such as `spawn_agent` can start their own conversations.
 
+  `:postgres` is the agent's session-storage client, and `:tool-registry` its
+  live tool registry; `eval_clojure` exposes both to evaluated code.
+
+  `:client` is the provider client serving `:model`, `:provider` names that
+  provider, `:clients` maps every provider to its client, and
+  `:default-provider` is the provider used for a model name that does not name
+  one. Together they let a tool run a conversation on another provider --
+  `spawn_agent` uses them to honour a sub-agent's requested model.
+
   `:on-output` is an optional `(fn [output] ...)` a long-running tool may call
   with the output it has produced so far; the agent loop relays each call to
   the client as a `tool_call_update`. It is absent when nothing is listening
@@ -61,8 +70,12 @@
    [:cwd {:optional true} [:maybe :string]]
    [:session-id {:optional true} [:maybe :string]]
    [:client {:optional true} :any]
+   [:clients {:optional true} [:maybe [:map-of :keyword :any]]]
+   [:provider {:optional true} [:maybe :keyword]]
+   [:default-provider {:optional true} [:maybe :keyword]]
    [:model {:optional true} [:maybe :string]]
    [:tool-registry {:optional true} :any]
+   [:postgres {:optional true} :any]
    [:chat-opts {:optional true} [:map]]
    [:max-rounds {:optional true} [:maybe pos-int?]]
    [:agent-depth {:optional true} [:maybe :int]]

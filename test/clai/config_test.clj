@@ -131,11 +131,43 @@
   (is (= 3 (config/resolve-max-tool-rounds {:max-tool-rounds 3})))
   (is (pos-int? (config/resolve-max-tool-rounds {}))))
 
-(deftest make-ollama-client-uses-config
-  (let [client (config/make-ollama-client
-                {:ollama {:host "http://example:1234" :timeout 42}})]
-    (is (= "http://example:1234" (:host client)))
-    (is (= 42 (:timeout client)))))
+(deftest make-clients-builds-every-provider
+  (let [clients (config/make-clients
+                 {:ollama     {:host "http://example:1234" :timeout 42}
+                  :openrouter {:api-key "sk-or-test"
+                               :base-url "https://openrouter.test/api/v1"}})]
+    (is (= #{:ollama :openrouter} (set (keys clients))))
+    (is (= "http://example:1234" (-> clients :ollama :host)))
+    (is (= 42 (-> clients :ollama :timeout)))
+    (is (= "https://openrouter.test/api/v1" (-> clients :openrouter :base-url)))
+    (is (= "sk-or-test" (-> clients :openrouter :api-key)))
+    (is (= :openrouter (-> clients :openrouter :provider)))))
+
+(deftest resolve-provider-prefers-config
+  (is (= :openrouter (config/resolve-provider {:provider :openrouter})))
+  (is (= :openrouter (config/resolve-provider {:provider "OpenRouter"})))
+  (is (= :ollama (config/resolve-provider {})))
+  (is (= :ollama (config/resolve-provider {:provider :nope}))
+      "an unknown provider falls back to the default"))
+
+(deftest load-config-openrouter-submap
+  (let [path (write-cfg
+              "{:model \"openrouter:openai/gpt-4o-mini\"
+                :provider :openrouter
+                :openrouter {:api-key \"sk-or-x\"
+                             :base-url \"https://openrouter.test/api/v1\"
+                             :timeout 1000
+                             :referer \"https://example.com\"
+                             :title \"clai-test\"}}")
+        cfg  (config/load-config path)]
+    (is (= :openrouter (:provider cfg)))
+    (is (= "openrouter:openai/gpt-4o-mini" (:model cfg)))
+    (is (= {:api-key  "sk-or-x"
+            :base-url "https://openrouter.test/api/v1"
+            :timeout  1000
+            :referer  "https://example.com"
+            :title    "clai-test"}
+           (:openrouter cfg)))))
 
 (deftest load-config-postgres-submap
   (let [path (write-cfg

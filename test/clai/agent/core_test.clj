@@ -5,6 +5,7 @@
   (:require [clai.agent.configs :as agent-configs]
             [clai.agent.core :as agent]
             [clai.agent.providers.ollama :as ollama]
+            [clai.agent.providers.openrouter :as openrouter]
             [clai.daemon.postgres.sessions :as sessions]
             [clai.events.schema :as events]
             [clai.plugins :as plugins]
@@ -65,6 +66,53 @@
 ;; Prompt end to end (Ollama stubbed)
 ;; ---------------------------------------------------------------------------
 
+(deftest agent-records-the-provider-that-serves-its-model
+  (let [handler (agent/make-agent {:cfg   {}
+                                   :model "openrouter:anthropic/claude-sonnet-4"})]
+    (is (= :openrouter (:provider handler)))
+    (is (= "anthropic/claude-sonnet-4" (:model handler))
+        "the provider prefix is stripped before the model is sent")
+    (is (= #{:ollama :openrouter} (set (keys (:clients handler))))
+        "both provider clients are available to every session")))
+
+(deftest session-configuration-switches-provider
+  (let [ollama-requests     (atom [])
+        openrouter-requests (atom [])
+        updates             (atom [])]
+    (with-redefs [ollama/chat
+                  (fn [_ req]
+                    (swap! ollama-requests conj req)
+                    {:message {:role "assistant" :content "from ollama"}})
+
+                  openrouter/chat
+                  (fn [_ req]
+                    (swap! openrouter-requests conj req)
+                    {:choices [{:message {:role    "assistant"
+                                          :content "from openrouter"}}]})
+
+                  agent-configs/load-config
+                  (fn [_ id]
+                    (when (= "42" id)
+                      {:configId "42"
+                       :name     "openrouter"
+                       :model    "openrouter:anthropic/claude-sonnet-4"}))]
+      (let [handler (agent/make-agent {:cfg    {}
+                                       :client test-client
+                                       :model  "stub-model"})
+            {:keys [sessionId]} (agent/new-session! handler {:cwd      "/tmp"
+                                                              :configId "42"})
+            resp (prompt! handler sessionId "ping" updates)]
+        (is (= {:stopReason "end_turn"} resp))
+        (is (empty? @ollama-requests)
+            "the session's model must not reach the daemon's default provider")
+        (is (= 1 (count @openrouter-requests)))
+        (let [request (first @openrouter-requests)]
+          (is (= "anthropic/claude-sonnet-4" (:model request)))
+          (is (= [{:role "user" :content "ping"}] (:messages request))
+              "history is converted into OpenRouter's message format"))
+        (is (= "from openrouter"
+               (events/content->text (:content (last @updates)))))))))
+
 (defn- run-with-stubbed-ollama
   "Run `f` with `/api/chat` stubbed. `f` receives the agent plus atoms
   collecting the chat request bodies (`requests`) and the event updates sent
@@ -72,7 +120,7 @@
 
   `reply` is either the assistant message text or a full message map (for
   example to include a `:thinking` field). `agent-opts` is merged into the
-  options passed to `agent/ollama-agent`, so tests can supply a `:cfg`."
+  options passed to `agent/make-agent`, so tests can supply a `:cfg`."
   ([reply f] (run-with-stubbed-ollama reply {} f))
   ([reply agent-opts f]
    (let [requests (atom [])
@@ -83,7 +131,7 @@
                      {:message (if (map? reply)
                                  (merge {:role "assistant"} reply)
                                  {:role "assistant" :content reply})})]
-       (let [handler (agent/ollama-agent
+       (let [handler (agent/make-agent
                       (merge {:cfg    {}
                               :client test-client
                               :model  "stub-model"}
@@ -383,7 +431,7 @@
                                    :function {:name "echo"
                                               :arguments "{\"text\":\"hi\"}"}}]}}
                       {:message {:role "assistant" :content "done"}}))]
-      (let [handler (agent/ollama-agent {:cfg           {:tools ["echo"]}
+      (let [handler (agent/make-agent {:cfg           {:tools ["echo"]}
                                          :client        test-client
                                          :model         "stub-model"
                                          :tool-registry [echo other]})
@@ -429,7 +477,7 @@
                                    :function {:name "chatter"
                                               :arguments "{}"}}]}}
                       {:message {:role "assistant" :content "done"}}))]
-      (let [handler (agent/ollama-agent {:cfg           {}
+      (let [handler (agent/make-agent {:cfg           {}
                                          :client        test-client
                                          :model         "stub-model"
                                          :tool-registry [chatter]})

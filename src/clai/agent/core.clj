@@ -1,36 +1,42 @@
 (ns clai.agent.core
   "The in-process `clai` agent: its configuration, sessions, and chat loop.
 
-  `ollama-agent` builds a plain configuration map that answers prompts with a
-  `clai.agent.providers.ollama` chat model, persists sessions in PostgreSQL via
-  `clai.daemon.postgres.sessions`, and executes model tool calls through its own
-  per-agent tool registry from `clai.agent.tools.registry`.
+  [[make-agent]] builds a plain configuration map that answers prompts with a
+  chat model from one of the providers in `clai.agent.providers` (Ollama or
+  OpenRouter), persists sessions in PostgreSQL via
+  `clai.daemon.postgres.sessions`, and executes model tool calls through its
+  own per-agent tool registry from `clai.agent.tools.registry`.
 
   A prompt runs through [[run-prompt!]], which appends it to the session and
-  drives [[run-agent-loop]]: the session history is sent to Ollama's
-  `/api/chat`, any tool calls the model requests are executed against the
-  agent's registry and recorded, and the loop repeats until the model produces
-  a final text reply (or the configured tool-round cap is reached). Tool
-  activity and model reasoning stream to the caller as event-shaped maps from
-  `clai.events.schema`.
+  drives [[run-agent-loop]]: the session history is sent to the provider that
+  serves the agent's model, any tool calls the model requests are executed
+  against the agent's registry and recorded, and the loop repeats until the
+  model produces a final text reply (or the configured tool-round cap is
+  reached). Tool activity and model reasoning stream to the caller as
+  event-shaped maps from `clai.events.schema`.
 
   Supporting pieces live in sibling namespaces under `clai.agent.*`:
 
     * `clai.agent.configs`                 -- stored per-session agent
                                               configurations.
+    * `clai.agent.providers`               -- provider selection and the
+                                              provider-neutral chat turn.
     * `clai.agent.providers.ollama`        -- the Ollama HTTP client.
+    * `clai.agent.providers.openrouter`    -- the OpenRouter HTTP client.
+    * `clai.agent.providers.messages`      -- normalized assistant messages and
+                                              tool-call helpers.
     * `clai.agent.providers.ollama.prompt` -- prompt/history conversion.
     * `clai.agent.resources`               -- resource blocks rendered as text
                                               for the model.
     * `clai.daemon.postgres.sessions`      -- PostgreSQL-backed session storage.
     * `clai.agent.tools.registry`          -- immutable tool registries.
     * `clai.agent.tools.builtin`           -- the default built-in tools.
-    * `clai.agent.tools.invoke`            -- running one Ollama tool call.
+    * `clai.agent.tools.invoke`            -- running one model tool call.
     * `clai.config`                        -- config/env resolution for the
-                                              agent's model, client, tools, and
+                                              agent's model, clients, tools, and
                                               chat options."
   (:require [clai.agent.configs :as agent-configs]
-            [clai.agent.providers.ollama :as ollama]
+            [clai.agent.providers :as providers]
             [clai.agent.providers.ollama.prompt :as ollama-prompt]
             [clai.agent.tools.builtin :as tools-builtin]
             [clai.agent.tools.invoke :as tool-invoke]
@@ -360,25 +366,38 @@
   A nil configuration is a no-op. Tool selection starts from the agent's full
   registry so a session configuration can choose any tool the daemon allows.
   A `:plugins` list in `config` replaces the agent's active plugins; nil means
-  every enabled plugin and an empty list disables plugins."
+  every enabled plugin and an empty list disables plugins.
+
+  A configuration that names a `:model` also re-resolves the provider (and so
+  the client) from that model, using [[make-agent]]'s `:default-provider` for
+  model names that do not name one."
   [agent config]
   (if (nil? config)
     agent
     (let [base-registry (or (:base-tool-registry agent) (:tool-registry agent))
           tool-registry (if (contains? config :tools)
                           (tools-registry/select-tools base-registry (:tools config))
-                          (:tool-registry agent))]
-      (assoc agent
-             :model         (or (:model config) (:model agent))
-             :max-rounds    (or (:max-tool-rounds config) (:max-rounds agent))
-             :chat-opts     (merge (:chat-opts agent)
-                                   (util/select-present config
-                                                        [:options :think :format]))
-             :tool-registry tool-registry
-             :tool-specs    (tools-registry/specs tool-registry)
-             :plugins       (if (contains? config :plugins)
-                              (:plugins config)
-                              (:plugins agent))))))
+                          (:tool-registry agent))
+          agent         (assoc agent
+                               :max-rounds    (or (:max-tool-rounds config)
+                                                  (:max-rounds agent))
+                               :chat-opts     (merge (:chat-opts agent)
+                                                     (util/select-present config
+                                                                          [:options
+                                                                           :think
+                                                                           :format]))
+                               :tool-registry tool-registry
+                               :tool-specs    (tools-registry/specs tool-registry)
+                               :plugins       (if (contains? config :plugins)
+                                                (:plugins config)
+                                                (:plugins agent)))]
+      (if-let [model (:model config)]
+        (merge agent
+               (-> (providers/model-client (:clients agent)
+                                           model
+                                           (:default-provider agent))
+                   (select-keys [:provider :model :client])))
+        agent))))
 
 (defn delete-session!
   "Delete the session named by `opts`'s `:sessionId`."
@@ -442,14 +461,14 @@
   "Emit a running `tool_call` event announcing that `call` has started with
   parsed `args`. Returns the id used for the event."
   [on-update call args]
-  (let [id (ollama/tool-call-id call)]
+  (let [id (providers/tool-call-id call)]
     (emit! on-update
            {:type       "tool_call"
             :id         id
             :start_time (Instant/now)
             :input      args
-            :name       (ollama/tool-call-name call)
-            :title      (ollama/tool-call-title call)
+            :name       (providers/tool-call-name call)
+            :title      (providers/tool-call-title call)
             :status     "running"})
     id))
 
@@ -466,7 +485,7 @@
          {:type   "tool_call"
           :id     id
           :output (str result)
-          :status (ollama/tool-result-status result)}))
+          :status (providers/tool-result-status result)}))
 
 (defn- send-thought
   "Relay the model's reasoning text in `msg` as an `agent_thought` event.
@@ -483,19 +502,26 @@
 
 (defn- session-tool-ctx
   "Build the context map handed to tool functions for `session-id`. Besides
-  the `:cwd`, it carries the loop's live client, model, registry, and limits so
-  tools like `spawn_agent` can run their own conversations."
-  [session-id {:keys [postgres client model tool-registry chat-opts max-rounds
-                      agent-depth openproject]}]
-  {:cwd           (:cwd (sessions/load-session postgres session-id))
-   :session-id    session-id
-   :client        client
-   :model         model
-   :tool-registry tool-registry
-   :chat-opts     chat-opts
-   :max-rounds    max-rounds
-   :agent-depth   (long (or agent-depth 0))
-   :openproject   openproject})
+  the `:cwd`, it carries the loop's live clients, provider, model, registry,
+  storage client, and limits so tools like `spawn_agent` can run their own
+  conversations -- possibly on another provider -- and `eval_clojure` can
+  inspect the session it runs in."
+  [session-id {:keys [postgres client clients provider default-provider model
+                      tool-registry chat-opts max-rounds agent-depth
+                      openproject]}]
+  {:cwd              (:cwd (sessions/load-session postgres session-id))
+   :session-id       session-id
+   :postgres         postgres
+   :client           client
+   :clients          clients
+   :provider         provider
+   :default-provider default-provider
+   :model            model
+   :tool-registry    tool-registry
+   :chat-opts        chat-opts
+   :max-rounds       max-rounds
+   :agent-depth      (long (or agent-depth 0))
+   :openproject      openproject})
 
 (defn- call-tool-ctx
   "Build the context for one tool call: the session context plus an
@@ -512,10 +538,10 @@
     ctx))
 
 (defn- execute-tool-call
-  "Run one Ollama tool call, streaming its activity to the caller, and return
+  "Run one model tool call, streaming its activity to the caller, and return
   the `tool`-role history message recording its result."
   [on-update session-id ctx call]
-  (let [tool-name (or (ollama/tool-call-name call) "?")
+  (let [tool-name (or (providers/tool-call-name call) "?")
         [id args] (tool-invoke/tool-call->id+args call)
         tool-id   (or id tool-name)
         call-id   (send-tool-call-started on-update call args)]
@@ -537,8 +563,8 @@
   return the updated history.
 
   Emits a running `tool_call` event as each call starts, incremental output
-  events while it runs, and a terminal event when it completes. Does not call
-  Ollama; the caller chats again with the new history."
+  events while it runs, and a terminal event when it completes. Does not
+  contact the model; the caller chats again with the new history."
   [session-id msg {:keys [postgres on-update] :as opts}]
   (let [tool-calls (:tool_calls msg)
         ctx        (session-tool-ctx session-id opts)]
@@ -560,7 +586,8 @@
 ;; ---------------------------------------------------------------------------
 
 (defn- chat-once
-  "Send one non-streaming `/api/chat` request for `history`.
+  "Send one non-streaming chat request for `history` through the session's
+  provider client.
 
   Returns `{:message <assistant message>}` on success or `{:error <text>}` on
   failure, so the loop can relay the failure to the caller instead of
@@ -570,25 +597,24 @@
              :id    ::chat-request
              :data  {:sessionId session-id
                      :round     round
+                     :provider  (:provider client)
                      :model     model
                      :messages  (count history)
                      :tools     (count tool-specs)}}
-            "Sending Ollama chat request")
+            "Sending chat request")
   (try
-    {:message (ollama/assistant-message
-               (ollama/chat client
-                            (merge {:model    model
-                                    :messages history
-                                    :tools    tool-specs
-                                    :stream   false}
-                                   chat-opts)))}
+    {:message (providers/complete client {:model     model
+                                          :history   history
+                                          :tools     tool-specs
+                                          :chat-opts chat-opts})}
     (catch Throwable e
       (tel/error! {:id   ::chat-request-failed
                    :data {:sessionId session-id
                           :round     round
+                          :provider  (:provider client)
                           :model     model}}
                   e)
-      {:error (str "Ollama request failed: " (util/error-message e))})))
+      {:error (str "Chat request failed: " (util/error-message e))})))
 
 (defn- finish-reply
   "Record the assistant's final `msg` in the session history and return its
@@ -609,7 +635,7 @@
                :data  {:sessionId session-id
                        :round     round
                        :chars     (count content)}}
-              "Received Ollama chat response")
+              "Received chat response")
     content))
 
 (defn- tool-round-cap-reply
@@ -624,17 +650,18 @@
        " tool rounds without a final reply."))
 
 (defn- run-agent-loop
-  "Drive the Ollama chat conversation for `session-id` to completion.
+  "Drive the chat conversation for `session-id` to completion.
 
-  Starts from the current session history, sends it to `/api/chat` with the
-  agent's tool definitions, and loops: while the reply contains `tool_calls`,
-  execute them against `:tool-registry`, append the results, and chat again.
-  When the model replies with a plain message, record and return its content.
+  Starts from the current session history, sends it to the provider that
+  serves `:model` with the agent's tool definitions, and loops: while the
+  reply contains `tool_calls`, execute them against `:tool-registry`, append
+  the results, and chat again. When the model replies with a plain message,
+  record and return its content.
 
-  `opts` is the agent map from [[ollama-agent]] (`:postgres`, `:client`,
-  `:model`, `:tool-registry`, `:tool-specs`, `:chat-opts`, `:max-rounds`)
-  plus the caller's `:on-update` callback and the loaded `:session` passed to
-  the message plugin hooks.
+  `opts` is the agent map from [[make-agent]] (`:postgres`, `:client`,
+  `:clients`, `:provider`, `:model`, `:tool-registry`, `:tool-specs`,
+  `:chat-opts`, `:max-rounds`) plus the caller's `:on-update` callback and the
+  loaded `:session` passed to the message plugin hooks.
 
   On error (HTTP failure or hitting the round cap) returns a descriptive
   string rather than throwing, so the caller can relay it to the user."
@@ -651,7 +678,7 @@
             error
             (do
               (send-thought on-update message)
-              (if (ollama/has-tool-calls? message)
+              (if (providers/has-tool-calls? message)
                 (do (run-tool-round session-id message opts)
                     (recur (inc round)))
                 (finish-reply postgres (:session opts) message round)))))))))
@@ -679,9 +706,13 @@
     {:stopReason "end_turn"}))
 
 (defn run-prompt!
-  "Append `opts`'s `:prompt` to a session, drive the Ollama conversation to
+  "Append `opts`'s `:prompt` to a session, drive the conversation to
   completion -- executing any tool calls the model makes along the way -- and
   relay the final reply through `:on-update`.
+
+  The session's stored agent configuration (when it names a model) also
+  selects the provider, so a session started on Ollama can be switched to an
+  OpenRouter model and back just by changing its configuration.
 
   `opts` keys:
 
@@ -738,19 +769,42 @@
 ;; Agent configuration
 ;; ---------------------------------------------------------------------------
 
+(defn- agent-clients
+  "Build the agent's `{provider client}` map from `opts` and `cfg`.
+
+  `cfg`'s `:ollama` and `:openrouter` sub-maps configure the two providers;
+  all providers are always built, so a session whose stored agent
+  configuration names a model from another provider can switch to it without
+  rebuilding the agent. An explicit `:client` (or `:clients` entry) in `opts`
+  replaces that provider's client, which is how tests and embedders pin a
+  client."
+  [opts cfg]
+  (let [clients (or (:clients opts) (config/make-clients cfg))]
+    (if-let [client (:client opts)]
+      (assoc clients (:provider client) client)
+      clients)))
+
 (defn- build-agent
   "Resolve `opts` and the loaded config into the agent's configuration map.
 
-  The map holds everything the prompt loop needs: the clients, model, tool
-  registry and its specs, the tool-round cap, the system prompt, the active
-  plugin names, and extra chat options. It is plain data, so the operations
-  above can be written as ordinary functions of it."
+  The map holds everything the prompt loop needs: the provider clients, the
+  provider and model selected for this agent, the tool registry and its specs,
+  the tool-round cap, the system prompt, the active plugin names, and extra
+  chat options. It is plain data, so the operations above can be written as
+  ordinary functions of it."
   [opts]
   (let [cfg                (or (:cfg opts) (config/load-config))
-        client             (or (:client opts) (config/make-ollama-client cfg))
+        clients            (agent-clients opts cfg)
+        default-provider   (config/resolve-provider cfg)
+        model-spec         (providers/model-client
+                            clients
+                            (or (:model opts) (config/resolve-model cfg))
+                            default-provider)
+        provider           (:provider model-spec)
+        model              (:model model-spec)
+        client             (:client model-spec)
         postgres           (or (:postgres opts)
                                (config/make-postgres-client cfg))
-        model              (or (:model opts) (config/resolve-model cfg))
         base-tool-registry (base-registry opts)
         tool-registry      (resolve-tool-registry base-tool-registry cfg)
         tool-specs         (tools-registry/specs tool-registry)
@@ -760,15 +814,19 @@
         plugins            (or (:plugins opts) (:plugins cfg))]
     (tel/log! {:level :info
                :id    ::agent-configured
-               :data  {:model          model
+               :data  {:provider       provider
+                       :model          model
                        :tools          (count tool-specs)
                        :max-rounds     max-rounds
                        :system-prompt? (some? sys-prompt)
                        :plugins        (if (nil? plugins) :all (count plugins))
-                       :host           (:host client)}}
+                       :endpoint       (or (:host client) (:base-url client))}}
               "Configured clai agent")
     {:cfg                cfg
+     :clients            clients
      :client             client
+     :provider           provider
+     :default-provider   default-provider
      :postgres           postgres
      :model              model
      :base-tool-registry base-tool-registry
@@ -780,18 +838,25 @@
      :plugins            plugins
      :openproject        (:openproject cfg)}))
 
-(defn ollama-agent
-  "Build an in-process agent that answers prompts using an Ollama chat model.
+(defn make-agent
+  "Build an in-process agent that answers prompts with a chat model.
+
+  The model selects the provider: `openrouter:anthropic/claude-sonnet-4` and
+  other namespaced ids go to OpenRouter, plain names to the default provider
+  (see `clai.agent.providers/model-spec`). Both providers are configured from
+  `cfg`, so one agent can serve sessions on either.
 
   Options (all optional; defaults come from `cfg` then the environment):
 
     :cfg            the loaded config map (`clai.config/load-config`).
                     Defaults to `(config/load-config)`.
-    :client         the `clai.agent.providers.ollama.Client` to use. Defaults to
-                    one built from `cfg` and the environment (`OLLAMA_HOST`,
-                    `OLLAMA_API_KEY`).
-    :model          the model name to send to `/api/chat`. Defaults to `cfg`'s
-                    `:model`, then `CLAI_MODEL`, then `gemma3`.
+    :clients        a `{provider client}` map to use instead of the one built
+                    from `cfg` (`clai.agent.providers/make-clients`).
+    :client         a single provider client that replaces its provider's entry
+                    in `:clients`; useful for tests and embedding.
+    :model          the model to chat with. Defaults to `cfg`'s `:model`, then
+                    `CLAI_MODEL`, then `gemma3`. A `<provider>:` prefix pins the
+                    provider.
     :tool-registry  the agent's tool registry (`{id tool}`), or a collection of
                     tool maps. A collection of built-in ids (e.g.
                     `[\"read_file\"]`) selects from the built-ins. Defaults to a
@@ -808,14 +873,14 @@
                     `:plugins`; an empty vector disables plugins.
 
   A new session can select a stored `agent_config` with `:configId`. That
-  configuration's model, system prompt, tool-round cap, chat options, response
-  format, tool list, and active plugin list override the agent's defaults for
-  as long as the session lives. A new session's system prompt is the selected
+  configuration's model (and therefore provider), system prompt, tool-round
+  cap, chat options, response format, tool list, and active plugin list
+  override the agent's defaults for as long as the session lives. A new session's system prompt is the selected
   configuration's `:system-prompt`, or the agent's configured prompt, followed
   by the contents of an `AGENTS.md` in the session's `cwd`, if one exists.
   System-prompt and message hooks run only for the active plugins; when the
   agent and its configuration both leave `:plugins` nil, every enabled plugin
   runs."
-  ([] (ollama-agent nil))
+  ([] (make-agent nil))
   ([opts]
    (build-agent opts)))

@@ -32,7 +32,7 @@
   ([registry depth]
    {:cwd          "/tmp"
     :session-id   "parent-session"
-    :client       :fake-client
+    :client       {:provider :ollama}
     :model        "parent-model"
     :tool-registry registry
     :chat-opts    {}

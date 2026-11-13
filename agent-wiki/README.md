@@ -1,6 +1,10 @@
 # clai user wiki
 
+- [Models and providers](providers.md): configure Ollama and OpenRouter at the
+  same time and pick a provider by naming its model.
 - [Plugins](plugins.md): build, install, activate, and write plugins.
+- [Evaluating Clojure with the agent](eval-clojure.md): the `eval_clojure`
+  tool, the agent's REPL namespace, and the helpers it preloads.
 - [OpenProject tasks and comments](openproject.md): configure the
   OpenProject tools and let the agent list, create, and update tasks and
   read, add, or edit their comments.

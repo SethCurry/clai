@@ -472,6 +472,7 @@
          (swap! (:connections state) conj socket)
          (send! connection {:type       "hello"
                             :nreplPort  (:nrepl-port state)
+                            :provider   (:provider (:agent state))
                             :model      (:model (:agent state))})))
 
      :on-message
@@ -589,6 +590,7 @@
 
       (and (= method :get) (= uri "/api/health"))
       (let [base {:nreplPort   (:nrepl-port state)
+                  :provider    (:provider agent)
                   :model       (:model agent)
                   :connections (count @(:connections state))}]
         (try
@@ -753,13 +755,13 @@
     :port        HTTP port (default 8080; 0 lets the OS choose)
     :root        directory containing the React build (default `web/dist`)
     :nrepl-port  port of the nREPL server the REPL tab should use
-    :agent       agent map to use instead of `(agent/ollama-agent)`
+    :agent       agent map to use instead of `(agent/make-agent)`
 
   The server does not block; pass the returned `:server` to [[stop-server!]]."
   {:malli/schema [:-> [:maybe #'StartOptions] :map]}
   [{:keys [host port root nrepl-port agent]
     :or   {host "0.0.0.0" port 8080 root "web/dist"}}]
-  (let [agent (or agent (agent/ollama-agent))
+  (let [agent (or agent (agent/make-agent))
          _     (when-let [postgres (:postgres agent)]
                  (plugins/load-configured! postgres))
          state {:agent       agent

@@ -18,7 +18,10 @@ its nice for a user to use from the REPL.
 
 | Functionality               | Location                                 |
 | --------------------------- | ---------------------------------------- |
+| Provider selection (model -> provider, chat turn) | ./src/clai/agent/providers.clj |
 | Ollama API client           | ./src/clai/agent/providers/ollama.clj    |
+| OpenRouter API client       | ./src/clai/agent/providers/openrouter.clj |
+| Shared provider HTTP + message normalization | ./src/clai/agent/providers/http.clj, ./src/clai/agent/providers/messages.clj |
 | Logging                     | ./src/clai/log.clj                       |
 | Plugin runtime              | ./src/clai/plugins.clj                   |
 | Today's date plugin         | ./src/clai_plugin_todays_date/plugin.clj |
@@ -26,6 +29,8 @@ its nice for a user to use from the REPL.
 | Session storage             | ./src/clai/daemon/postgres/sessions.clj  |
 | Git repo/worktree storage   | ./src/clai/daemon/postgres/git.clj       |
 | OpenProject task/comment tools | ./src/clai/agent/tools/builtin/openproject.clj |
+| `eval_clojure` tool (agent REPL) | ./src/clai/agent/tools/builtin/eval.clj |
+| Agent REPL namespace (`eval_clojure` default, `tools`/`history` helpers) | ./src/clai/home/core.clj |
 | File listing/preview (web)  | ./src/clai/daemon/files.clj              |
 | Clojure runtime introspection (web) | ./src/clai/daemon/namespaces.clj |
 | Storage DDL                 | ./schema/schema.sql                      |

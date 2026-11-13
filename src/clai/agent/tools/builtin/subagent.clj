@@ -2,8 +2,9 @@
   "Built-in `spawn_agent` tool: run an isolated sub-agent.
 
   A sub-agent is a fresh chat conversation with its own system prompt, model,
-  and tool selection. It shares the parent's Ollama client and working
-  directory, but its history is transient: it is not written to the parent
+  and tool selection. It shares the parent's provider clients and working
+  directory (and may pick a model from another provider than the parent's),
+  but its history is transient: it is not written to the parent
   session (or to `clai.daemon.postgres.sessions` at all), and only its final
   reply is returned as the tool result. This keeps the parent's context small
   and lets it delegate a focused task -- exploring a directory, drafting a
@@ -14,7 +15,7 @@
   invent new ones. By default `spawn_agent` itself is withheld from the child
   to avoid unbounded recursion; an explicit `tools` list may include it, up to
   [[default-max-depth]] levels of nesting."
-  (:require [clai.agent.providers.ollama :as ollama]
+  (:require [clai.agent.providers :as providers]
             [clai.agent.tools.invoke :as invoke]
             [clai.agent.tools.registry :as registry]
             [clai.util :as util]
@@ -89,37 +90,52 @@
 
 (defn- child-ctx
   "Build the context handed to the child's tools. It carries the child's own
-  registry and model, so a nested `spawn_agent` call sees the child's tools
-  and increments the depth."
-  [ctx {:keys [client model chat-opts max-rounds cwd depth registry]}]
-  {:cwd          (or cwd (:cwd ctx))
-   :session-id   (:session-id ctx)
-   :client       client
-   :model        model
-   :tool-registry registry
-   :chat-opts    chat-opts
-   :max-rounds   max-rounds
-   :agent-depth  (inc depth)
-   :openproject  (:openproject ctx)})
+  registry, model, provider, and clients, so a nested `spawn_agent` call sees
+  the child's tools and can still reach every provider."
+  [ctx {:keys [client clients provider model chat-opts max-rounds cwd depth
+               registry]}]
+  {:cwd              (or cwd (:cwd ctx))
+   :session-id       (:session-id ctx)
+   :client           client
+   :clients          clients
+   :provider         provider
+   :default-provider (:default-provider ctx)
+   :model            model
+   :tool-registry    registry
+   :chat-opts        chat-opts
+   :max-rounds       max-rounds
+   :agent-depth      (inc depth)
+   :openproject      (:openproject ctx)})
 
 ;; ---------------------------------------------------------------------------
 ;; Conversation loop
 ;; ---------------------------------------------------------------------------
 
 (defn- chat-request
-  "Send one non-streaming `/api/chat` request. Returns either
-  `{:message ...}` or `{:error <throwable>}`."
+  "Send one non-streaming chat request for the child conversation. Returns
+  either `{:message ...}` or `{:error <throwable>}`."
   [client model history tool-registry chat-opts]
-  (let [specs   (registry/specs tool-registry)
-        request (merge (cond-> {:model    model
-                                :messages history
-                                :stream   false}
-                         (seq specs) (assoc :tools specs))
-                       chat-opts)]
-    (try
-      {:message (ollama/assistant-message (ollama/chat client request))}
-      (catch Throwable e
-        {:error e}))))
+  (try
+    {:message (providers/complete client
+                                  {:model     model
+                                   :history   history
+                                   :tools     (registry/specs tool-registry)
+                                   :chat-opts chat-opts})}
+    (catch Throwable e
+      {:error e})))
+
+(defn- child-model-spec
+  "Resolve the child's `model` to `{:provider ... :model ... :client ...}`.
+
+  The parent's `:clients` map is used when it has one, so a sub-agent may be
+  given a model from a different provider than its parent; without it the
+  parent's own client is reused."
+  [ctx model]
+  (if (seq (:clients ctx))
+    (providers/model-client (:clients ctx) model (:default-provider ctx))
+    {:provider (:provider ctx)
+     :model    model
+     :client   (:client ctx)}))
 
 (defn- run-conversation
   "Drive the child conversation to completion, executing its tool calls with
@@ -138,7 +154,7 @@
           (str "Error: sub-agent request failed: "
                (util/error-message error))
 
-          (ollama/has-tool-calls? message)
+          (providers/has-tool-calls? message)
           (let [tool-calls (:tool_calls message)
                 results    (invoke/execute-calls tool-registry tool-calls
                                                  context)
@@ -146,7 +162,7 @@
             (tel/log! {:level :debug
                        :id    ::subagent-tool-round
                        :data  {:round round
-                               :tools (mapv #(or (ollama/tool-call-name %)
+                               :tools (mapv #(or (providers/tool-call-name %)
                                                  "?")
                                             tool-calls)}}
                       "Sub-agent executed tool calls")
@@ -172,14 +188,18 @@
                    [[default-system-prompt]])
     tools          tool ids the sub-agent may use (optional; defaults to all
                    parent tools except `spawn_agent`)
-    model          model name for the sub-agent (optional; inherits parent)
+    model          model name for the sub-agent (optional; inherits parent).
+                   A `<provider>:` prefix or a `/`-namespaced id selects the
+                   provider, so a sub-agent can run on OpenRouter while its
+                   parent runs on Ollama (and vice versa)
     max_rounds     tool-call round cap (optional; inherits parent, clamped to
                    [[max-rounds-limit]])
     cwd            working directory for the sub-agent's tools (optional;
                    inherits parent)
 
-  `ctx` must carry the parent's `:client`, `:model`, `:tool-registry`,
-  `:chat-opts`, and `:max-rounds` (the agent loop supplies all of these).
+  `ctx` must carry the parent's `:client`, `:clients`, `:provider`, `:model`,
+  `:tool-registry`, `:chat-opts`, and `:max-rounds` (the agent loop supplies
+  all of these).
   Returns the sub-agent's final reply, or a string beginning with `Error:`."
   [{:keys [prompt system_prompt tools model max_rounds cwd]} ctx]
   (let [depth       (as-long (:agent-depth ctx) 0)
@@ -187,7 +207,6 @@
         child-max   (-> (as-long max_rounds parent-max)
                         (max 1)
                         (min max-rounds-limit))
-        client      (:client ctx)
         child-model (or (some-> model str not-empty) (:model ctx))]
     (cond
       (>= depth default-max-depth)
@@ -197,8 +216,8 @@
       (str/blank? prompt)
       "Error: spawn_agent requires a non-blank `prompt`."
 
-      (nil? client)
-      "Error: spawn_agent requires an Ollama client in the tool context."
+      (nil? (:client ctx))
+      "Error: spawn_agent requires a provider client in the tool context."
 
       (str/blank? child-model)
       "Error: spawn_agent requires a model name in the tool context."
@@ -211,18 +230,20 @@
                             (str system_prompt))
             history       [{:role "system" :content sys-prompt}
                            {:role "user" :content (str prompt)}]
+            child-spec    (child-model-spec ctx child-model)
             child-context (child-ctx ctx
-                                     {:client     client
-                                      :model      child-model
-                                      :chat-opts  (:chat-opts ctx)
-                                      :max-rounds child-max
-                                      :cwd        cwd
-                                      :depth      depth
-                                      :registry   child-reg})]
+                                     (assoc child-spec
+                                            :clients    (:clients ctx)
+                                            :chat-opts  (:chat-opts ctx)
+                                            :max-rounds child-max
+                                            :cwd        cwd
+                                            :depth      depth
+                                            :registry   child-reg))]
         (tel/log! {:level :info
                    :id    ::subagent-start
                    :data  {:depth      depth
-                           :model      child-model
+                           :provider   (:provider child-spec)
+                           :model      (:model child-spec)
                            :tools      (vec (registry/tool-ids child-reg))
                            :max-rounds child-max
                            :cwd        (:cwd child-context)
@@ -274,7 +295,7 @@
                        :items {:type "string"}
                        :description "Tool ids the sub-agent may use. Defaults to all of your tools except spawn_agent. Pass [] for no tools."}
       "model"         {:type "string"
-                       :description "Model name for the sub-agent. Defaults to the parent agent's model."}
+                       :description "Model name for the sub-agent. Defaults to the parent agent's model. Prefix it with a provider (e.g. openrouter:anthropic/claude-sonnet-4) to run the sub-agent on a different provider."}
       "max_rounds"    {:type "integer"
                        :description "Maximum consecutive tool-call rounds for the sub-agent. Defaults to the parent's cap, clamped to 32."}
       "cwd"           {:type "string"

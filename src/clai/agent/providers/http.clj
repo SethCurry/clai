@@ -1,9 +1,14 @@
-(ns clai.agent.providers.ollama.http
-  "HTTP plumbing shared by the Ollama endpoint namespaces.
+(ns clai.agent.providers.http
+  "HTTP plumbing shared by the provider clients (`ollama`, `openrouter`, ...).
 
-  This namespace deliberately knows nothing about the public `Client` record;
-  it only reads the `:host`, `:api-key`, and `:timeout` keys of the map it is
-  given, so endpoint namespaces can be loaded without a dependency cycle."
+  This namespace deliberately knows nothing about any provider's `Client`
+  record; it only reads the `:provider`, `:host`/`:base-url`, `:api-key`, and
+  `:timeout` keys of the map it is given, so provider namespaces can be loaded
+  without a dependency cycle.
+
+  It also carries the NDJSON helpers Ollama uses for its streaming endpoints.
+  OpenRouter (OpenAI-style SSE) is used non-streaming here, so it does not need
+  them."
   (:require [clai.log]
             [clai.util :as util]
             [cheshire.core :as json]
@@ -17,15 +22,34 @@
 ;; Helpers
 ;; ---------------------------------------------------------------------------
 
+(def ^:private provider-labels
+  "Display names for the provider keywords, used in logs and error messages."
+  {:ollama "Ollama" :openrouter "OpenRouter"})
+
+(defn provider-label
+  "Human-readable provider name for `client`, used in logs and errors.
+  Falls back to `\"LLM\"` for a client that names no known provider."
+  {:malli/schema [:-> :map :string]}
+  [client]
+  (get provider-labels (:provider client) "LLM"))
+
 (defn api-url
-  "Join the client host with an API path, avoiding doubled slashes."
+  "Join the client's base URL with an API path, avoiding doubled slashes.
+
+  The base URL is `:host` (the Ollama client) or `:base-url` (the OpenRouter
+  client), whichever the client carries."
+  {:malli/schema [:-> :map :string [:maybe :string]]}
   [client path]
-  (let [base (str/replace (:host client) #"/+$" "")
-        rel  (if (str/starts-with? path "/") path (str "/" path))]
+  (let [base (str/replace (str (or (:base-url client) (:host client)))
+                          #"/+$" "")
+        rel  (if (str/starts-with? (str path) "/") (str path) (str "/" path))]
     (str base rel)))
 
 (defn auth-headers
-  "Build the request headers for a client, adding a bearer token when present."
+  "Build the request headers for a client, adding a bearer token when present.
+  `extra` headers are merged over the `Content-Type` default."
+  {:malli/schema [:-> :map [:maybe [:map-of :string :string]]
+                  [:map-of :string :string]]}
   [client extra]
   (cond-> (merge {"Content-Type" "application/json"} extra)
     (some? (:api-key client))
@@ -34,6 +58,7 @@
 (defn request-body
   "Encode the request map as a JSON byte array. `nil` bodies are returned as
   nil so callers can issue bodyless requests."
+  {:malli/schema [:-> [:maybe :map] [:maybe bytes?]]}
   [body]
   (when (some? body)
     (-> (json/encode body)
@@ -41,6 +66,7 @@
 
 (defn base-http-opts
   "Common clj-http options for every request."
+  {:malli/schema [:-> :map :map]}
   [client]
   {:throw-exceptions  false
    :decompress-body   true
@@ -49,6 +75,7 @@
 
 (defn ok?
   "True when `status` is a 2xx HTTP status."
+  {:malli/schema [:-> :int boolean?]}
   [status]
   (<= 200 status 299))
 
@@ -77,33 +104,51 @@
      (some? body)        (assoc :body body)
      (seq query-params)  (assoc :query-params query-params))))
 
+(defn- response-error-message
+  "Pull a human-readable message out of a failed response.
+
+  Ollama returns `{\"error\": \"...\"}`; OpenRouter returns
+  `{\"error\": {\"message\": \"...\"}}`. Anything else falls back to the raw
+  body text."
+  [parsed raw]
+  (let [error (:error parsed)]
+    (cond
+      (map? error)    (or (:message error) (str error))
+      (some? error)   (str error)
+      (some? parsed)  (str parsed)
+      (bytes? raw)    (String. ^bytes raw "UTF-8")
+      :else           "API error")))
+
 (defn throw-api-error
-  "Raise an `ex-info` describing a failed API response. The body is parsed as
-  JSON when possible (Ollama returns `{\"error\": \"...\"}`)."
-  [method url status body]
+  "Raise an `ex-info` describing a failed response from `client`.
+  The body is parsed as JSON when possible."
+  {:malli/schema [:-> :map :keyword :string :int [:maybe :any]]}
+  [client method url status body]
   (let [^bytes raw (util/->bytes body)
         parsed (when (and (bytes? raw) (pos? (alength raw)))
                  (try (json/parse-string (String. raw "UTF-8") true)
                       (catch Exception _ nil)))
-        message (or (and parsed (:error parsed))
-                    (and parsed (str parsed))
-                    (when (bytes? raw) (String. raw "UTF-8"))
-                    "Ollama API error")]
+        label   (provider-label client)
+        message (response-error-message parsed raw)]
     (tel/log! {:level :error
                :id    ::api-error
                :data  {:method method
                        :url    url
                        :status status
                        :message message}}
-              (str "Ollama API " (name method) " " url " failed: "
+              (str label " API " (name method) " " url " failed: "
                    status " " message))
-    (throw (ex-info (str "Ollama API " (name method) " " url " failed: "
+    (throw (ex-info (str label " API " (name method) " " url " failed: "
                          status " " message)
-                    {:method method :url url :status status
-                     :body parsed}))))
+                    {:provider (:provider client)
+                     :method   method
+                     :url      url
+                     :status   status
+                     :body     parsed}))))
 
 (defn parse-response
   "Decode a successful response body into Clojure data. Empty bodies become nil."
+  {:malli/schema [:-> :map [:maybe :any]]}
   [resp]
   (let [body (:body resp)]
     (cond
@@ -121,6 +166,7 @@
   "Return a lazy sequence of parsed JSON objects read line by line from an
   InputStream of newline-delimited JSON. Blank lines are skipped. The stream
   is closed when the sequence is fully consumed."
+  {:malli/schema [:-> [:fn #(instance? InputStream %)] [:fn sequential?]]}
   [^InputStream stream]
   (let [reader (BufferedReader. (io/reader stream))]
     (letfn [(next-events []
@@ -144,13 +190,15 @@
          msecs (quot (- (System/nanoTime) start) 1000000)]
      (tel/log! {:level :debug
                 :id    ::http-request
-                :data  {:method     method
+                :data  {:provider   (:provider client)
+                        :method     method
                         :url        (api-url client path)
                         :status     (:status resp)
                         :elapsed-ms msecs}}
-               (str "Ollama " (name method) " " path))
+               (str (provider-label client) " " (name method) " " path))
      (when-not (ok? (:status resp))
-       (throw-api-error method (api-url client path) (:status resp) (:body resp)))
+       (throw-api-error client method (api-url client path)
+                        (:status resp) (:body resp)))
      (parse-response resp))))
 
 (defn perform-stream
@@ -166,16 +214,20 @@
        (do
          (tel/log! {:level :debug
                     :id    ::http-stream-opened
-                    :data  {:method method
-                            :url    (api-url client path)
-                            :status (:status resp)}}
-                   (str "Ollama stream " (name method) " " path))
+                    :data  {:provider (:provider client)
+                            :method   method
+                            :url      (api-url client path)
+                            :status   (:status resp)}}
+                   (str (provider-label client) " stream "
+                        (name method) " " path))
          (ndjson-seq (:body resp)))
-       (throw-api-error method (api-url client path) (:status resp) (:body resp))))))
+       (throw-api-error client method (api-url client path)
+                        (:status resp) (:body resp))))))
 
 (defn streaming?
   "True when the request map asks for streaming. Ollama defaults to streaming
   when `:stream` is omitted, so only an explicit `false` disables it."
+  {:malli/schema [:-> :map boolean?]}
   [req]
   (not= false (:stream req)))
 

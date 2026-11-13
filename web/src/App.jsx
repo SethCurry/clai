@@ -73,7 +73,11 @@ export default function App() {
             {statusLabel}
           </span>
           {clai.sessionInfo.model && (
-            <span className="pill">{clai.sessionInfo.model}</span>
+            <span className="pill">
+              {clai.sessionInfo.provider
+                ? `${clai.sessionInfo.provider}:${clai.sessionInfo.model}`
+                : clai.sessionInfo.model}
+            </span>
           )}
           {clai.sessionInfo.nreplPort && (
             <span className="pill">nREPL :{clai.sessionInfo.nreplPort}</span>

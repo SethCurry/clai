@@ -61,6 +61,7 @@ function sortConfigs(configs) {
 export function useClaiSocket() {
   const [status, setStatus] = useState('connecting')
   const [sessionInfo, setSessionInfo] = useState({
+    provider: null,
     model: null,
     nreplPort: null,
   })
@@ -142,6 +143,7 @@ export function useClaiSocket() {
         switch (message.type) {
           case 'hello':
             setSessionInfo({
+              provider: message.provider ?? null,
               model: message.model ?? null,
               nreplPort: message.nreplPort ?? null,
             })

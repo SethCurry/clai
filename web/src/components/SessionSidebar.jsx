@@ -143,7 +143,11 @@ export function SessionSidebar({
       <footer className="sidebar__footer">
         <div className="sidebar__meta">
           <span>model</span>
-          <strong>{sessionInfo.model || 'unknown'}</strong>
+          <strong>
+            {sessionInfo.model
+              ? `${sessionInfo.provider || 'default'}:${sessionInfo.model}`
+              : 'unknown'}
+          </strong>
         </div>
         <div className="sidebar__meta">
           <span>nREPL</span>

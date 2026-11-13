@@ -3,7 +3,7 @@
 
   These functions take an explicit client; `clai.agent.providers.ollama` wraps them
   with arities that fall back to the default `*client*`."
-  (:require [clai.agent.providers.ollama.http :as http]
+  (:require [clai.agent.providers.http :as http]
             [clai.agent.providers.ollama.schemas :as schemas]))
 
 (defn generate

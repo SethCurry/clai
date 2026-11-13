@@ -3,7 +3,7 @@
 
   These functions take an explicit client; `clai.agent.providers.ollama` wraps them
   with arities that fall back to the default `*client*`."
-  (:require [clai.agent.providers.ollama.http :as http]
+  (:require [clai.agent.providers.http :as http]
             [clai.util :as util]
             [taoensso.telemere :as tel]))
 
@@ -23,7 +23,7 @@
     (cond
       (= 200 (:status resp)) true
       (= 404 (:status resp)) false
-      :else (http/throw-api-error :head (http/api-url client path)
+      :else (http/throw-api-error client :head (http/api-url client path)
                                   (:status resp) (:body resp)))))
 
 (defn create-blob
@@ -43,6 +43,6 @@
                        :status (:status resp)}}
               "Uploaded Ollama blob")
     (when-not (http/ok? (:status resp))
-      (http/throw-api-error :post (http/api-url client path)
+      (http/throw-api-error client :post (http/api-url client path)
                             (:status resp) (:body resp)))
     true))

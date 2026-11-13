@@ -10,6 +10,19 @@
 ;; built-in defaults, so you only need to set what you want to change.
 
 {:model          "gemma3"
+ ;; Which provider serves a model name that does not name one (:ollama or
+ ;; :openrouter). Defaults to :ollama, or $CLAI_PROVIDER.
+ ;;
+ ;; A model name can always pick its own provider:
+ ;;   "ollama:gemma3:7b"                  -> Ollama, model gemma3:7b
+ ;;   "openrouter:gemma3:7b"              -> OpenRouter, model gemma3:7b
+ ;;   "anthropic/claude-sonnet-4"         -> OpenRouter (its ids are
+ ;;                                          namespaced with a /)
+ ;; Anything else uses :provider. Both providers below can be configured at
+ ;; the same time; a session's stored agent configuration may name a model
+ ;; from either one.
+ :provider       :ollama
+
  ;; Optional system prompt prepended to every session's history. The contents
  ;; of an AGENTS.md in a new session's working directory are appended to it.
  :system-prompt  "You are a concise, helpful coding agent."
@@ -17,16 +30,28 @@
  ;; Max consecutive tool-call rounds before the agent gives up.
  :max-tool-rounds 8
 
- ;; Forwarded verbatim to Ollama's /api/chat as request keys.
+ ;; Provider-neutral chat options. Ollama forwards them to /api/chat verbatim;
+ ;; OpenRouter keeps the OpenAI-compatible ones (:temperature, :top_p,
+ ;; :max_tokens, ...) and drops Ollama-only ones (:num_ctx, ...).
  :options        {:temperature 0.7}
- :think          false
- ;; :format       "json"      ; force JSON output when set
+ :think          false       ; Ollama :think / OpenRouter reasoning
+ ;; :format       "json"      ; Ollama :format / OpenRouter response_format
 
  ;; Ollama server connection. Any subset of :host/:api-key/:timeout may be
  ;; given; omitted keys fall back to OLLAMA_HOST / OLLAMA_API_KEY / defaults.
  :ollama         {:host     "http://localhost:11434"
-                  :api-key  "sk-..."
+                  :api-key  "sk-..."          ; only needed for https://ollama.com
                   :timeout  600000}           ; milliseconds
+
+ ;; OpenRouter (any model id with a / in it, or a model prefixed with
+ ;; "openrouter:"). :api-key falls back to $OPENROUTER_API_KEY; :base-url to
+ ;; https://openrouter.ai/api/v1. :referer and :title are optional attribution
+ ;; headers OpenRouter shows on its activity page.
+ :openrouter     {:api-key  "sk-or-v1-..."
+                  :base-url "https://openrouter.ai/api/v1"
+                  :timeout  600000          ; milliseconds
+                  :referer  "https://example.com"
+                  :title    "clai"}
 
  ;; PostgreSQL storage for agent sessions and their event logs. Omitted keys
  ;; fall back to CLAI_POSTGRES_* / PG* environment variables and then to the

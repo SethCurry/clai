@@ -1,12 +1,15 @@
 (ns clai.util
   "Small shared helpers used across `clai` namespaces.
 
-  This namespace deliberately depends only on `clai.log` (for stderr logging)
-  and the standard library, so any other `clai` namespace can use it without
-  pulling in the agent, provider, or tool layers."
+  This namespace deliberately depends only on `clai.log` (for stderr logging),
+  malli (for schema validation), and the standard library, so any other `clai`
+  namespace can use it without pulling in the agent, provider, or tool
+  layers."
   (:require [clai.log]
             [clojure.edn :as edn]
             [clojure.java.io :as io]
+            [malli.core :as m]
+            [malli.error :as me]
             [taoensso.telemere :as tel])
   (:import [java.io ByteArrayOutputStream File InputStream PushbackReader]
            [java.net URL]
@@ -38,6 +41,31 @@
                            merge
                            (select-keys (meta (var ~sym))
                                         [:doc :arglists :malli/schema])))))))
+
+;; ---------------------------------------------------------------------------
+;; Validation
+;; ---------------------------------------------------------------------------
+
+(defn validate!
+  "Validate `value` against malli `schema`, returning `value` when it is
+  valid or throwing an `ex-info` with a human-readable explanation otherwise.
+
+  `label` names what is being validated (for example `\"chat request\"`) and
+  appears in both the error message and the logged signal, so a bad request in
+  a log is easy to trace back to its caller."
+  [schema value label]
+  (if-let [errors (and schema (m/explain schema value))]
+    (let [explained (me/humanize errors)]
+      (tel/log! {:level :error
+                 :id    ::invalid-value
+                 :data  {:label label :errors explained}}
+                (str "Invalid " label))
+      (throw (ex-info (str "Invalid " label ": " (pr-str explained))
+                      {:label   label
+                       :schema  schema
+                       :value   value
+                       :errors  errors})))
+    value))
 
 ;; ---------------------------------------------------------------------------
 ;; Errors

@@ -1,17 +1,22 @@
 (ns clai.agent.providers.ollama.prompt
-  "Conversion between event-shaped prompts/history and Ollama chat messages.
+  "Conversion between event-shaped prompts/history and chat messages.
 
   Prompts use the content vocabulary from `clai.events.schema` and may include
-  resource blocks. Ollama's chat API only accepts text, so this namespace
-  flattens those parts into `{:role ... :content ...}` maps and turns persisted
-  history back into event-shaped updates for the REPL and the web UI."
-  (:require [clai.agent.providers.ollama.messages :as messages]
+  resource blocks. Chat models only accept text, so this namespace flattens
+  those parts into `{:role ... :content ...}` maps and turns persisted history
+  back into event-shaped updates for the REPL and the web UI.
+
+  The messages produced here are the provider-neutral stored shape (see
+  `clai.agent.providers.messages`); each provider converts them into its own
+  wire format when a chat turn is sent (`clai.agent.providers/chat-request`).
+  The namespace keeps its `ollama` name because the shape is Ollama's."
+  (:require [clai.agent.providers.messages :as messages]
             [clai.agent.resources :as resources]
             [clai.events.schema :as events]
             [clojure.string :as str]))
 
 ;; ---------------------------------------------------------------------------
-;; Prompt -> Ollama messages
+;; Prompt -> stored chat messages
 ;; ---------------------------------------------------------------------------
 
 (defn- name->str
@@ -30,7 +35,8 @@
   Text parts contribute their event-schema `:content` field (with `:text`
   accepted for tolerance). Resource parts are rendered by `clai.agent.resources`
   so file references reach the model instead of being dropped. Other parts
-  (images, audio, etc.) are dropped, since Ollama chat wants text here.
+  (images, audio, etc.) are dropped, since the chat models used here take text
+  in this field.
 
   `opts` is threaded to the resource renderers and may contain a `:cwd` for
   resolving relative resource paths."
@@ -60,13 +66,13 @@
      :else                 (str content))))
 
 (defn- message->ollama
-  "Convert one role-tagged message map to an Ollama chat message."
+  "Convert one role-tagged message map to a stored chat message."
   [message opts]
   {:role    (or (name->str (:role message)) "user")
    :content (content->text (:content message) opts)})
 
 (defn- prompt-entry->ollama
-  "Convert one entry of a prompt vector to an Ollama chat message.
+  "Convert one entry of a prompt vector to a stored chat message.
 
   A role-tagged map is treated as an explicit message. Anything else is a
   content block from the user, so it joins the surrounding blocks in a single
@@ -77,7 +83,7 @@
     {:role "user" :content (content->text [entry] opts)}))
 
 (defn prompt->messages
-  "Normalize a prompt to a vector of Ollama messages.
+  "Normalize a prompt to a vector of stored chat messages.
 
   A prompt may be a string, one content block, a vector of content blocks, or
   a vector of role-tagged message maps. Content blocks are flattened into one
@@ -98,7 +104,7 @@
      :else                [{:role "user" :content (str prompt)}])))
 
 ;; ---------------------------------------------------------------------------
-;; Ollama history -> event updates
+;; Stored history -> event updates
 ;; ---------------------------------------------------------------------------
 
 (defn- tool-result-texts
@@ -138,7 +144,7 @@
   "Replay one persisted assistant `message` as the updates the agent streamed
   while producing it: its reasoning, its text, and its tool calls.
 
-  Blank text produces no `agent_message`, so the tool-call-only turns Ollama
+  Blank text produces no `agent_message`, so the tool-call-only turns a model
   emits do not leave empty bubbles in a reloaded conversation."
   [results message]
   (let [text    (events/content->text (:content message))

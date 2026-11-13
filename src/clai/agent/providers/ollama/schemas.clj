@@ -2,10 +2,7 @@
   "Malli schemas and request validation for the Ollama client."
   (:require [clai.events.schema :as events]
             [clai.log]
-            [clai.util :as util]
-            [malli.core :as m]
-            [malli.error :as me]
-            [taoensso.telemere :as tel])
+            [clai.util :as util])
   (:import [java.io InputStream]
            [java.net URL]))
 
@@ -56,6 +53,7 @@
 (def client-schema
   "The `Client` record."
   [:map
+   [:provider [:= :ollama]]
    [:host string?]
    [:api-key [:maybe string?]]
    [:timeout pos-int?]])
@@ -245,15 +243,7 @@
 
 (defn validate!
   "Validate `value` against `schema`, returning `value` when valid or throwing
-  an `ex-info` with a human-readable malli error explanation otherwise."
+  an `ex-info` with a human-readable malli error explanation otherwise.
+  `fn-name` names the endpoint function whose request is being checked."
   [schema value fn-name]
-  (if-let [errors (and schema (m/explain schema value))]
-    (let [explained (me/humanize errors)]
-      (tel/log! {:level :error
-                 :id    ::invalid-request
-                 :data  {:fn fn-name :errors explained}}
-                (str "Invalid " fn-name " request"))
-      (throw (ex-info (str "Invalid " fn-name " request: "
-                           (pr-str explained))
-                      {:fn fn-name :schema schema :value value :errors errors})))
-    value))
+  (util/validate! schema value (str fn-name " request")))

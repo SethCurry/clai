@@ -2,7 +2,7 @@
   "A REPL-friendly, in-process client for the `clai` agent.
 
   [[current-agent]] is a delay producing a plain agent map built by
-  `clai.agent.core/ollama-agent`, so loading this namespace does not create an
+  `clai.agent.core/make-agent`, so loading this namespace does not create an
   agent by itself.
   The helpers here call its session and prompt operations directly; nothing
   goes through stdio or a wire protocol, so the agent can be driven from a
@@ -57,7 +57,7 @@
   when the connection is established, so redefining or rebinding it takes
   effect on the next connection and loading this namespace does not create an
   agent (or a database client) by itself."
-  (delay (agent/ollama-agent)))
+  (delay (agent/make-agent)))
 
 (defonce ^:private runtime
   ;; The live in-process agent, or nil: `{:agent <agent map>}`.

@@ -321,6 +321,7 @@ export function AgentConfigManager({
                       updateField('model', event.target.value)
                     }
                     placeholder="Daemon default"
+                    title="The model also picks the provider: openrouter:vendor/model (or any vendor/model id) runs on OpenRouter, ollama:name on Ollama, and a plain name uses the daemon's default provider."
                   />
                 </label>
 

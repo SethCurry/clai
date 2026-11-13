@@ -21,8 +21,13 @@
   `:stream false` in the request to receive a single response map instead.
 
   This namespace is the public facade. The implementation is split across
-  `clai.agent.providers.ollama.schemas`, `.http`, `.image`, `.generation`, `.models`,
-  `.blobs`, `.cloud`, and `.messages`.
+  `clai.agent.providers.ollama.schemas`, `.image`, `.generation`, `.models`,
+  `.blobs`, and `.cloud`; the HTTP plumbing lives in
+  `clai.agent.providers.http` and the provider-neutral message helpers in
+  `clai.agent.providers.messages`, both shared with the other providers.
+
+  `clai.agent.providers` is the entry point that picks a provider from a model
+  name and runs one chat turn.
 
   Example:
 
@@ -39,7 +44,7 @@
             [clai.agent.providers.ollama.cloud :as cloud]
             [clai.agent.providers.ollama.generation :as generation]
             [clai.agent.providers.ollama.image :as image]
-            [clai.agent.providers.ollama.messages :as messages]
+            [clai.agent.providers.messages :as messages]
             [clai.agent.providers.ollama.models :as models]
             [clai.agent.providers.ollama.schemas :as schemas]
             [clai.events.schema :as events]
@@ -98,13 +103,14 @@
 
 ;; Keep the record in the public namespace so the class name remains
 ;; `clai.agent.providers.ollama.Client` for callers and existing tests.
-(defrecord Client [host api-key timeout])
+(defrecord Client [provider host api-key timeout])
 
 (def ^:no-doc
   ^:dynamic *client*
-  (map->Client {:host    default-host
-                :api-key nil
-                :timeout default-timeout-ms}))
+  (map->Client {:provider :ollama
+                :host     default-host
+                :api-key  nil
+                :timeout  default-timeout-ms}))
 
 ;; ---------------------------------------------------------------------------
 ;; Client construction
@@ -132,7 +138,10 @@
      :or {host     (or (System/getenv "OLLAMA_HOST") default-host)
           api-key  (System/getenv "OLLAMA_API_KEY")
           timeout  default-timeout-ms}}]
-   (let [client (map->Client {:host host :api-key api-key :timeout timeout})]
+   (let [client (map->Client {:provider :ollama
+                              :host     host
+                              :api-key  api-key
+                              :timeout  timeout})]
      (schemas/validate! schemas/client-schema client "make-client")
      (tel/log! {:level :debug
                 :id    ::client-created
