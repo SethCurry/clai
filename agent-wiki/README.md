@@ -1,6 +1,9 @@
 # clai user wiki
 
 - [Plugins](plugins.md): build, install, activate, and write plugins.
+- [OpenProject tasks and comments](openproject.md): configure the
+  OpenProject tools and let the agent list, create, and update tasks and
+  read, add, or edit their comments.
 - [Git repositories and worktrees](git-repositories.md): register repositories
   and the worktrees checked out from them.
 - [Mentioning files and folders in the web UI](file-mentions.md): type `@` in

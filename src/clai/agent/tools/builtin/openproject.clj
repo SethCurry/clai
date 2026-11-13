@@ -1,10 +1,11 @@
 (ns clai.agent.tools.builtin.openproject
   "Built-in OpenProject tools for managing work packages.
 
-  The tools let an agent list projects and work packages, create new work
-  packages, and update existing ones. They talk to the OpenProject API v3 over
-  HTTP, authenticating with an API token (`:api-key`, sent as a bearer token)
-  or a username/password pair (sent with HTTP basic auth).
+  The tools let an agent list projects and work packages, create and update
+  work packages, and read, add, and edit work package comments. They talk to
+  the OpenProject API v3 over HTTP, authenticating with an API token
+  (`:api-key`, sent as a bearer token) or a username/password pair (sent with
+  HTTP basic auth).
 
   ## Configuration
 
@@ -21,6 +22,17 @@
 
   The URL may be the instance root (`https://openproject.example.com`) or the
   API root (`https://openproject.example.com/api/v3`).
+
+  ## Comments
+
+  Comments live in a work package's activity list: every change to a work
+  package is a journal entry, and an entry carries comment text when someone
+  wrote one. `openproject_list_comments` reads
+  `/api/v3/work_packages/{id}/activities` and renders the entries newest-last
+  with their activity id, author, and timestamp;
+  `openproject_add_comment` posts to the same collection;
+  `openproject_update_comment` patches `/api/v3/activities/{id}`. Comment
+  bodies are Markdown, which OpenProject returns as `{:raw ... :html ...}`.
 
   ## Work package references
 
@@ -435,6 +447,25 @@
     (or (href-id (resolve-link client kind value))
         (str value))))
 
+(defn- user-name-fn
+  "Return a memoized `(fn [href] name)` that resolves OpenProject user hrefs to
+  display names for one tool call.
+
+  Activities link their author as `/api/v3/users/{id}` without a title, so the
+  name is read from the user resource once per distinct user. Users the agent
+  may not read fall back to `user <id>`, so a permissions quirk never fails a
+  listing."
+  [client]
+  (memoize
+   (fn [href]
+     (let [id (href-id href)]
+       (or (when (some? id)
+             (try
+               (let [user (request client :get (str "/users/" id) {})]
+                 (or (:name user) (:login user)))
+               (catch Exception _ nil)))
+           (str "user " (or id href "unknown")))))))
+
 ;; ---------------------------------------------------------------------------
 ;; Filter and sort construction
 ;; ---------------------------------------------------------------------------
@@ -550,6 +581,60 @@
            (str "\n  description: "
                 (truncate (str/replace (str description) #"\s+" " ") 500))))))
 
+(defn- format-timestamp
+  "Render an OpenProject ISO-8601 timestamp as `YYYY-MM-DD HH:MM UTC`, or nil
+  when `value` is blank. OpenProject reports UTC, so it is labelled rather than
+  silently converted."
+  [value]
+  (let [text (str value)]
+    (when-not (str/blank? text)
+      (str (-> (subs text 0 (min 16 (count text)))
+               (str/replace "T" " "))
+           " UTC"))))
+
+(defn- indent-lines
+  "Indent every line of `text` by `width` spaces."
+  [text width]
+  (let [pad (apply str (repeat width " "))]
+    (->> (str/split-lines (str text))
+         (map #(str pad %))
+         (str/join "\n"))))
+
+(defn- comment?
+  "True when `activity` is an OpenProject journal entry that carries comment
+  text, as opposed to an entry that only records field changes."
+  [activity]
+  (not (str/blank? (str (get-in activity [:comment :raw])))))
+
+(defn- activity-author
+  "Display name of the user who wrote `activity`. Uses the link title when
+  OpenProject supplies one, and resolves the user through `name-for` otherwise."
+  [activity name-for]
+  (or (not-empty (str (get-in activity [:_links :user :title])))
+      (name-for (get-in activity [:_links :user :href]))))
+
+(defn- format-activity
+  "Render one OpenProject activity (journal entry).
+
+  The header names the entry (`comment 42 by Seth Curry on 2026-11-12 00:22
+  UTC`), followed by its indented Markdown text when it has a comment. With
+  `include-changes?` the field changes the entry recorded are listed too.
+  `name-for` resolves author hrefs; see [[user-name-fn]]."
+  [activity name-for include-changes?]
+  (let [text    (str/trim (str (get-in activity [:comment :raw])))
+        comment (not (str/blank? text))
+        changes (keep :raw (:details activity))]
+    (str (if comment "comment " "change ")
+         (:id activity)
+         " by " (activity-author activity name-for)
+         (when-let [at (format-timestamp (:createdAt activity))]
+           (str " on " at))
+         (when comment
+           (str "\n" (indent-lines (truncate text 2000) 2)))
+         (when (and include-changes? (seq changes))
+           (apply str "\n  changes:"
+                  (map #(str "\n    - " %) changes))))))
+
 (defn- format-project
   "Render one project as a compact line."
   [client project]
@@ -566,16 +651,26 @@
 ;; Tool implementations
 ;; ---------------------------------------------------------------------------
 
+(defn- int-value
+  "Coerce `value` to a long, or nil when it is not an integer."
+  [value]
+  (cond
+    (number? value) (long value)
+    (string? value) (parse-long (str/trim value))
+    :else nil))
+
 (defn- as-positive-int
   "Coerce `value` to an integer in `[1, max-value]`, falling back to `default`
   when it is missing or invalid. A nil `max-value` means no upper bound."
   [value default max-value]
-  (let [parsed (cond
-                 (number? value) (long value)
-                 (string? value) (parse-long (str/trim value))
-                 :else nil)
-        n      (max 1 (or parsed default))]
+  (let [n (max 1 (or (int-value value) default))]
     (if max-value (min n max-value) n)))
+
+(defn- optional-positive-int
+  "Coerce `value` to a positive integer, or nil when it is missing or invalid."
+  [value]
+  (let [n (int-value value)]
+    (when (and n (pos? n)) n)))
 
 (defn list-projects-fn
   "Tool: list OpenProject projects visible to the configured user.
@@ -717,19 +812,20 @@
            (or (:displayId wp) (:id wp)) ".\n\n"
            (work-package-details client wp)))))
 
-(defn- work-package-id
-  "Extract a numeric work-package id from `value`, which may be a number, a
-  numeric string, or an API href."
-  [value]
+(defn- resource-id
+  "Extract a positive numeric id from `value`, which may be a number, a numeric
+  string, or an API href. `kind` names the resource in error messages, e.g.
+  \"work package\" or \"comment\"."
+  [value kind]
   (let [n (cond
             (number? value) (long value)
             (string? value) (or (parse-long (str/trim value))
                                 (href-id value))
             :else nil)]
     (when-not (and n (pos? n))
-      (throw (ex-info (str "Invalid OpenProject work package id '" value
+      (throw (ex-info (str "Invalid OpenProject " kind " id '" value
                            "'. Use the numeric id from a list result.")
-                      {:value value})))
+                      {:value value :kind kind})))
     n))
 
 (defn- current-lock-version
@@ -752,7 +848,7 @@
   {:malli/schema [:-> #'schema/tool-args #'schema/tool-ctx :string]}
   [args ctx]
   (let [client   (client-for ctx)
-        id       (work-package-id (:id args))
+        id       (resource-id (:id args) "work package")
         writable (dissoc args :id :lock_version)
         payload  (add-write-fields client writable {})]
     (when (empty? payload)
@@ -765,6 +861,105 @@
       (str "Updated OpenProject work package "
            (or (:displayId wp) (:id wp)) ".\n\n"
            (work-package-details client wp)))))
+
+(defn- pluralize
+  "Render a count `n` with `noun`, pluralizing with a trailing `(s)`, e.g.
+  `(pluralize 3 \"comment\")` -> `\"3 comment(s)\"`."
+  [n noun]
+  (str n " " noun "(s)"))
+
+(defn- work-package-activities
+  "Fetch every activity (journal entry) of work package `id`.
+
+  OpenProject's activities collection ignores `pageSize` and `filters`, so the
+  whole list is read and filtered locally."
+  [client id]
+  (or (get-in (request client :get (str "/work_packages/" id "/activities") {})
+              [:_embedded :elements])
+      []))
+
+(defn list-comments-fn
+  "Tool: list the comments on an OpenProject work package.
+
+  Requires `:id`, the work package. `:limit` keeps only the most recent
+  entries. With `:include_changes`, entries that only record field changes
+  (status, assignee, dates, ...) are listed too, which turns the result into
+  the work package's activity log.
+
+  Comments are rendered oldest first, each with the activity id that
+  `openproject_update_comment` needs."
+  {:malli/schema [:-> #'schema/tool-args #'schema/tool-ctx :string]}
+  [args ctx]
+  (let [client    (client-for ctx)
+        id        (resource-id (:id args) "work package")
+        changes?  (true? (:include_changes args))
+        activities (work-package-activities client id)
+        entries   (filter #(or changes? (comment? %)) activities)
+        entries   (if-let [limit (optional-positive-int (:limit args))]
+                    (vec (take-last limit entries))
+                    (vec entries))
+        label     (str "work package " id
+                       (when-let [subject (some-> activities first
+                                                  (get-in [:_links :workPackage :title]))]
+                         (str " \"" subject "\"")))
+        name-for  (user-name-fn client)]
+    (if (empty? entries)
+      (str "No " (if changes? "comments or changes" "comments")
+           " on OpenProject " label ".")
+      (str "Found " (pluralize (count entries) (if changes? "activity" "comment"))
+           " on OpenProject " label ":\n\n"
+           (->> entries
+                (map #(format-activity % name-for changes?))
+                (str/join "\n\n"))))))
+
+(defn- comment-text
+  "Return the trimmed comment body from `args`, throwing when it is blank so a
+  model gets a clear message instead of an OpenProject 400."
+  [args]
+  (let [text (str/trim (str (or (:comment args) "")))]
+    (when (str/blank? text)
+      (throw (ex-info "An OpenProject comment requires `comment` text."
+                      {:args (dissoc args :comment)})))
+    text))
+
+(defn add-comment-fn
+  "Tool: add a comment to an OpenProject work package.
+
+  Requires `:id`, the work package, and `:comment`, the Markdown body. Returns
+  the new comment with the activity id that `openproject_update_comment` needs
+  to edit it later."
+  {:malli/schema [:-> #'schema/tool-args #'schema/tool-ctx :string]}
+  [args ctx]
+  (let [client   (client-for ctx)
+        id       (resource-id (:id args) "work package")
+        text     (comment-text args)
+        activity (request client :post (str "/work_packages/" id "/activities")
+                          {:body {:comment {:raw text}}})
+        name-for (user-name-fn client)]
+    (str "Added comment " (:id activity) " to OpenProject work package "
+         id ".\n\n"
+         (format-activity activity name-for false))))
+
+(defn update-comment-fn
+  "Tool: replace the text of an existing OpenProject comment.
+
+  Requires `:id`, the comment's activity id (from
+  `openproject_list_comments` or `openproject_add_comment`), and `:comment`,
+  the new Markdown body. Only the comment's author and administrators may edit
+  it; OpenProject answers 403 for everyone else.
+
+  Creating and editing take different payloads: a new comment is
+  `{:comment {:raw text}}`, while an edit is the bare string `{:comment text}`."
+  {:malli/schema [:-> #'schema/tool-args #'schema/tool-ctx :string]}
+  [args ctx]
+  (let [client   (client-for ctx)
+        id       (resource-id (:id args) "comment")
+        text     (comment-text args)
+        activity (request client :patch (str "/activities/" id)
+                          {:body {:comment text}})
+        name-for (user-name-fn client)]
+    (str "Updated OpenProject comment " (:id activity) ".\n\n"
+         (format-activity activity name-for false))))
 
 ;; ---------------------------------------------------------------------------
 ;; Tool definitions
@@ -884,6 +1079,62 @@
                                         :description "Optional current lockVersion. Fetched automatically when omitted."})
      :required ["id"]}}})
 
+(def ^:private list-comments-spec
+  {:type "function"
+   :function
+   {:name "openproject_list_comments"
+    :description
+    "List the comments on an OpenProject work package, oldest first, with each
+    comment's activity id, author, and timestamp. Pass include_changes to also
+    list the field changes (status, assignee, dates, ...) recorded alongside
+    them, which makes this the work package's activity log. Use the activity
+    id with openproject_update_comment to edit a comment."
+    :parameters
+    {:type "object"
+     :properties
+     {"id"              {:type "integer"
+                         :description "Numeric work package id from a list or create result."}
+      "limit"           {:type "integer"
+                         :description "Keep only the N most recent entries."}
+      "include_changes" {:type "boolean"
+                         :description "Also list recorded field changes, not just comments."}}
+     :required ["id"]}}})
+
+(def ^:private add-comment-spec
+  {:type "function"
+   :function
+   {:name "openproject_add_comment"
+    :description
+    "Add a comment to an OpenProject work package. The body is Markdown.
+    Returns the new comment and its activity id, which openproject_update_comment
+    needs to edit it."
+    :parameters
+    {:type "object"
+     :properties
+     {"id"      {:type "integer"
+                 :description "Numeric work package id from a list or create result."}
+      "comment" {:type "string"
+                 :description "Comment body in Markdown."}}
+     :required ["id" "comment"]}}})
+
+(def ^:private update-comment-spec
+  {:type "function"
+   :function
+   {:name "openproject_update_comment"
+    :description
+    "Replace the text of an existing OpenProject comment. Supply the comment's
+    activity id (from openproject_list_comments or openproject_add_comment),
+    not the work package id, and the new Markdown body. Only the comment's
+    author and administrators may edit it."
+    :parameters
+    {:type "object"
+     :properties
+     {"id"      {:type "integer"
+                 :description "Comment (activity) id from openproject_list_comments or openproject_add_comment."}
+      "comment" {:type "string"
+                 :description "New comment body in Markdown, replacing the old text."}}
+     :required ["id" "comment"]}}})
+
 (defn tools
   "Return the built-in OpenProject tool maps."
   {:malli/schema [:-> [:vector #'schema/Tool]]}
@@ -899,4 +1150,13 @@
     :spec create-work-package-spec}
    {:id "openproject_update_work_package"
     :handler update-work-package-fn
-    :spec update-work-package-spec}])
+    :spec update-work-package-spec}
+   {:id "openproject_list_comments"
+    :handler list-comments-fn
+    :spec list-comments-spec}
+   {:id "openproject_add_comment"
+    :handler add-comment-fn
+    :spec add-comment-spec}
+   {:id "openproject_update_comment"
+    :handler update-comment-fn
+    :spec update-comment-spec}])

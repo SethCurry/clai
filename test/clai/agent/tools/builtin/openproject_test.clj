@@ -69,6 +69,54 @@
             :type {:title "Task"}
             :status {:title status}}})
 
+(defn- comment-activity
+  "A comment activity as returned by
+  `/api/v3/work_packages/{id}/activities`."
+  [id user-id text created-at]
+  {:_type "Activity::Comment"
+   :id id
+   :comment {:format "markdown" :raw text :html (str "<p>" text "</p>")}
+   :details []
+   :createdAt created-at
+   :updatedAt created-at
+   :_links {:self {:href (str "/api/v3/activities/" id)}
+            :user {:href (str "/api/v3/users/" user-id)}
+            :workPackage {:href "/api/v3/work_packages/42" :title "Ship it"}}})
+
+(defn- change-activity
+  "A journal entry that records field changes without comment text."
+  [id user-id created-at changes]
+  {:_type "Activity"
+   :id id
+   :comment {:format "markdown" :raw "" :html ""}
+   :details (mapv (fn [change] {:format "custom" :raw change}) changes)
+   :createdAt created-at
+   :_links {:self {:href (str "/api/v3/activities/" id)}
+            :user {:href (str "/api/v3/users/" user-id)}
+            :workPackage {:href "/api/v3/work_packages/42" :title "Ship it"}}})
+
+(defn- activities-request
+  "A fake `clj-http.client/request` serving work package 42's activities and
+  the users their comments link to. `activities` and `users` are thunks so a
+  test can raise a failure only when a lookup happens."
+  [requests activities users]
+  (fn [req]
+    (swap! requests conj req)
+    (cond
+      (str/ends-with? (:url req) "/api/v3/work_packages/42/activities")
+      (json-response 200 (collection (activities)))
+
+      (str/ends-with? (:url req) "/api/v3/users/5")
+      (users)
+
+      :else
+      (throw (ex-info "unexpected request" {:url (:url req)})))))
+
+(defn- user-response
+  "The response for `GET /api/v3/users/5`."
+  []
+  (json-response 200 {:id 5 :name "Seth Curry"}))
+
 (defn- request-filters
   "Parse the `filters` query parameter of a captured request."
   [req]
@@ -364,3 +412,164 @@
        clojure.lang.ExceptionInfo #"Invalid OpenProject work package id"
        ((handler "openproject_update_work_package")
         {:id "DEMO-42" :subject "Updated"} ctx))))
+\n
+;; ---------------------------------------------------------------------------
+;; Reading comments
+;; ---------------------------------------------------------------------------
+
+(deftest list-comments-renders-comments-with-authors
+  (let [requests (atom [])]
+    (with-redefs [clj-http.client/request
+                  (activities-request
+                   requests
+                   (fn [] [(comment-activity 107 5 "First line\nSecond line"
+                                             "2026-11-12T00:22:34.954Z")
+                           (change-activity 108 5 "2026-11-12T01:00:00.000Z"
+                                            ["Status set to Closed"])])
+                   user-response)]
+      (let [result ((handler "openproject_list_comments") {:id 42} ctx)]
+        (is (str/includes?
+             result
+             "Found 1 comment(s) on OpenProject work package 42 \"Ship it\":"))
+        (is (str/includes? result "comment 107 by Seth Curry on 2026-11-12 00:22"))
+        (is (str/includes? result "  First line\n  Second line")
+            "multi-line comment bodies are indented")
+        (is (not (str/includes? result "comment 108"))
+            "entries without comment text are skipped by default")
+        (is (not (str/includes? result "changes:")))
+        (is (= 1 (count (filter #(str/includes? (:url %) "/api/v3/users/")
+                                @requests)))
+            "each author is resolved once")))))
+
+(deftest list-comments-includes-changes-when-asked
+  (let [requests (atom [])]
+    (with-redefs [clj-http.client/request
+                  (activities-request
+                   requests
+                   (fn [] [(comment-activity 107 5 "First" "2026-11-12T00:22:34.954Z")
+                           (change-activity 108 5 "2026-11-12T01:00:00.000Z"
+                                            ["Status set to Closed"])])
+                   user-response)]
+      (let [result ((handler "openproject_list_comments")
+                    {:id 42 :include_changes true} ctx)]
+        (is (str/includes? result "Found 2 activity(s)"))
+        (is (str/includes? result "comment 107 by Seth Curry"))
+        (is (str/includes? result "change 108 by Seth Curry on 2026-11-12 01:00"))
+        (is (str/includes? result "  changes:\n    - Status set to Closed"))))))
+
+(deftest list-comments-limit-keeps-the-most-recent-entries
+  (let [requests (atom [])]
+    (with-redefs [clj-http.client/request
+                  (activities-request
+                   requests
+                   (fn [] [(comment-activity 107 5 "First" "2026-11-12T00:22:34.954Z")
+                           (comment-activity 108 5 "Second" "2026-11-12T01:00:00.000Z")])
+                   user-response)]
+      (let [result ((handler "openproject_list_comments") {:id 42 :limit 1} ctx)]
+        (is (str/includes? result "comment 108"))
+        (is (not (str/includes? result "comment 107")))))))
+
+(deftest list-comments-without-comments-says-so
+  (let [requests (atom [])]
+    (with-redefs [clj-http.client/request
+                  (activities-request
+                   requests
+                   (fn [] [(change-activity 108 5 "2026-11-12T01:00:00.000Z"
+                                            ["Status set to Closed"])])
+                   user-response)]
+      (is (= "No comments on OpenProject work package 42 \"Ship it\"."
+             ((handler "openproject_list_comments") {:id 42} ctx))))))
+
+(deftest list-comments-falls-back-when-the-author-cannot-be-read
+  (let [requests (atom [])]
+    (with-redefs [clj-http.client/request
+                  (activities-request
+                   requests
+                   (fn [] [(comment-activity 107 5 "First" "2026-11-12T00:22:34.954Z")])
+                   (fn [] (json-response 403 {:_type "Error"
+                                              :message "Forbidden"})))]
+      (let [result ((handler "openproject_list_comments") {:id 42} ctx)]
+        (is (str/includes? result "comment 107 by user 5")
+            "an unreadable user must not fail the listing")))))
+
+(deftest list-comments-rejects-non-numeric-work-package-ids
+  (with-redefs [clj-http.client/request
+                (fn [_req] (throw (ex-info "should not request" {})))]
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo #"Invalid OpenProject work package id"
+         ((handler "openproject_list_comments") {:id "DEMO-42"} ctx)))))
+
+;; ---------------------------------------------------------------------------
+;; Writing comments
+;; ---------------------------------------------------------------------------
+
+(deftest add-comment-posts-markdown-body
+  (let [requests (atom [])]
+    (with-redefs [clj-http.client/request
+                  (fn [req]
+                    (swap! requests conj req)
+                    (cond
+                      (= :post (:request-method req))
+                      (json-response 201 (comment-activity 109 5 "Look, **merged**"
+                                                           "2026-11-13T09:00:00.000Z"))
+
+                      (str/ends-with? (:url req) "/api/v3/users/5")
+                      (user-response)
+
+                      :else
+                      (throw (ex-info "unexpected request" {:url (:url req)}))))]
+      (let [result ((handler "openproject_add_comment")
+                    {:id 42 :comment "  Look, **merged**\n"} ctx)
+            post   (first (filter #(= :post (:request-method %)) @requests))
+            body   (json/parse-string (:body post))]
+        (is (str/ends-with? (:url post) "/api/v3/work_packages/42/activities"))
+        (is (= "Look, **merged**" (get-in body ["comment" "raw"]))
+            "new comments are wrapped in {:comment {:raw ...}} and trimmed")
+        (is (str/includes? result "Added comment 109 to OpenProject work package 42."))
+        (is (str/includes? result "comment 109 by Seth Curry"))))))
+
+(deftest add-comment-requires-text
+  (with-redefs [clj-http.client/request
+                (fn [_req] (throw (ex-info "should not request" {})))]
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo #"requires `comment` text"
+         ((handler "openproject_add_comment") {:id 42 :comment "  "} ctx)))))
+
+(deftest update-comment-patches-with-a-bare-string
+  (let [requests (atom [])]
+    (with-redefs [clj-http.client/request
+                  (fn [req]
+                    (swap! requests conj req)
+                    (cond
+                      (= :patch (:request-method req))
+                      (json-response 200 (comment-activity 107 5 "Edited"
+                                                           "2026-11-12T00:22:34.954Z"))
+
+                      (str/ends-with? (:url req) "/api/v3/users/5")
+                      (user-response)
+
+                      :else
+                      (throw (ex-info "unexpected request" {:url (:url req)}))))]
+      (let [result ((handler "openproject_update_comment")
+                    {:id 107 :comment "Edited"} ctx)
+            patch  (first (filter #(= :patch (:request-method %)) @requests))]
+        (is (str/ends-with? (:url patch) "/api/v3/activities/107"))
+        (is (= "Edited" (get (json/parse-string (:body patch)) "comment"))
+            "OpenProject takes the edited comment as a plain string")
+        (is (str/includes? result "Updated OpenProject comment 107."))
+        (is (str/includes? result "comment 107 by Seth Curry"))))))
+
+(deftest update-comment-requires-text
+  (with-redefs [clj-http.client/request
+                (fn [_req] (throw (ex-info "should not request" {})))]
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo #"requires `comment` text"
+         ((handler "openproject_update_comment") {:id 107} ctx)))))
+
+(deftest update-comment-rejects-non-numeric-ids
+  (with-redefs [clj-http.client/request
+                (fn [_req] (throw (ex-info "should not request" {})))]
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo #"Invalid OpenProject comment id"
+         ((handler "openproject_update_comment")
+          {:id "DEMO-42" :comment "Edited"} ctx)))))

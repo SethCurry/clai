@@ -46,7 +46,8 @@
                   :socket-timeout  30}
 
  ;; OpenProject work-package tools. Uncomment and configure to let the agent
- ;; list projects, list tasks, create tasks, and update tasks. :url may be the
+ ;; list projects, list tasks, create tasks, update tasks, and read, add, and
+ ;; edit task comments. :url may be the
  ;; instance root or its /api/v3 API root. Authenticate with :api-key (an
  ;; OpenProject API token) or :username/:password. Omitted keys fall back to
  ;; OPENPROJECT_URL / OPENPROJECT_API_KEY / OPENPROJECT_USERNAME /
@@ -71,6 +72,9 @@
                   ;; "openproject_list_work_packages"
                   ;; "openproject_create_work_package"
                   ;; "openproject_update_work_package"
+                  ;; "openproject_list_comments"
+                  ;; "openproject_add_comment"
+                  ;; "openproject_update_comment"
                   ]
 
  ;; Which installed plugins are active for the agent's sessions. Plugin names

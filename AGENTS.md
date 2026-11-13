@@ -25,6 +25,7 @@ its nice for a user to use from the REPL.
 | PostgreSQL client           | ./src/clai/daemon/postgres.clj           |
 | Session storage             | ./src/clai/daemon/postgres/sessions.clj  |
 | Git repo/worktree storage   | ./src/clai/daemon/postgres/git.clj       |
+| OpenProject task/comment tools | ./src/clai/agent/tools/builtin/openproject.clj |
 | File listing/preview (web)  | ./src/clai/daemon/files.clj              |
 | Clojure runtime introspection (web) | ./src/clai/daemon/namespaces.clj |
 | Storage DDL                 | ./schema/schema.sql                      |
