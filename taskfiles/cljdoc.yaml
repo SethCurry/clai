@@ -1,0 +1,79 @@
+# https://taskfile.dev
+
+version: "3"
+
+vars:
+    GREETING: Hello, World!
+    # cljdoc settings, keep PROJECT and PROJECT_VERSION in sync with project.clj
+    CLJDOC_IMAGE: cljdoc/cljdoc
+    CLJDOC_CONTAINER: clai-cljdoc
+    CLJDOC_PORT: 9122
+    CLJDOC_DATA_DIR: .cljdoc/data
+    PROJECT: clai/clai
+    PROJECT_VERSION: 0.1.0-SNAPSHOT
+
+tasks:
+    # Serve clai's docs on a local cljdoc server. Docs are rendered from the
+    # jar installed by `lein install` and doc/ from the working tree, so the
+    # server doubles as a preview of what cljdoc.org would publish.
+    default:
+        desc: Serve clai's docs with a local cljdoc server and ingest them
+        cmds:
+            - task: serve
+            - task: ingest
+            - 'echo "Docs: http://localhost:{{.CLJDOC_PORT}}/d/{{.PROJECT}}/{{.PROJECT_VERSION}}"'
+
+    serve:
+        desc: Start the cljdoc server in docker (detached)
+        preconditions:
+            - sh: command -v docker
+              msg: docker is required to run cljdoc locally, see https://docs.docker.com/get-started/
+        cmds:
+            - mkdir -p {{.CLJDOC_DATA_DIR}}
+            - docker rm -f {{.CLJDOC_CONTAINER}} > /dev/null 2>&1 || true
+            - >
+                docker run --rm --detach --name {{.CLJDOC_CONTAINER}}
+                --publish {{.CLJDOC_PORT}}:8000
+                --volume "$HOME/.m2:/root/.m2"
+                --volume "./{{.CLJDOC_DATA_DIR}}:/app/data"
+                --platform linux/amd64
+                {{.CLJDOC_IMAGE}}
+
+    ingest:
+        desc: Build and import clai's docs into the running cljdoc server
+        preconditions:
+            - sh: command -v docker
+              msg: docker is required to run cljdoc locally, see https://docs.docker.com/get-started/
+        deps:
+            - install
+        cmds:
+            - mkdir -p {{.CLJDOC_DATA_DIR}}
+            # A folded scalar (`>`) is required: newlines in a literal block
+            # (`|`) separate shell commands, so `docker run` would be invoked
+            # on its own without any arguments.
+            - >
+                docker run --rm
+                --volume "$(pwd):/repo-to-import"
+                --volume "$HOME/.m2:/root/.m2"
+                --volume "./{{.CLJDOC_DATA_DIR}}:/app/data"
+                --platform linux/amd64
+                --entrypoint clojure
+                {{.CLJDOC_IMAGE}} -Sforce -M:cli ingest
+                --project {{.PROJECT}}
+                --version {{.PROJECT_VERSION}}
+                --git /repo-to-import
+                --rev "$(git rev-parse HEAD)"
+            - echo "Ingested {{.PROJECT}} {{.PROJECT_VERSION}}"
+
+    install:
+        desc: Install clai into the local maven repo so cljdoc can analyze it
+        cmds:
+            # clai's pom depends on io.scurry/acp, which is only available as a
+            # checkout, so cljdoc cannot resolve the dependency graph without it.
+            - if [ -d checkouts/acp-clj ]; then (cd checkouts/acp-clj && lein install); fi
+            - lein install
+
+    stop:
+        desc: Stop the local cljdoc server
+        cmds:
+            - docker rm --force {{.CLJDOC_CONTAINER}}

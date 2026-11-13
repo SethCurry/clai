@@ -1,0 +1,29 @@
+# https://taskfile.dev
+
+version: "3"
+
+tasks:
+    default:
+        desc: Build the React UI and serve it with the clai daemon
+        cmds:
+            - task: build
+            - lein run web
+
+    install:
+        desc: Install the web UI's npm dependencies
+        cmds:
+            - cd web && npm install
+
+    build:
+        desc: Build the React UI into web/dist
+        deps:
+            - install
+        cmds:
+            - cd web && npm run build
+
+    dev:
+        desc: Run the Vite dev server (start `lein run web` separately)
+        deps:
+            - install
+        cmds:
+            - cd web && npm run dev
