@@ -38,6 +38,12 @@ page while signed out sends you there, and signing out sends you back.
   [Namespaces](namespaces.md) tab.
 - Typing `./` in the composer completes paths from the session's working
   directory; see [path completion](path-completion.md).
+- **Session titles.** A new session is named for you: after its first
+  message, clai asks the model for a 1 to 5 word title and puts it in the
+  sidebar and above the conversation while the reply is still being written.
+  Click the title to rename it, and clear the text to go back to "Untitled
+  session". Naming is a separate, tiny model call, so it never becomes part of
+  the conversation you see or reload.
 
 The conversation, the session list, and the daemon connection stay alive while
 you visit the git and notes pages: switching tabs does not reload the timeline.

@@ -4,6 +4,7 @@
             [clai.daemon.postgres.sessions :as sessions]
             [clai.instrument :as instrument]
             [clai.log]
+            [clojure.string :as str]
             [taoensso.telemere :as tel])
   (:import [java.io File]
            [java.time Instant]
@@ -92,9 +93,10 @@
 
 (defn- memory-create-session
   ([store client] (memory-create-session store client nil))
-  ([store _client {:keys [cwd configId]}]
+  ([store _client {:keys [cwd title configId]}]
    (memory-save-session store nil
                         (memory-normalize-session {:cwd      cwd
+                                                   :title    title
                                                    :configId configId
                                                    :history  []}))))
 
@@ -157,6 +159,16 @@
                        #(update % :history (fnil conj []) msg))
     msg))
 
+(defn- memory-rename-session
+  "Set a session's title the way `rename-session` does: trimmed, blank clears
+  it, and an unknown session returns nil."
+  [store _client session-id title]
+  (some-> (memory-mutate store session-id
+                         #(assoc % :title (let [title (some-> title str str/trim)]
+                                            (when-not (str/blank? title)
+                                              title))))
+          (dissoc :history)))
+
 (defn- memory-session-history
   [store _client session-id]
   (or (get-in @store [(str session-id) :history]) []))
@@ -183,5 +195,6 @@
                   sessions/session-exists?        (bind memory-session-exists?)
                   sessions/append-history         (bind memory-append-history)
                   sessions/session-history        (bind memory-session-history)
+                  sessions/rename-session         (bind memory-rename-session)
                   sessions/clear-history          (bind memory-clear-history)]
       (f))))

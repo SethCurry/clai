@@ -279,6 +279,20 @@
                :sessionId (str session-id)
                :update    update}))
 
+(defn- send-session-renamed!
+  "Send `session`'s summary so the browser can retitle the open conversation
+  and its sidebar entry.
+
+  `request-id` is echoed when the rename answers a `rename_session` request;
+  a title the agent generated on its own has no request to answer, so it is
+  sent without one."
+  {:malli/schema [:-> #'Connection [:maybe :string] :map :nil]}
+  [conn request-id session]
+  (send! conn (cond-> {:type      "session_renamed"
+                       :sessionId (:sessionId session)
+                       :session   session}
+                (some? request-id) (assoc :requestId request-id))))
+
 (defn- ensure-nrepl!
   "Return `conn`'s nREPL connection, opening one on first use.
 
@@ -310,9 +324,12 @@
 (defn- run-prompt!
   "Start a prompt on `session-id` in a background future.
 
-  The user prompt and every agent update are streamed to the socket. Only one
-  prompt may run per WebSocket, and only one prompt may run per session across
-  all WebSockets, so reconnects and multiple tabs cannot interleave history."
+  The user prompt and every agent update are streamed to the socket, and an
+  untitled session's generated title arrives as a `session_renamed` message
+  ([[send-session-renamed!]]), so the browser retitles the session while its
+  first prompt runs. Only one prompt may run per WebSocket, and only one
+  prompt may run per session across all WebSockets, so reconnects and multiple
+  tabs cannot interleave history."
   [state conn request-id session-id prompt]
   (let [session-id (str session-id)
         prompts    (:prompts state)]
@@ -337,7 +354,9 @@
                                              :prompt    prompt
                                              :on-update #(send-update! conn
                                                                        session-id
-                                                                       %)})]
+                                                                       %)
+                                             :on-title  #(send-session-renamed!
+                                                          conn nil %)})]
               (send! conn {:type      "prompt_done"
                            :requestId request-id
                            :sessionId session-id
@@ -442,10 +461,7 @@
           (if-let [session (agent/rename-session! (:agent state)
                                                   {:sessionId (str sessionId)
                                                    :title     title})]
-            (send! conn {:type      "session_renamed"
-                         :requestId requestId
-                         :sessionId (:sessionId session)
-                         :session   session})
+            (send-session-renamed! conn requestId session)
             (send-error! conn requestId (str "No session " sessionId)))
           (send-error! conn requestId
                        "rename_session requires sessionId and an optional title"))

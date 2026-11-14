@@ -30,6 +30,7 @@ its nice for a user to use from the REPL.
 | User accounts + login sessions (database)                                | ./src/clai/daemon/postgres/users.clj, ./test/clai/daemon/postgres/users_test.clj       |
 | API authentication (login/logout routes, 401 guard)                      | ./src/clai/daemon/http.clj                                                             |
 | Session storage                                                          | ./src/clai/daemon/postgres/sessions.clj                                                |
+| Session titles (auto-naming a session from its first message)            | ./src/clai/agent/titles.clj, ./test/clai/agent/titles_test.clj                        |
 | Git repo/worktree storage                                                | ./src/clai/daemon/postgres/git.clj                                                     |
 | Git repo/worktree HTTP API                                               | ./src/clai/daemon/http.clj                                                             |
 | Note storage + BM25 note search                                          | ./src/clai/daemon/postgres/notes.clj                                                   |

@@ -113,6 +113,12 @@ Everything above the wire format: sessions, history, tools, plugins, the
   `:stop`, ...) and drops Ollama-only ones (`:num_ctx`, `:repeat_penalty`, ...)
   instead of failing the request.
 
+One extra request per session reaches the same provider: the 1 to 5 word
+[title](web-console.md) a new session is named with after its first message.
+It is a plain chat turn -- no tools, no `:options`/`:think`/`:format` from the
+config, and nothing recorded in the session -- so it shows up on your
+provider's usage page and nowhere in the conversation.
+
 ## Troubleshooting
 
 - **`OpenRouter is not configured: set :openrouter {:api-key ...}`** — the

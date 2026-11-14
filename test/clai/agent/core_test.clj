@@ -87,9 +87,13 @@
 
                   openrouter/chat
                   (fn [_ req]
-                    (swap! openrouter-requests conj req)
-                    {:choices [{:message {:role    "assistant"
-                                          :content "from openrouter"}}]})
+                    (if-not (contains? req :tools)
+                      {:choices [{:message {:role    "assistant"
+                                            :content "stub title"}}]}
+                      (do
+                        (swap! openrouter-requests conj req)
+                        {:choices [{:message {:role    "assistant"
+                                              :content "from openrouter"}}]})))
 
                   agent-configs/load-config
                   (fn [_ id]
@@ -119,6 +123,10 @@
   collecting the chat request bodies (`requests`) and the event updates sent
   to the caller (`updates`).
 
+  A title request -- the direct call that names a new session, which offers
+  the model no tools -- is answered with a fixed title and kept out of
+  `requests`, so a test sees exactly the chat turns it asserts on.
+
   `reply` is either the assistant message text or a full message map (for
   example to include a `:thinking` field). `agent-opts` is merged into the
   options passed to `agent/make-agent`, so tests can supply a `:cfg`."
@@ -128,10 +136,14 @@
          updates  (atom [])]
      (with-redefs [ollama/chat
                    (fn [_client req]
-                     (swap! requests conj req)
-                     {:message (if (map? reply)
-                                 (merge {:role "assistant"} reply)
-                                 {:role "assistant" :content reply})})]
+                     (if-not (contains? req :tools)
+                       {:message {:role "assistant" :content "stub title"}}
+                       (do
+                         (swap! requests conj req)
+                         {:message (if (map? reply)
+                                     (merge {:role "assistant"} reply)
+                                     {:role "assistant"
+                                      :content reply})})))]
        (let [handler (agent/make-agent
                       (merge {:cfg    {}
                               :client test-client
@@ -395,6 +407,97 @@
                                           test-client sessionId)))))
            "thinking is persisted so a resumed session can replay it")))))
 
+(deftest first-prompt-names-an-untitled-session
+  (let [requests (atom [])
+        updates  (atom [])
+        titled   (atom [])]
+    (with-redefs [ollama/chat
+                  (fn [_client req]
+                    (swap! requests conj req)
+                    ;; A title request offers no tools; the chat turn does.
+                    {:message {:role    "assistant"
+                               :content (if (some? (:tools req))
+                                          "pong"
+                                          "\"Fix the flaky build.\"")}})]
+      (let [handler (agent/make-agent {:cfg    {}
+                                       :client test-client
+                                       :model  "stub-model"})
+            {:keys [sessionId]} (agent/new-session! handler {:cwd "/tmp"})]
+        (agent/run-prompt! handler
+                           {:sessionId sessionId
+                            :prompt    "the build keeps flaking on CI"
+                            :on-update #(swap! updates conj %)
+                            :on-title  #(swap! titled conj %)})
+        (is (= 2 (count @requests))
+            "the title is one direct provider call, separate from the chat turn")
+        (let [title-request (first @requests)]
+          (is (nil? (:tools title-request))
+              "the title request offers the model no tools")
+          (is (= 1 (count (:messages title-request)))
+              "the title request carries no session history")
+          (is (str/includes? (-> title-request :messages first :content)
+                             "the build keeps flaking on CI")
+              "the title request quotes the session's first message"))
+        (is (= [{:role "user" :content "the build keeps flaking on CI"}]
+               (:messages (second @requests)))
+            "the chat turn sees the prompt but nothing from the title request")
+        (is (= "Fix the flaky build"
+               (:title (sessions/load-session test-client sessionId))))
+        (is (= [{:sessionId sessionId
+                 :title     "Fix the flaky build"
+                 :cwd       "/tmp"}]
+               (mapv #(select-keys % [:sessionId :title :cwd]) @titled))
+            "the renamed summary is relayed to :on-title")
+        (is (= [{:role "user" :content "the build keeps flaking on CI"}
+                {:role "assistant" :content "pong"}]
+               (:history (sessions/load-session test-client sessionId)))
+            "the title exchange leaves no events in the session history")
+        (is (= ["agent_message"] (mapv :type @updates))
+            "the title is not streamed as a chat update")))))
+
+(deftest only-the-first-prompt-names-a-session
+  (let [requests (atom [])
+        titled   (atom [])]
+    (with-redefs [ollama/chat
+                  (fn [_client req]
+                    (swap! requests conj req)
+                    {:message {:role    "assistant"
+                               :content (if (some? (:tools req))
+                                          "pong"
+                                          "Session title")}})]
+      (let [handler (agent/make-agent {:cfg    {}
+                                       :client test-client
+                                       :model  "stub-model"})]
+        (testing "a second prompt does not rename the session"
+          (let [{:keys [sessionId]} (agent/new-session! handler {:cwd "/tmp"})
+                prompt-session! (fn [text]
+                                  (agent/run-prompt!
+                                   handler
+                                   {:sessionId sessionId
+                                    :prompt    text
+                                    :on-title  #(swap! titled conj %)}))]
+            (prompt-session! "first")
+            (prompt-session! "second")
+            (is (= 3 (count @requests))
+                "one title request, then one chat request per prompt")
+            (is (= 1 (count @titled)))
+            (is (= "Session title"
+                   (:title (sessions/load-session test-client sessionId))))))
+
+        (testing "a session created with a title keeps it"
+          (reset! requests [])
+          (let [{:keys [sessionId]} (agent/new-session! handler
+                                                        {:cwd   "/tmp"
+                                                         :title "Already named"})]
+            (agent/run-prompt! handler
+                               {:sessionId sessionId
+                                :prompt    "hi"
+                                :on-title  #(swap! titled conj %)})
+            (is (= 1 (count @requests))
+                "no title request is sent for an already-named session")
+            (is (= "Already named"
+                   (:title (sessions/load-session test-client sessionId))))))))))
+
 (deftest prompt-accumulates-history
   (run-with-stubbed-ollama
    "pong"
@@ -423,15 +526,19 @@
                                        :parameters {:type "object"}}}}]
     (with-redefs [ollama/chat
                   (fn [_client req]
-                    (swap! requests conj req)
-                    (if (= 1 (swap! calls inc))
-                      {:message {:role "assistant"
-                                 :content ""
-                                 :tool_calls
-                                 [{:id "call-1"
-                                   :function {:name "echo"
-                                              :arguments "{\"text\":\"hi\"}"}}]}}
-                      {:message {:role "assistant" :content "done"}}))]
+                    (if-not (contains? req :tools)
+                      {:message {:role "assistant" :content "stub title"}}
+                      (do
+                        (swap! requests conj req)
+                        (if (= 1 (swap! calls inc))
+                          {:message {:role "assistant"
+                                     :content ""
+                                     :tool_calls
+                                     [{:id "call-1"
+                                       :function {:name "echo"
+                                                  :arguments "{\"text\":\"hi\"}"}}]}}
+                          {:message {:role "assistant"
+                                     :content "done"}}))))]
       (let [handler (agent/make-agent {:cfg           {:tools ["echo"]}
                                          :client        test-client
                                          :model         "stub-model"
@@ -469,15 +576,19 @@
                                        :parameters {:type "object"}}}}]
     (with-redefs [ollama/chat
                   (fn [_client req]
-                    (swap! requests conj req)
-                    (if (= 1 (swap! calls inc))
-                      {:message {:role "assistant"
-                                 :content ""
-                                 :tool_calls
-                                 [{:id "call-1"
-                                   :function {:name "chatter"
-                                              :arguments "{}"}}]}}
-                      {:message {:role "assistant" :content "done"}}))]
+                    (if-not (contains? req :tools)
+                      {:message {:role "assistant" :content "stub title"}}
+                      (do
+                        (swap! requests conj req)
+                        (if (= 1 (swap! calls inc))
+                          {:message {:role "assistant"
+                                     :content ""
+                                     :tool_calls
+                                     [{:id "call-1"
+                                       :function {:name "chatter"
+                                                  :arguments "{}"}}]}}
+                          {:message {:role "assistant"
+                                     :content "done"}}))))]
       (let [handler (agent/make-agent {:cfg           {}
                                          :client        test-client
                                          :model         "stub-model"

@@ -151,6 +151,16 @@
       (do (close-stream! stream)
           (println (str "  [" (or kind "event") "] " (pr-str update)))))))
 
+(defn- render-title!
+  "Announce an automatically generated session title on `*out*`, closing the
+  open streamed line first so the note stands on its own."
+  {:malli/schema [:-> [:fn #(instance? clojure.lang.Atom %)] [:maybe :string]
+                  :nil]}
+  [stream title]
+  (close-stream! stream)
+  (println (str "  [title] " title))
+  (flush))
+
 (defn- render-history!
   "Render the persisted `history` as event updates."
   [history]
@@ -479,6 +489,9 @@
 (defn prompt!
   "Send `content` to the current session and stream the agent's reply.
 
+  An untitled session is named from its first prompt; the generated title is
+  printed as a `[title]` line (see `clai.agent.titles`).
+
   `content` is a string or event content blocks. `opts` may carry an explicit
   `:sessionId`. Returns the prompt result (`{:stopReason \"end_turn\"}`)."
   ([content] (prompt! content nil))
@@ -493,6 +506,7 @@
          (agent/run-prompt! agent
                             {:sessionId (str id)
                              :prompt    content
-                             :on-update #(render-event! stream %)})
+                             :on-update #(render-event! stream %)
+                             :on-title  #(render-title! stream (:title %))})
          (finally
            (close-stream! stream)))))))

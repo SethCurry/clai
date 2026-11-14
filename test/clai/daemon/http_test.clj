@@ -739,6 +739,41 @@
             (is (some #(= "echo hi" (get-in % [:update :content 0 :content]))
                       @sent))))))))
 
+(deftest an-auto-generated-title-reaches-the-browser
+  (let [store (atom {})
+        sent  (atom [])
+        conn  {:send           #(swap! sent conj %)
+               :nrepl          (atom nil)
+               :prompt-running (atom false)}]
+    (with-fake-agent store
+      (fn []
+        (with-redefs [agent/run-prompt!
+                      (fn [_ {:keys [sessionId on-update on-title]}]
+                        (on-title {:sessionId sessionId
+                                   :title     "Fix the flaky build"
+                                   :cwd       "/tmp/project"})
+                        (on-update {:type    "agent_message"
+                                    :content [{:type    "text"
+                                               :content "done"}]})
+                        {:stopReason "end_turn"})]
+          (let [daemon-state (state store)
+                id           (:sessionId (new-session store "/tmp/project"))]
+            (#'http/run-prompt! daemon-state conn "r1" id "hi")
+            (is (wait-until #(some (fn [message]
+                                     (= "prompt_done" (:type message)))
+                                   @sent)))
+            (let [renamed (->> @sent
+                               (filter #(= "session_renamed" (:type %)))
+                               first)]
+              (is (= {:type      "session_renamed"
+                      :sessionId id
+                      :session   {:sessionId id
+                                  :title     "Fix the flaky build"
+                                  :cwd       "/tmp/project"}}
+                     renamed))
+              (is (nil? (:requestId renamed))
+                  "an automatic title answers no rename request"))))))))
+
 (deftest prompts-are-serialized-per-session-across-connections
   (let [store   (atom {})
         started (promise)

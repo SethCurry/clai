@@ -26,6 +26,9 @@
     * `clai.agent.providers.messages`      -- normalized assistant messages and
                                               tool-call helpers.
     * `clai.agent.providers.ollama.prompt` -- prompt/history conversion.
+    * `clai.agent.titles`                  -- automatic titles for new
+                                              sessions, from their first
+                                              message.
     * `clai.agent.resources`               -- resource blocks rendered as text
                                               for the model.
     * `clai.daemon.postgres.sessions`      -- PostgreSQL-backed session storage.
@@ -40,6 +43,7 @@
   (:require [clai.agent.configs :as agent-configs]
             [clai.agent.providers :as providers]
             [clai.agent.providers.ollama.prompt :as ollama-prompt]
+            [clai.agent.titles :as titles]
             [clai.agent.tools.builtin :as tools-builtin]
             [clai.agent.tools.invoke :as tool-invoke]
             [clai.agent.tools.registry :as tools-registry]
@@ -143,6 +147,62 @@
            :cwd       (or cwd "")}
     (some? configId)  (assoc :configId configId)
     (some? createdAt) (assoc :createdAt createdAt)))
+
+(defn- untitled-first-turn?
+  "True when `session` has no title and its history holds nothing but the
+  opening system prompt, so the prompt about to run is its first message."
+  {:malli/schema [:-> :map boolean?]}
+  [session]
+  (and (str/blank? (str (:title session)))
+       (not-any? (fn [message]
+                   (contains? #{"user" "assistant"} (:role message)))
+                 (:history session))))
+
+(defn- prompt-text
+  "The text carried by a prompt's `messages`, joined for titling. Resource
+  links and other non-text blocks contribute whatever text they hold."
+  {:malli/schema [:-> [:sequential :map] :string]}
+  [messages]
+  (->> messages
+       (map (comp events/content->text :content))
+       (remove str/blank?)
+       (str/join "\n\n")))
+
+(defn- name-session!
+  "Generate and store a title for `session` from the `text` of its first
+  prompt, then relay the renamed summary to `on-title`.
+
+  Only ever called for an untitled session's first prompt. The title request
+  is a direct provider call made by `clai.agent.titles/generate-title`: it
+  reads nothing from the session and records nothing, so naming a session
+  adds no events to its history and no sessions to the store. A failure -- no
+  usable reply, a provider error -- is logged and ignored: a missing title is
+  not worth failing a prompt over.
+
+  Returns the renamed session summary, or nil when the session stayed
+  untitled."
+  {:malli/schema [:-> :map :map [:maybe fn?] :string [:maybe :map]]}
+  [agent session on-title text]
+  (try
+    (when-let [title (titles/generate-title agent text)]
+      (when-let [renamed (sessions/rename-session (:postgres agent)
+                                                  (:sessionId session)
+                                                  title)]
+        (tel/log! {:level :info
+                   :id    ::session-titled
+                   :data  {:sessionId (:sessionId session)
+                           :title     (:title renamed)}}
+                  "Named session from its first prompt")
+        (let [summary (session-summary renamed)]
+          (when on-title (on-title summary))
+          summary)))
+    (catch Throwable e
+      (tel/log! {:level :warn
+                 :id    ::session-title-failed
+                 :data  {:sessionId (:sessionId session)
+                         :error     (util/error-message e)}}
+                "Could not name the session")
+      nil)))
 
 ;; ---------------------------------------------------------------------------
 ;; Agent tools
@@ -986,6 +1046,12 @@
   selects the provider, so a session started on Ollama can be switched to an
   OpenRouter model and back just by changing its configuration.
 
+  An untitled session's first prompt also names the session: the model is
+  asked directly for a 1 to 5 word title (see `clai.agent.titles`), the title
+  is stored on the session row, and the renamed summary is relayed through
+  `:on-title`. That request is not part of the conversation, so the session
+  history is exactly what the prompt and the reply put there.
+
   `opts` keys:
 
     :sessionId  the session to prompt.
@@ -993,6 +1059,8 @@
                 `clai.agent.providers.ollama.prompt/prompt->messages`).
     :on-update  optional callback receiving event-shaped updates while the
                 prompt runs, including the final `agent_message`.
+    :on-title   optional callback receiving the session summary once an
+                untitled session has been named from its first prompt.
 
   Returns `{:stopReason \"end_turn\"}` so callers that mirror a chat protocol
   can use the result directly. An unknown session yields an explanatory
@@ -1000,16 +1068,20 @@
   {:malli/schema [:-> :map [:map
                             [:sessionId {:optional true} [:maybe :string]]
                             [:prompt {:optional true} :any]
-                            [:on-update {:optional true} [:maybe fn?]]]
+                            [:on-update {:optional true} [:maybe fn?]]
+                            [:on-title {:optional true} [:maybe fn?]]]
                   :map]}
-  [agent {:keys [sessionId prompt on-update]}]
+  [agent {:keys [sessionId prompt on-update on-title]}]
   (let [postgres (:postgres agent)]
     (if-let [session (sessions/load-session postgres sessionId)]
-      (let [agent    (apply-agent-config agent (session-agent-config agent session))
-            session  (assoc session :plugins (:plugins agent))
-            incoming (plugins/user-prompt-pre
-                      session
-                      (ollama-prompt/prompt->messages prompt {:cwd (:cwd session)}))]
+      (let [agent         (apply-agent-config agent
+                                              (session-agent-config agent session))
+            session       (assoc session :plugins (:plugins agent))
+            first-prompt? (untitled-first-turn? session)
+            incoming      (plugins/user-prompt-pre
+                           session
+                           (ollama-prompt/prompt->messages
+                            prompt {:cwd (:cwd session)}))]
         (run! #(sessions/append-history postgres sessionId %) incoming)
         (run! #(sessions/append-history postgres sessionId %)
               (plugins/user-prompt-post session incoming))
@@ -1019,6 +1091,8 @@
                            :messages  (count incoming)
                            :chars     (prompt-char-count incoming)}}
                   "Received prompt")
+        (when first-prompt?
+          (name-session! agent session on-title (prompt-text incoming)))
         (let [reply (run-agent-loop sessionId
                                     (assoc agent
                                            :session   session
