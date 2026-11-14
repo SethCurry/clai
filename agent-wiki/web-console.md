@@ -44,6 +44,9 @@ page while signed out sends you there, and signing out sends you back.
   Click the title to rename it, and clear the text to go back to "Untitled
   session". Naming is a separate, tiny model call, so it never becomes part of
   the conversation you see or reload.
+- **Compaction.** When a long session's history gets too big for the model, the
+  older messages are replaced by a summary and an *Earlier messages compacted*
+  block appears in the timeline. See [session compaction](compaction.md).
 
 The conversation, the session list, and the daemon connection stay alive while
 you visit the git and notes pages: switching tabs does not reload the timeline.

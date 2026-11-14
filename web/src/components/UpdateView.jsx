@@ -57,7 +57,8 @@ function ToolCall({ update }) {
 }
 
 /**
- * Render one streamed agent event: a chat bubble, a thought, or a tool call.
+ * Render one streamed agent event: a chat bubble, a thought, a tool call, or
+ * the notice that the daemon compacted the session's history into a summary.
  */
 export function UpdateView({ update }) {
   if (!update) return null
@@ -97,6 +98,17 @@ export function UpdateView({ update }) {
     return (
       <details className="thought">
         <summary>Thinking</summary>
+        <div>{text}</div>
+      </details>
+    )
+  }
+
+  // The daemon summarized the older messages of a long session to keep its
+  // history inside the model's context window; the summary stands in for them.
+  if (update.type === 'session_compaction') {
+    return (
+      <details className="compaction">
+        <summary>Earlier messages compacted</summary>
         <div>{text}</div>
       </details>
     )

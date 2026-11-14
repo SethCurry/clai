@@ -34,9 +34,10 @@
 (def AgentConfigInput
   "A configuration accepted by [[create-config]] and [[update-config]].
 
-  `:options`, `:format`, `:tools`, and `:plugins` use the same shapes as the
-  config file keys documented in `clai.config`. A missing or nil value clears
-  the corresponding override, except `:options`, which defaults to `{}`.
+  `:options`, `:format`, `:tools`, `:plugins`, and `:compact-after-tokens` use
+  the same shapes as the config file keys documented in `clai.config`. A
+  missing or nil value clears the corresponding override, except `:options`,
+  which defaults to `{}`.
   `:plugins` names the plugins a session may run; nil means every enabled
   plugin, while an empty list disables plugins."
   [:map
@@ -44,6 +45,7 @@
    [:model {:optional true} [:maybe :string]]
    [:system-prompt {:optional true} [:maybe :string]]
    [:max-tool-rounds {:optional true} [:maybe pos-int?]]
+   [:compact-after-tokens {:optional true} [:maybe nat-int?]]
    [:think {:optional true} [:maybe boolean?]]
    [:options {:optional true} [:maybe [:map]]]
    [:format {:optional true} [:maybe [:or :string [:map]]]]
@@ -62,6 +64,7 @@
    [:model {:optional true} [:maybe :string]]
    [:system-prompt {:optional true} [:maybe :string]]
    [:max-tool-rounds {:optional true} [:maybe pos-int?]]
+   [:compact-after-tokens {:optional true} [:maybe nat-int?]]
    [:think {:optional true} [:maybe boolean?]]
    [:options {:optional true} [:map]]
    [:format {:optional true} [:maybe [:or :string [:map]]]]
@@ -141,6 +144,7 @@
      (:model config)
      (:system-prompt config)
      (:max-tool-rounds config)
+     (:compact-after-tokens config)
      (:think config)
      (postgres/->json (or (:options config) {}) "Agent config options")
      (some-> (:format config) (postgres/->json "Agent config format"))
@@ -189,6 +193,9 @@
       (some? (:max-tool-rounds row))
       (assoc :max-tool-rounds (:max-tool-rounds row))
 
+      (some? (:compact-after-tokens row))
+      (assoc :compact-after-tokens (:compact-after-tokens row))
+
       (some? (:think row))
       (assoc :think (:think row))
 
@@ -221,6 +228,7 @@
    model,
    system_prompt,
    max_tool_rounds,
+   compact_after_tokens,
    think,
    model_options::text AS model_options,
    response_format::text AS response_format,
@@ -244,9 +252,10 @@
 
 (def ^:private insert-config-sql
   (str "INSERT INTO agent_config
-          (name, model, system_prompt, max_tool_rounds, think,
+          (name, model, system_prompt, max_tool_rounds,
+           compact_after_tokens, think,
            model_options, response_format, tools, plugins)
-        VALUES (?, ?, ?, ?, ?, CAST(? AS jsonb), CAST(? AS jsonb),
+        VALUES (?, ?, ?, ?, ?, ?, CAST(? AS jsonb), CAST(? AS jsonb),
                 CASE WHEN ?::jsonb IS NULL
                      THEN NULL
                      ELSE ARRAY(SELECT jsonb_array_elements_text(?::jsonb))
@@ -263,6 +272,7 @@
                model = ?,
                system_prompt = ?,
                max_tool_rounds = ?,
+               compact_after_tokens = ?,
                think = ?,
                model_options = CAST(? AS jsonb),
                response_format = CAST(? AS jsonb),

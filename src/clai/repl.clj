@@ -98,9 +98,10 @@
 
 (def ^:private event-labels
   "Text-bearing event kinds and the label each is printed under."
-  {"user_prompt"   "you"
-   "agent_message" "clai"
-   "agent_thought" "thinking"})
+  {"user_prompt"        "you"
+   "agent_message"      "clai"
+   "agent_thought"      "thinking"
+   "session_compaction" "compacted"})
 
 (defn- close-stream!
   "Terminate the currently open streamed text event, if any."
@@ -490,7 +491,9 @@
   "Send `content` to the current session and stream the agent's reply.
 
   An untitled session is named from its first prompt; the generated title is
-  printed as a `[title]` line (see `clai.agent.titles`).
+  printed as a `[title]` line (see `clai.agent.titles`). A session whose
+  history outgrows the agent's token budget is compacted first, and its summary
+  is printed as a `compacted>` line (see `clai.agent.compaction`).
 
   `content` is a string or event content blocks. `opts` may carry an explicit
   `:sessionId`. Returns the prompt result (`{:stopReason \"end_turn\"}`)."

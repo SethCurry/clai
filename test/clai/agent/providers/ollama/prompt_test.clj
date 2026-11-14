@@ -1,7 +1,8 @@
 (ns clai.agent.providers.ollama.prompt-test
   "Tests for prompt normalization and history replay in
   `clai.agent.providers.ollama.prompt`."
-  (:require [clai.agent.providers.ollama.prompt :as ollama-prompt]
+  (:require [clai.agent.compaction :as compaction]
+            [clai.agent.providers.ollama.prompt :as ollama-prompt]
             [clai.events.schema :as events]
             [clai.test-support :refer [quiet-logs]]
             [clojure.string :as str]
@@ -131,6 +132,16 @@
                   {:role "tool" :content "internal"}
                   {:role "assistant" :content "hello"}])]
     (is (= ["user_prompt" "agent_message"] (mapv :type updates)))))
+
+(deftest history-replays-a-compaction-summary-as-a-compaction
+  (let [updates (ollama-prompt/history->updates
+                 [{:role "system" :content "the internal prompt"}
+                  (compaction/summary-message "The user fixed the build.")
+                  {:role "user" :content "carry on"}])]
+    (is (= ["session_compaction" "user_prompt"] (mapv :type updates))
+        "only a compaction summary survives from the system messages")
+    (is (= "The user fixed the build."
+           (events/content->text (:content (first updates)))))))
 
 (deftest history-drops-assistant-turns-with-nothing-visible
   ;; Ollama's tool-call-only assistant messages carry empty content; replaying

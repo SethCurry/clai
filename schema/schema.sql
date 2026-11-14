@@ -16,6 +16,10 @@ CREATE TABLE IF NOT EXISTS agent_config (
     model TEXT,
     system_prompt TEXT,
     max_tool_rounds INT,
+    -- Token budget for the session's history; once it is estimated to be over
+    -- this, `clai.agent.compaction` summarizes the older messages. NULL falls
+    -- back to the daemon's budget, 0 disables compaction.
+    compact_after_tokens INT,
     think BOOLEAN,
     model_options JSONB NOT NULL DEFAULT '{}'::jsonb,
     response_format JSONB,
@@ -71,6 +75,9 @@ ALTER TABLE agent_session
 
 ALTER TABLE agent_config
     ADD COLUMN IF NOT EXISTS plugins TEXT[];
+
+ALTER TABLE agent_config
+    ADD COLUMN IF NOT EXISTS compact_after_tokens INT;
 
 -- PostgreSQL has no `CREATE TYPE IF NOT EXISTS`, so guard the enum by hand.
 DO $$

@@ -13,6 +13,9 @@
        :provider       :ollama               ; provider for unprefixed models
        :system-prompt  \"You are a ...\"     ; optional system message
        :max-tool-rounds 8                    ; per-prompt tool-call round cap
+       :compact-after-tokens 60000           ; compact a session's history
+                                             ; once it is estimated to be
+                                             ; this many tokens; 0 disables
        :think          false                 ; request model reasoning
        :options        {:temperature 0.7}    ; model options map
        :format         \"json\"              ; optional structured output
@@ -81,7 +84,8 @@
 
   If none of these exist, an empty map is returned and `clai` behaves exactly
   as it did before config-file support (env vars + defaults)."
-  (:require [clai.agent.providers :as providers]
+  (:require [clai.agent.compaction :as compaction]
+            [clai.agent.providers :as providers]
             [clai.agent.tools.builtin :as tools-builtin]
             [clai.agent.tools.registry :as tools-registry]
             [clai.agent.tools.schema :as tools-schema]
@@ -163,6 +167,7 @@
    [:provider {:optional true} [:or providers/Provider non-empty-string]]
    [:system-prompt {:optional true} :string]
    [:max-tool-rounds {:optional true} pos-int?]
+   [:compact-after-tokens {:optional true} nat-int?]
    [:think {:optional true} boolean?]
    [:options {:optional true} [:map]]
    [:format {:optional true} [:or :string [:map]]]
@@ -297,6 +302,17 @@
 
 (def ^:private default-max-tool-rounds 8)
 
+(defn- env-int
+  "The number held by environment variable `name`, or nil when it is unset or
+  holds something that is not a number: a typo in the environment should cost
+  a default, not every prompt."
+  {:malli/schema [:-> non-empty-string [:maybe :int]]}
+  [name]
+  (when-let [text (some-> (System/getenv name) str/trim not-empty)]
+    (try
+      (parse-long text)
+      (catch Exception _ nil))))
+
 (defn resolve-model
   "Resolve the model to chat with. Precedence: `cfg`'s `:model`, then the
   `CLAI_MODEL` environment variable, then the built-in default.
@@ -340,9 +356,22 @@
   {:malli/schema [:-> #'config pos-int?]}
   [cfg]
   (or (some-> cfg :max-tool-rounds)
-      (some-> (System/getenv "CLAI_MAX_TOOL_ROUNDS")
-              (Integer/parseInt))
+      (env-int "CLAI_MAX_TOOL_ROUNDS")
       default-max-tool-rounds))
+
+(defn resolve-compact-after-tokens
+  "Resolve the token budget a session's history may reach before the agent
+  compacts it (see `clai.agent.compaction`). Precedence: `cfg`'s
+  `:compact-after-tokens`, then `CLAI_COMPACT_AFTER_TOKENS`, then
+  `clai.agent.compaction/default-after-tokens`.
+
+  A budget of 0 turns compaction off, so a session's history grows exactly as
+  far as its model's context window allows."
+  {:malli/schema [:-> #'config nat-int?]}
+  [cfg]
+  (or (some-> cfg :compact-after-tokens)
+      (env-int "CLAI_COMPACT_AFTER_TOKENS")
+      compaction/default-after-tokens))
 
 (defn make-clients
   "Build one client per provider from `cfg`.

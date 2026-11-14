@@ -783,6 +783,33 @@ pre {
   white-space: pre-wrap;
 }
 
+/* ------------------------------------------------------------- compaction */
+
+.compaction {
+  align-self: flex-start;
+  max-width: min(85%, 760px);
+  padding: 8px 12px;
+  border: 1px dashed var(--accent-2);
+  border-radius: 11px;
+  background: rgba(56, 189, 248, 0.05);
+  color: var(--muted);
+}
+
+.compaction summary {
+  cursor: pointer;
+  font-size: 0.7rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.compaction div {
+  margin-top: 8px;
+  font-size: 0.84rem;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
 /* --------------------------------------------------------------- tool call */
 
 .tool-call {
@@ -2735,6 +2762,7 @@ pre {
 
   .message,
   .thought,
+  .compaction,
   .tool-call {
     max-width: 100%;
   }

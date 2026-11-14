@@ -2,7 +2,8 @@
   "Tests for the in-process agent in `clai.agent.core`, in particular that a
   prompt actually reaches the model and that streamed updates validate against
   the canonical session event schema."
-  (:require [clai.agent.configs :as agent-configs]
+  (:require [clai.agent.compaction :as compaction]
+            [clai.agent.configs :as agent-configs]
             [clai.agent.core :as agent]
             [clai.agent.providers.ollama :as ollama]
             [clai.agent.providers.openrouter :as openrouter]
@@ -169,6 +170,101 @@
        (let [update (first @updates)]
          (is (= "agent_message" (:type update)))
          (is (= "pong" (events/content->text (:content update)))))))))
+
+(defn- run-with-compacting-ollama
+  "Run `f` with `/api/chat` stubbed for a session small enough to compact.
+
+  `/api/chat` answers three kinds of request: a chat turn (`:tools` present)
+  with `pong`, a summarization request (the direct call
+  `clai.agent.compaction` makes, whose system message is
+  `compaction/summarize-instruction`) with `summary`, and a session-title
+  request with a fixed title. `f` receives the chat request bodies and the
+  summarization requests, each collected in an atom."
+  [summary f]
+  (let [requests  (atom [])
+        summaries (atom [])]
+    (with-redefs [ollama/chat
+                  (fn [_client req]
+                    (cond
+                      (contains? req :tools)
+                      (do (swap! requests conj req)
+                          {:message {:role "assistant" :content "pong"}})
+
+                      (str/includes? (str (-> req :messages first :content))
+                                     compaction/summarize-instruction)
+                      (do (swap! summaries conj req)
+                          {:message {:role "assistant" :content summary}})
+
+                      :else
+                      {:message {:role "assistant" :content "stub title"}}))]
+      (f requests summaries))))
+
+(deftest prompt-compacts-a-session-that-outgrows-its-token-budget
+  (run-with-compacting-ollama
+   "The user asked for pongs."
+   (fn [requests summaries]
+     (let [handler (agent/make-agent {:cfg    {:compact-after-tokens 1000}
+                                      :client test-client
+                                      :model  "stub-model"})
+           {:keys [sessionId]} (agent/new-session! handler {:cwd "/tmp"})
+           updates (atom [])]
+       ;; The first prompt alone is over the budget, but it is also the only
+       ;; message there is: there is nothing older to summarize yet.
+       (prompt! handler sessionId (apply str (repeat 5000 "x")) updates)
+       (is (empty? @summaries))
+
+       (reset! updates [])
+       (prompt! handler sessionId "and again" updates)
+       (is (= 1 (count @summaries))
+           "the older messages are summarized once the session is over budget")
+
+       (let [request  (last @requests)
+             messages (:messages request)
+             summary  (compaction/summary-message "The user asked for pongs.")]
+         (is (= (:content summary) (:content (first messages)))
+             "the chat turn sends the summary in place of the older messages")
+         (is (not-any? #(> (count (str (:content %))) 1000) messages)
+             "the oversized first prompt is no longer sent")
+         (is (= {:role "user" :content "and again"} (last messages))
+             "the newest prompt is still there")
+         (is (= ["session_compaction" "agent_message"]
+                (mapv :type (filter #(contains? #{"session_compaction"
+                                                 "agent_message"}
+                                                (:type %))
+                                    @updates)))
+             "the caller is told about the compaction before the reply")
+         (is (= "The user asked for pongs."
+                (events/content->text
+                 (:content (first (filter #(= "session_compaction" (:type %))
+                                          @updates)))))
+             "the update carries the summary")
+         (is (= (conj (mapv :content messages) "pong")
+                (mapv :content (:history (sessions/load-session test-client
+                                                                sessionId))))
+             "the compacted history replaces the stored one, and the reply is
+              appended to it"))))))
+
+(deftest a-session-configuration-can-turn-compaction-off
+  (with-redefs [agent-configs/load-config
+                (fn [_ id]
+                  (when (= "7" id)
+                    {:configId "7"
+                     :name     "wide-context"
+                     :compact-after-tokens 0}))]
+    (run-with-compacting-ollama
+     "unused summary"
+     (fn [_requests summaries]
+       (let [handler (agent/make-agent {:cfg    {:compact-after-tokens 1000}
+                                        :client test-client
+                                        :model  "stub-model"})
+             {:keys [sessionId]} (agent/new-session! handler {:cwd      "/tmp"
+                                                              :configId "7"})
+             updates (atom [])]
+         (prompt! handler sessionId (apply str (repeat 5000 "x")) updates)
+         (prompt! handler sessionId "and again" updates)
+         (is (empty? @summaries)
+             "a budget of 0 in the session's configuration disables compaction")
+         (is (not-any? #(= "session_compaction" (:type %)) @updates)))))))
 
 (defn- temp-dir
   "Create an empty temporary directory for a test."

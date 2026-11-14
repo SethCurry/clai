@@ -31,6 +31,7 @@ its nice for a user to use from the REPL.
 | API authentication (login/logout routes, 401 guard)                      | ./src/clai/daemon/http.clj                                                             |
 | Session storage                                                          | ./src/clai/daemon/postgres/sessions.clj                                                |
 | Session titles (auto-naming a session from its first message)            | ./src/clai/agent/titles.clj, ./test/clai/agent/titles_test.clj                        |
+| Session compaction (summarizing older messages at a token budget)        | ./src/clai/agent/compaction.clj, ./test/clai/agent/compaction_test.clj                |
 | Git repo/worktree storage                                                | ./src/clai/daemon/postgres/git.clj                                                     |
 | Git repo/worktree HTTP API                                               | ./src/clai/daemon/http.clj                                                             |
 | Note storage + BM25 note search                                          | ./src/clai/daemon/postgres/notes.clj                                                   |

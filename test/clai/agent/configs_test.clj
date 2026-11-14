@@ -27,6 +27,7 @@
              :model             "gemma3"
              :system-prompt     "Be quick."
              :max-tool-rounds   2
+             :compact-after-tokens 5000
              :think             true
              :model-options     "{\"temperature\":0}"
              :response-format   "\"json\""
@@ -39,6 +40,7 @@
             :model         "gemma3"
             :system-prompt "Be quick."
             :max-tool-rounds 2
+            :compact-after-tokens 5000
             :think         true
             :options       {:temperature 0}
             :format        "json"
@@ -61,6 +63,9 @@
                                   :options nil
                                   :tools   [" read_file " "run_command"]
                                   :plugins [" todays-date " "audit"]})))
+  (is (= 0 (:compact-after-tokens
+            (configs/prepare-config {:name "wide" :compact-after-tokens 0})))
+      "0 is kept: it turns compaction off for the session")
   (is (= [] (:tools (configs/prepare-config {:name "no-tools" :tools []})))
       "an empty tool list stays distinct from clearing the override")
   (is (= [] (:plugins (configs/prepare-config {:name "no-plugins"

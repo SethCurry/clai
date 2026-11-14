@@ -29,6 +29,9 @@
     * `clai.agent.titles`                  -- automatic titles for new
                                               sessions, from their first
                                               message.
+    * `clai.agent.compaction`              -- summarizing a session's older
+                                              messages once its history
+                                              outgrows a token budget.
     * `clai.agent.resources`               -- resource blocks rendered as text
                                               for the model.
     * `clai.daemon.postgres.sessions`      -- PostgreSQL-backed session storage.
@@ -40,7 +43,8 @@
     * `clai.config`                        -- config/env resolution for the
                                               agent's model, clients, tools, and
                                               chat options."
-  (:require [clai.agent.configs :as agent-configs]
+  (:require [clai.agent.compaction :as compaction]
+            [clai.agent.configs :as agent-configs]
             [clai.agent.providers :as providers]
             [clai.agent.providers.ollama.prompt :as ollama-prompt]
             [clai.agent.titles :as titles]
@@ -702,7 +706,9 @@
 
   A configuration that names a `:model` also re-resolves the provider (and so
   the client) from that model, using [[make-agent]]'s `:default-provider` for
-  model names that do not name one."
+  model names that do not name one. A `:compact-after-tokens` budget replaces
+  the agent's, so one session can compact eagerly while another uses a model
+  with a larger context window."
   [agent config]
   (if (nil? config)
     agent
@@ -711,18 +717,21 @@
                           (tools-registry/select-tools base-registry (:tools config))
                           (:tool-registry agent))
           agent         (assoc agent
-                               :max-rounds    (or (:max-tool-rounds config)
-                                                  (:max-rounds agent))
-                               :chat-opts     (merge (:chat-opts agent)
-                                                     (util/select-present config
-                                                                          [:options
-                                                                           :think
-                                                                           :format]))
-                               :tool-registry tool-registry
-                               :tool-specs    (tools-registry/specs tool-registry)
-                               :plugins       (if (contains? config :plugins)
-                                                (:plugins config)
-                                                (:plugins agent)))]
+                               :max-rounds           (or (:max-tool-rounds config)
+                                                         (:max-rounds agent))
+                               :compact-after-tokens
+                               (or (:compact-after-tokens config)
+                                   (:compact-after-tokens agent))
+                               :chat-opts            (merge
+                                                      (:chat-opts agent)
+                                                      (util/select-present
+                                                       config
+                                                       [:options :think :format]))
+                               :tool-registry        tool-registry
+                               :tool-specs           (tools-registry/specs tool-registry)
+                               :plugins              (if (contains? config :plugins)
+                                                       (:plugins config)
+                                                       (:plugins agent)))]
       (if-let [model (:model config)]
         (merge agent
                (-> (providers/model-client (:clients agent)
@@ -981,6 +990,28 @@
   (str "Stopped after " max-rounds
        " tool rounds without a final reply."))
 
+(defn- chat-history
+  "The history to send for the next chat turn.
+
+  Compacts the session first when its stored history has grown past the
+  agent's token budget (see `clai.agent.compaction`): the compacted history
+  replaces the stored one and a `session_compaction` update is relayed to the
+  caller, so a client can show what the older messages became."
+  {:malli/schema [:-> :string [:map
+                               [:postgres :any]
+                               [:client :map]
+                               [:model :string]
+                               [:on-update {:optional true} [:maybe fn?]]]
+                  [:vector :map]]}
+  [session-id {:keys [postgres on-update] :as agent}]
+  (let [history (sessions/session-history postgres session-id)]
+    (if-let [result (compaction/compact-history agent history)]
+      (let [compacted (:history result)]
+        (sessions/replace-history postgres session-id compacted)
+        (emit! on-update (:update result))
+        compacted)
+      history)))
+
 (defn- run-agent-loop
   "Drive the chat conversation for `session-id` to completion.
 
@@ -992,8 +1023,9 @@
 
   `opts` is the agent map from [[make-agent]] (`:postgres`, `:client`,
   `:clients`, `:provider`, `:model`, `:tool-registry`, `:tool-specs`,
-  `:chat-opts`, `:max-rounds`) plus the caller's `:on-update` callback and the
-  loaded `:session` passed to the message plugin hooks.
+  `:chat-opts`, `:max-rounds`, `:compact-after-tokens`) plus the caller's
+  `:on-update` callback and the loaded `:session` passed to the message plugin
+  hooks.
 
   On error (HTTP failure or hitting the round cap) returns a descriptive
   string rather than throwing, so the caller can relay it to the user."
@@ -1004,7 +1036,7 @@
     (loop [round 0]
       (if (>= round max-rounds)
         (tool-round-cap-reply session-id max-rounds)
-        (let [history                 (sessions/session-history postgres session-id)
+        (let [history                 (chat-history session-id opts)
               {:keys [message error]} (chat-once session-id opts history round)]
           (if error
             error
@@ -1139,50 +1171,53 @@
   chat options. It is plain data, so the operations above can be written as
   ordinary functions of it."
   [opts]
-  (let [cfg                (or (:cfg opts) (config/load-config))
-        clients            (agent-clients opts cfg)
-        default-provider   (config/resolve-provider cfg)
-        model-spec         (providers/model-client
-                            clients
-                            (or (:model opts) (config/resolve-model cfg))
-                            default-provider)
-        provider           (:provider model-spec)
-        model              (:model model-spec)
-        client             (:client model-spec)
-        postgres           (or (:postgres opts)
-                               (config/make-postgres-client cfg))
-        base-tool-registry (base-registry opts)
-        tool-registry      (resolve-tool-registry base-tool-registry cfg)
-        tool-specs         (tools-registry/specs tool-registry)
-        max-rounds         (config/resolve-max-tool-rounds cfg)
-        sys-prompt         (:system-prompt cfg)
-        chat-opts          (config/chat-options cfg)
-        plugins            (or (:plugins opts) (:plugins cfg))]
+  (let [cfg                  (or (:cfg opts) (config/load-config))
+        clients              (agent-clients opts cfg)
+        default-provider     (config/resolve-provider cfg)
+        model-spec           (providers/model-client
+                              clients
+                              (or (:model opts) (config/resolve-model cfg))
+                              default-provider)
+        provider             (:provider model-spec)
+        model                (:model model-spec)
+        client               (:client model-spec)
+        postgres             (or (:postgres opts)
+                                 (config/make-postgres-client cfg))
+        base-tool-registry   (base-registry opts)
+        tool-registry        (resolve-tool-registry base-tool-registry cfg)
+        tool-specs           (tools-registry/specs tool-registry)
+        max-rounds           (config/resolve-max-tool-rounds cfg)
+        compact-after-tokens (config/resolve-compact-after-tokens cfg)
+        sys-prompt           (:system-prompt cfg)
+        chat-opts            (config/chat-options cfg)
+        plugins              (or (:plugins opts) (:plugins cfg))]
     (tel/log! {:level :info
                :id    ::agent-configured
                :data  {:provider       provider
                        :model          model
                        :tools          (count tool-specs)
                        :max-rounds     max-rounds
+                       :compact-after-tokens compact-after-tokens
                        :system-prompt? (some? sys-prompt)
                        :plugins        (if (nil? plugins) :all (count plugins))
                        :endpoint       (or (:host client) (:base-url client))}}
               "Configured clai agent")
-    {:cfg                cfg
-     :clients            clients
-     :client             client
-     :provider           provider
-     :default-provider   default-provider
-     :postgres           postgres
-     :model              model
-     :base-tool-registry base-tool-registry
-     :tool-registry      tool-registry
-     :tool-specs         tool-specs
-     :max-rounds         max-rounds
-     :sys-prompt         sys-prompt
-     :chat-opts          chat-opts
-     :plugins            plugins
-     :openproject        (:openproject cfg)}))
+    {:cfg                  cfg
+     :clients              clients
+     :client               client
+     :provider             provider
+     :default-provider     default-provider
+     :postgres             postgres
+     :model                model
+     :base-tool-registry   base-tool-registry
+     :tool-registry        tool-registry
+     :tool-specs           tool-specs
+     :max-rounds           max-rounds
+     :compact-after-tokens compact-after-tokens
+     :sys-prompt           sys-prompt
+     :chat-opts            chat-opts
+     :plugins              plugins
+     :openproject          (:openproject cfg)}))
 
 (defn make-agent
   "Build an in-process agent that answers prompts with a chat model.
@@ -1217,6 +1252,11 @@
     :plugins        plugin names (or ids) active for the agent's sessions, or
                     nil for every enabled plugin. Defaults to `cfg`'s
                     `:plugins`; an empty vector disables plugins.
+
+  Sessions are compacted when their history is estimated to be over the
+  token budget `cfg`'s `:compact-after-tokens` names (60000 by default, 0 to
+  disable); see `clai.agent.compaction`. A stored agent configuration can
+  override that budget per session.
 
   A new session can select a stored `agent_config` with `:configId`. That
   configuration's model (and therefore provider), system prompt, tool-round

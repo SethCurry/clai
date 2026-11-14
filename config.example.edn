@@ -30,6 +30,14 @@
  ;; Max consecutive tool-call rounds before the agent gives up.
  :max-tool-rounds 8
 
+ ;; Token budget for a session's history. Once the history is estimated to be
+ ;; over this many tokens, the agent summarizes the older messages so the
+ ;; conversation keeps fitting the model's context window; the newest messages
+ ;; and the system prompt are kept as they are. 0 disables compaction, and
+ ;; $CLAI_COMPACT_AFTER_TOKENS sets a budget without editing this file. A
+ ;; session's stored agent configuration can override it.
+ :compact-after-tokens 60000
+
  ;; Provider-neutral chat options. Ollama forwards them to /api/chat verbatim;
  ;; OpenRouter keeps the OpenAI-compatible ones (:temperature, :top_p,
  ;; :max_tokens, ...) and drops Ollama-only ones (:num_ctx, ...).

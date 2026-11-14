@@ -10,7 +10,8 @@
   `clai.agent.providers.messages`); each provider converts them into its own
   wire format when a chat turn is sent (`clai.agent.providers/chat-request`).
   The namespace keeps its `ollama` name because the shape is Ollama's."
-  (:require [clai.agent.providers.messages :as messages]
+  (:require [clai.agent.compaction :as compaction]
+            [clai.agent.providers.messages :as messages]
             [clai.agent.resources :as resources]
             [clai.events.schema :as events]
             [clojure.string :as str]))
@@ -164,16 +165,20 @@
   see when a session is loaded.
 
   User turns become `user_prompt` events and assistant turns are replayed by
-  [[assistant-updates]]. System messages (the internal instructions that open
-  a session) are dropped, and `tool` results are not updates of their own:
+  [[assistant-updates]]. A compaction summary becomes one `session_compaction`
+  update, so a reloaded conversation still shows where its older messages
+  went. Other system messages (the internal instructions that open a session)
+  are dropped, and `tool` results are not updates of their own:
   [[tool-result-texts]] folds each one into the tool call it answers."
   [results message]
-  (case (name->str (:role message))
-    "user"                [(events/text-event "user_prompt"
-                                              (events/content->text
-                                               (:content message)))]
-    ("assistant" "agent") (assistant-updates results message)
-    []))
+  (if-let [summary (compaction/summary-text message)]
+    [(compaction/compaction-update summary)]
+    (case (name->str (:role message))
+      "user"                [(events/text-event "user_prompt"
+                                                (events/content->text
+                                                 (:content message)))]
+      ("assistant" "agent") (assistant-updates results message)
+      [])))
 
 (defn history->updates
   "Convert persisted `history` into the event updates a viewer should render,

@@ -507,6 +507,38 @@
         (warn-unknown-session ::append-history session-id)
         nil))))
 
+(defn replace-history
+  "Replace `session-id`'s event log with `history`, returning the updated
+  session state map, or nil when the session is unknown.
+
+  Everything happens in one transaction, so a reader never sees the session
+  half-emptied. `clai.agent.compaction` uses this to store a history whose
+  older messages have been replaced by a summary."
+  {:malli/schema [:-> #'postgres/client-schema #'non-empty-string
+                  [:vector #'message] [:maybe #'session]]}
+  [client session-id history]
+  (let [client  (postgres/ready client)
+        history (vec history)]
+    (run! #(postgres/validate! message % "replace-history") history)
+    (if-let [id (session-key session-id)]
+      (jdbc/with-transaction [tx (:datasource client)]
+        (if-let [row (postgres/exec-one! tx ::load-session
+                                         select-session-sql [id])]
+          (do
+            (replace-history! tx id history)
+            (tel/log! {:level :debug
+                       :id    ::history-replaced
+                       :data  {:sessionId session-id
+                               :messages  (count history)}}
+                      "Replaced PostgreSQL session history")
+            (row->session row history))
+          (do
+            (warn-unknown-session ::replace-history session-id)
+            nil)))
+      (do
+        (warn-unknown-session ::replace-history session-id)
+        nil))))
+
 (defn clear-history
   "Delete every event in `session-id` and return the updated state map, or nil
   when the session is unknown."

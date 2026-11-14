@@ -6,6 +6,9 @@
   page's layout, and how to hide and show the REPL and explorer panes.
 - [Models and providers](providers.md): configure Ollama and OpenRouter at the
   same time and pick a provider by naming its model.
+- [Session compaction](compaction.md): let clai summarize the older messages of
+  a long session so it keeps fitting the model's context window, and set the
+  token budget it does that at.
 - [Local database](database.md): start the development PostgreSQL
   container, and use the pg_textsearch full-text search extension it
   ships.

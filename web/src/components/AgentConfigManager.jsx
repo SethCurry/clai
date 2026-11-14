@@ -6,6 +6,7 @@ const EMPTY_FORM = {
   model: '',
   systemPrompt: '',
   maxToolRounds: '',
+  compactAfterTokens: '',
   think: '',
   options: '{}',
   format: '',
@@ -31,6 +32,10 @@ function configToForm(config) {
       config['max-tool-rounds'] == null
         ? ''
         : String(config['max-tool-rounds']),
+    compactAfterTokens:
+      config['compact-after-tokens'] == null
+        ? ''
+        : String(config['compact-after-tokens']),
     think: config.think == null ? '' : String(config.think),
     options:
       config.options && Object.keys(config.options).length > 0
@@ -124,12 +129,24 @@ function formToConfig(form) {
     maxToolRounds = value
   }
 
+  let compactAfterTokens = null
+  if (form.compactAfterTokens.trim()) {
+    const value = Number(form.compactAfterTokens)
+    if (!Number.isInteger(value) || value < 0) {
+      throw new Error(
+        'Compact after tokens must be a whole number of tokens (0 turns compaction off).',
+      )
+    }
+    compactAfterTokens = value
+  }
+
   return {
     name,
     model: form.model.trim() || null,
     'system-prompt':
       form.systemPrompt.trim() === '' ? null : form.systemPrompt,
     'max-tool-rounds': maxToolRounds,
+    'compact-after-tokens': compactAfterTokens,
     think: form.think === '' ? null : form.think === 'true',
     options: parseOptions(form.options),
     format: parseFormat(form.format),
@@ -366,6 +383,21 @@ export function AgentConfigManager({
                     </select>
                   </label>
                 </div>
+
+                <label className="config-form__field">
+                  <span>Compact after tokens</span>
+                  <input
+                    type="number"
+                    min="0"
+                    step="1"
+                    value={form.compactAfterTokens}
+                    onChange={(event) =>
+                      updateField('compactAfterTokens', event.target.value)
+                    }
+                    placeholder="Daemon default"
+                    title="Once the session history is estimated to be this many tokens, the daemon summarizes the older messages so the conversation fits the model's context window. 0 turns compaction off."
+                  />
+                </label>
 
                 <label className="config-form__field">
                   <span>Model options (JSON)</span>

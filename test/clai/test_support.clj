@@ -173,6 +173,12 @@
   [store _client session-id]
   (or (get-in @store [(str session-id) :history]) []))
 
+(defn- memory-replace-history
+  "Replace a session's history the way `replace-history` does: as one step, and
+  nil for an unknown session."
+  [store _client session-id history]
+  (memory-mutate store session-id #(assoc % :history (vec history))))
+
 (defn- memory-clear-history
   [store _client session-id]
   (memory-mutate store session-id #(assoc % :history [])))
@@ -196,5 +202,6 @@
                   sessions/append-history         (bind memory-append-history)
                   sessions/session-history        (bind memory-session-history)
                   sessions/rename-session         (bind memory-rename-session)
+                  sessions/replace-history        (bind memory-replace-history)
                   sessions/clear-history          (bind memory-clear-history)]
       (f))))

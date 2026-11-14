@@ -1,7 +1,8 @@
 (ns clai.config-test
-  (:require [clojure.test :refer :all]
+  (:require [clai.agent.compaction :as compaction]
             [clai.config :as config]
-            [clai.test-support :refer [quiet-logs]]))
+            [clai.test-support :refer [quiet-logs]]
+            [clojure.test :refer :all]))
 
 ;; ---------------------------------------------------------------------------
 ;; Helpers
@@ -130,6 +131,13 @@
 (deftest resolve-max-tool-rounds-prefers-config
   (is (= 3 (config/resolve-max-tool-rounds {:max-tool-rounds 3})))
   (is (pos-int? (config/resolve-max-tool-rounds {}))))
+
+(deftest resolve-compact-after-tokens-prefers-config
+  (is (= 1234 (config/resolve-compact-after-tokens {:compact-after-tokens 1234})))
+  (is (= 0 (config/resolve-compact-after-tokens {:compact-after-tokens 0}))
+      "0 turns compaction off and must not fall back to the default")
+  (is (= compaction/default-after-tokens
+         (config/resolve-compact-after-tokens {}))))
 
 (deftest make-clients-builds-every-provider
   (let [clients (config/make-clients
