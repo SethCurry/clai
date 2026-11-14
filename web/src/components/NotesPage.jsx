@@ -1,15 +1,15 @@
 import { useMemo, useState } from 'react'
 import { formatRelativeTime, formatTimestamp } from '../format.js'
+import { parseNoteLinkTitles } from '../noteLinks.js'
 import {
   EMPTY_NOTE_FORM,
-  addLink,
   formToNoteInput,
-  linkCandidates,
   linkLabel,
   notePreview,
   noteTitle,
   noteToForm,
-  removeLink,
+  resolveTitle,
+  titleIds,
   titleLookup,
 } from '../notes.js'
 import { useNotes } from '../useNotes.js'
@@ -137,8 +137,11 @@ function LinkChips({ heading, hint, ids, titles, onSelect }) {
   )
 }
 
-/** The read view: one note's metadata, rendered Markdown, links, and backlinks. */
-function NoteDetail({ note, titles, onEdit, onDelete, onSelect }) {
+/**
+ * The read view: one note's metadata, its rendered Markdown with `[[Title]]`
+ * references as links, and its links and backlinks.
+ */
+function NoteDetail({ note, titles, titleIdLookup, onEdit, onDelete, onSelect }) {
   return (
     <div className="list-panel note-detail">
       <header className="list-panel__head note-detail__head">
@@ -171,7 +174,11 @@ function NoteDetail({ note, titles, onEdit, onDelete, onSelect }) {
       </dl>
 
       <article className="note-detail__content">
-        <Markdown text={note.content} />
+        <Markdown
+          text={note.content}
+          resolveNote={(title) => resolveTitle(titleIdLookup, title)}
+          onOpenNote={onSelect}
+        />
       </article>
 
       <LinkChips
@@ -193,30 +200,19 @@ function NoteDetail({ note, titles, onEdit, onDelete, onSelect }) {
 }
 
 /**
- * The write view for a new or existing note: title, Markdown content, and the
- * outgoing links. `allNotes` fills the link picker, which offers only notes
- * that are not already linked and are not the note being edited. The caller
+ * The write view for a new or existing note: its title and Markdown content.
+ * Links come from the `[[Title]]` references in the content, so the editor
+ * previews which of them resolve instead of offering a link picker. The caller
  * owns the API call, so the form only validates its own fields.
  */
-function NoteEditor({ note, allNotes, onSave, onCancel }) {
+function NoteEditor({ note, titles, titleIdLookup, onSave, onCancel }) {
   const [form, setForm] = useState(() => noteToForm(note ?? EMPTY_NOTE_FORM))
-  const [pick, setPick] = useState('')
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
-  const titles = useMemo(() => titleLookup(allNotes), [allNotes])
-  const candidates = useMemo(
-    () => linkCandidates(allNotes, form.links, note?.noteId),
-    [allNotes, form.links, note?.noteId],
-  )
+  const linked = useMemo(() => parseNoteLinkTitles(form.content), [form.content])
 
   const update = (field, value) => {
     setForm((previous) => ({ ...previous, [field]: value }))
-  }
-
-  const addPickedLink = () => {
-    if (!pick) return
-    update('links', addLink(form.links, pick))
-    setPick('')
   }
 
   const submit = async (event) => {
@@ -248,8 +244,9 @@ function NoteEditor({ note, allNotes, onSave, onCancel }) {
         </p>
         <h3>{note ? noteTitle(note) : 'Write a note'}</h3>
         <p>
-          Notes are Markdown and stored in PostgreSQL. Linking a note records a
-          direction, so the other note shows it as a backlink.
+          Notes are Markdown and stored in PostgreSQL. Write another note's
+          title in double brackets, like <code>[[BM25 ranking]]</code>, to link
+          it; that note then shows this one as a backlink.
         </p>
       </header>
 
@@ -271,7 +268,7 @@ function NoteEditor({ note, allNotes, onSave, onCancel }) {
             className="notes-editor__content"
             value={form.content}
             onChange={(event) => update('content', event.target.value)}
-            placeholder="What this note should remember. Markdown works."
+            placeholder="What this note should remember. Markdown works, and [[another note]] links to it."
             rows={14}
             required
           />
@@ -279,52 +276,29 @@ function NoteEditor({ note, allNotes, onSave, onCancel }) {
 
         <div className="config-form__field">
           <span>Links</span>
-          {form.links.length === 0 ? (
-            <p className="notes-editor__hint">No outgoing links.</p>
-          ) : (
+          <p className="notes-editor__hint">
+            Links are read from the content: write a note's title as{' '}
+            <code>[[BM25 ranking]]</code>. A reference to a note that does not
+            exist yet starts working once you write that note.
+          </p>
+          {linked.length > 0 && (
             <div className="note-links__chips">
-              {form.links.map((id) => (
-                <span key={id} className="note-link-chip note-link-chip--editable">
-                  {linkLabel(titles, id)}
-                  <button
-                    type="button"
-                    className="note-link-chip__remove"
-                    aria-label={`Remove link to ${linkLabel(titles, id)}`}
-                    onClick={() => update('links', removeLink(form.links, id))}
+              {linked.map((title) => {
+                const id = resolveTitle(titleIdLookup, title)
+                return (
+                  <span
+                    key={title}
+                    className={`note-link-chip note-link-chip--editable${
+                      id ? '' : ' note-link-chip--missing'
+                    }`}
+                    title={id ? undefined : `No note titled “${title}” yet`}
                   >
-                    ×
-                  </button>
-                </span>
-              ))}
+                    {id ? linkLabel(titles, id) : `[[${title}]]`}
+                  </span>
+                )
+              })}
             </div>
           )}
-          <div className="notes-editor__add-link">
-            <select
-              value={pick}
-              onChange={(event) => setPick(event.target.value)}
-              disabled={candidates.length === 0}
-              aria-label="Note to link to"
-            >
-              <option value="">
-                {candidates.length === 0
-                  ? 'No other notes to link to'
-                  : 'Choose a note to link to…'}
-              </option>
-              {candidates.map((candidate) => (
-                <option key={candidate.noteId} value={candidate.noteId}>
-                  {noteTitle(candidate)}
-                </option>
-              ))}
-            </select>
-            <button
-              type="button"
-              className="button button--quiet"
-              onClick={addPickedLink}
-              disabled={!pick}
-            >
-              Add link
-            </button>
-          </div>
         </div>
 
         {error && <p className="config-form__error">{error}</p>}
@@ -361,6 +335,7 @@ export function NotesPage({ onClose }) {
   const notes = useNotes()
   const [editor, setEditor] = useState(null)
   const titles = useMemo(() => titleLookup(notes.stored), [notes.stored])
+  const titleIdLookup = useMemo(() => titleIds(notes.stored), [notes.stored])
 
   const startNew = () => {
     notes.setQuery('')
@@ -397,8 +372,8 @@ export function NotesPage({ onClose }) {
           <h2>Notes</h2>
           <p>
             Notes are Markdown documents stored in PostgreSQL. Search them by
-            content, link them to each other, and read either direction of a
-            link here.
+            content, and link them by writing another note's title in double
+            brackets: both directions of a link show up here.
           </p>
         </div>
         <div className="list-page__actions">
@@ -444,7 +419,8 @@ export function NotesPage({ onClose }) {
             <NoteEditor
               key={editor.note?.noteId ?? 'new'}
               note={editor.note}
-              allNotes={notes.stored}
+              titles={titles}
+              titleIdLookup={titleIdLookup}
               onSave={saveNote}
               onCancel={() => setEditor(null)}
             />
@@ -452,6 +428,7 @@ export function NotesPage({ onClose }) {
             <NoteDetail
               note={notes.detail}
               titles={titles}
+              titleIdLookup={titleIdLookup}
               onEdit={(note) => setEditor({ note })}
               onDelete={deleteNote}
               onSelect={openNote}

@@ -668,6 +668,11 @@ pre {
   text-underline-offset: 2px;
 }
 
+/* An in-app note reference rendered from `[[Title]]` in a note's Markdown. */
+.markdown a.note-link {
+  text-decoration-style: dashed;
+}
+
 .markdown code {
   padding: 0.12em 0.35em;
   border-radius: 4px;
@@ -2456,18 +2461,10 @@ pre {
   font-size: 0.74rem;
 }
 
-.note-link-chip__remove {
-  padding: 0 0 0 2px;
-  border: 0;
-  background: none;
+/* A `[[Title]]` reference that names no stored note yet. */
+.note-link-chip--missing {
+  border-style: dashed;
   color: var(--muted);
-  cursor: pointer;
-  font-size: 0.85rem;
-  line-height: 1;
-}
-
-.note-link-chip__remove:hover {
-  color: var(--danger);
 }
 
 .config-form .notes-editor__content {
@@ -2480,17 +2477,6 @@ pre {
   margin: 0;
   color: var(--muted);
   font-size: 0.74rem;
-}
-
-.notes-editor__add-link {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-}
-
-.notes-editor__add-link select {
-  flex: 1;
-  min-width: 0;
 }
 
 /* ------------------------------------------------------------- responsive */

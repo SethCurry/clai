@@ -53,8 +53,9 @@ only place that touches the runtime.
     `ns-resolve`, so a referred name is found and `:namespace` is its home.
 - `src/clai/daemon/http.clj` -- `GET /api/namespaces`,
   `GET /api/namespaces/<ns>/vars`, `GET /api/namespaces/<ns>/var?name=`
-  (400 without `name`, 404 for an unknown Var). Path segments are decoded with
-  `codec/url-decode` via `path-namespace`.
+  (400 without `name`, 404 for an unknown Var). The `<ns>` segment arrives
+  percent-decoded from the routing table's captures (see
+  `http-routing.md`).
 - `src/clai/instrument.clj` -- requires `clai.daemon.namespaces` so its
   `:malli/schema`s are collected.
 - `web/src/cljExplorer.js` -- pure helpers: `visibleRows` flattens the lazy

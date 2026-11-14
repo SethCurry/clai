@@ -46,7 +46,8 @@
             [taoensso.telemere :as tel])
   (:import [java.io File]
            [java.time Instant]
-           [java.util Date]))
+           [java.util Date]
+           [java.util.regex Pattern]))
 
 ;; ---------------------------------------------------------------------------
 ;; Schemas
@@ -229,11 +230,6 @@
   `cwd`. Returns nil when `cwd` holds no readable file at that path."
   [cwd request]
   (files/read-file {:root cwd :path (get (query-params request) "path")}))
-
-(defn- update-agent-config-from-request!
-  "Update configuration `config-id` from the JSON request/body `config`."
-  [agent config-id config]
-  (agent/update-agent-config! agent (assoc config :configId (str config-id))))
 
 ;; ---------------------------------------------------------------------------
 ;; WebSocket message handling
@@ -495,72 +491,16 @@
          (reset! conn nil)))}))
 
 ;; ---------------------------------------------------------------------------
-;; HTTP routing
+;; Static file serving
 ;; ---------------------------------------------------------------------------
 
-(def ^:private note-path
-  "Regex matching `/api/notes/<id>`."
-  #"^/api/notes/([^/]+)$")
-
-(def ^:private session-path
-  "Regex matching `/api/sessions/<id>`."
-  #"^/api/sessions/([^/]+)$")
-
-(def ^:private agent-config-path
-  "Regex matching `/api/agent-configs/<id>`."
-  #"^/api/agent-configs/([^/]+)$")
-
-(def ^:private git-repo-path
-  "Regex matching `/api/git-repos/<id>`."
-  #"^/api/git-repos/([^/]+)$")
-
-(def ^:private git-worktree-path
-  "Regex matching `/api/git-worktrees/<id>`."
-  #"^/api/git-worktrees/([^/]+)$")
-
-(def ^:private session-completions-path
-  "Regex matching `/api/sessions/<id>/completions`, the path completion
-  endpoint for a session's working directory."
-  #"^/api/sessions/([^/]+)/completions$")
-
-(def ^:private session-files-path
-  "Regex matching `/api/sessions/<id>/files`, the file explorer's directory
-  listing endpoint. `?path=` names the directory, `/`-terminated so the whole
-  directory is listed."
-  #"^/api/sessions/([^/]+)/files$")
-
-(def ^:private session-file-path
-  "Regex matching `/api/sessions/<id>/file`, the file explorer's preview
-  endpoint. `?path=` names one file, relative to the session's working
-  directory."
-  #"^/api/sessions/([^/]+)/file$")
-
-(def ^:private namespaces-path
-  "The namespace explorer's root listing: every namespace loaded in this JVM."
-  "/api/namespaces")
-
-(def ^:private namespace-vars-path
-  "Regex matching `/api/namespaces/<namespace>/vars`, the namespace explorer's
-  listing of one namespace's public Vars."
-  #"^/api/namespaces/([^/]+)/vars$")
-
-(def ^:private namespace-var-path
-  "Regex matching `/api/namespaces/<namespace>/var?name=<var-name>`, the
-  namespace explorer's detail for one Var."
-  #"^/api/namespaces/([^/]+)/var$")
-
 (def ^:private static-index
-  "The file served for `/` and client-side routes."
+  "The file served for `/` and for client-side routes."
   "index.html")
-
-(defn- path-namespace
-  "The namespace named by the first path segment `pattern` captured in `uri`,
-  percent-decoded."
-  [pattern uri]
-  (codec/url-decode (second (re-matches pattern uri))))
 
 (defn- request-path
   "The path of `request`, without any query string."
+  {:malli/schema [:-> :map :string]}
   [request]
   (or (:path-info request) (:uri request) "/"))
 
@@ -569,6 +509,7 @@
 
   `ring.util.response/file-response` already rejects paths that escape the
   root."
+  {:malli/schema [:-> [:fn #(instance? File %)] :string [:maybe :map]]}
   [root path]
   (when-let [resp (response/file-response path {:root (.getPath ^File root)})]
     (if (response/get-header resp "content-type")
@@ -579,6 +520,7 @@
 
 (defn- static-response
   "Serve the React build, falling back to `index.html` for client-side routes."
+  {:malli/schema [:-> [:fn #(instance? File %)] :string :map]}
   [root uri]
   (let [path (if (= uri "/") static-index (subs uri 1))]
     (or (file-response root path)
@@ -588,257 +530,415 @@
           (file-response root static-index))
         (json-response 404 {:error "Not found"}))))
 
-(defn- route
-  "Dispatch one Ring request to the API, the WebSocket, or the static UI."
-  [state request]
+;; ---------------------------------------------------------------------------
+;; HTTP routing
+;; ---------------------------------------------------------------------------
+
+(def Response
+  "A Ring response, as returned by every route handler."
+  [:map
+   [:status :int]
+   [:headers [:maybe :map]]
+   [:body :any]])
+
+(def RouteContext
+  "What one route handler receives: the daemon [[State]], the Ring `request`,
+  the `agent` it operates on, the path `params` captured by the route template,
+  and the decoded `query` parameters."
+  [:map
+   [:state #'State]
+   [:request :map]
+   [:agent :map]
+   [:params [:map-of :keyword :string]]
+   [:query [:map-of :string :string]]])
+
+(def CrudSpec
+  "How [[crud-routes]] reaches one stored resource.
+
+  `:id` names the path parameter (for example `:noteId`); every function
+  receives the agent first and already-decoded string ids. `:label` is the
+  human name used in 404 messages, and `:list` may filter on the query
+  parameters."
+  [:map
+   [:path :string]
+   [:id keyword?]
+   [:label :string]
+   [:list fn?]
+   [:load fn?]
+   [:create fn?]
+   [:update fn?]
+   [:delete fn?]])
+
+(defn- not-found
+  "A JSON 404 response carrying `message` as its `:error`."
+  {:malli/schema [:-> :string #'Response]}
+  [message]
+  (json-response 404 {:error message}))
+
+(defn- with-json-body
+  "Call `f` with `request`'s decoded JSON body.
+
+  A malformed body, and anything `f` throws while interpreting it, becomes a
+  400 response: that is what an invalid payload or a rejected write means to
+  the caller."
+  {:malli/schema [:-> :map [:=> [:cat :map] :map] :map]}
+  [request f]
+  (try
+    (f (read-json-body request))
+    (catch Throwable e
+      (json-response 400 {:error (util/error-message e)}))))
+
+;; ---------------------------------------------------------------------------
+;; Route handlers
+;; ---------------------------------------------------------------------------
+
+(defn- health-handler
+  "Report the daemon's liveness, model, connection count, and database status."
+  {:malli/schema [:-> #'RouteContext #'Response]}
+  [{:keys [state agent]}]
+  (let [base {:nreplPort   (:nrepl-port state)
+              :provider    (:provider agent)
+              :model       (:model agent)
+              :connections (count @(:connections state))}]
+    (try
+      (json-response 200 (assoc base
+                                :ok true
+                                :sessions (count (list-sessions agent))))
+      (catch Throwable e
+        (json-response 503 (assoc base
+                                  :ok false
+                                  :database "error"
+                                  :error (util/error-message e)))))))
+
+(defn- sessions-handler
+  "List every session, as summaries, for the UI's session picker."
+  {:malli/schema [:-> #'RouteContext #'Response]}
+  [{:keys [agent]}]
+  (json-response 200 {:sessions (list-sessions agent)}))
+
+(defn- create-session-handler
+  "Create a session from the request body's `cwd` and `configId` and return its
+  chat view payload."
+  {:malli/schema [:-> #'RouteContext #'Response]}
+  [{:keys [agent request]}]
+  (with-json-body request
+    (fn [{:keys [cwd configId]}]
+      (let [{:keys [sessionId]} (agent/new-session! agent
+                                                    {:cwd      (some-> cwd str)
+                                                     :configId (some-> configId str)})]
+        (json-response 201 (session-payload agent sessionId))))))
+
+(defn- load-session-handler
+  "Return one session's summary plus the updates a chat view should replay."
+  {:malli/schema [:-> #'RouteContext #'Response]}
+  [{:keys [agent params]}]
+  (let [session-id (:sessionId params)]
+    (if-let [session (session-payload agent session-id)]
+      (json-response 200 session)
+      (not-found (str "No session " session-id)))))
+
+(defn- delete-session-handler
+  "Delete the session named by the route."
+  {:malli/schema [:-> #'RouteContext #'Response]}
+  [{:keys [agent params]}]
+  (let [session-id (:sessionId params)]
+    (agent/delete-session! agent {:sessionId session-id})
+    (json-response 200 {:deleted session-id})))
+
+(defn- with-session-cwd
+  "Call `f` with the working directory of the session named by the route's
+  `:sessionId`, or answer 404 when the session is unknown."
+  {:malli/schema [:-> #'RouteContext [:=> [:cat :string] :map] :map]}
+  [{:keys [agent params]} f]
+  (let [session-id (:sessionId params)]
+    (if-let [cwd (agent/session-cwd! agent {:sessionId session-id})]
+      (f cwd)
+      (not-found (str "No session " session-id)))))
+
+(defn- session-completions-handler
+  "List the path completions offered for a session's working directory."
+  {:malli/schema [:-> #'RouteContext #'Response]}
+  [ctx]
+  (with-session-cwd ctx
+    (fn [cwd]
+      (json-response 200 (completions cwd (:request ctx))))))
+
+(defn- session-files-handler
+  "List one directory inside a session's working directory, dotfiles included."
+  {:malli/schema [:-> #'RouteContext #'Response]}
+  [ctx]
+  (with-session-cwd ctx
+    (fn [cwd]
+      (json-response 200 (directory-listing cwd (:request ctx))))))
+
+(defn- session-file-handler
+  "Preview one file inside a session's working directory."
+  {:malli/schema [:-> #'RouteContext #'Response]}
+  [ctx]
+  (with-session-cwd ctx
+    (fn [cwd]
+      (if-let [file (file-preview cwd (:request ctx))]
+        (json-response 200 file)
+        (not-found "No such file")))))
+
+(defn- plugins-handler
+  "List the installed plugins for the UI's plugin picker."
+  {:malli/schema [:-> #'RouteContext #'Response]}
+  [{:keys [agent]}]
+  (json-response 200 {:plugins (list-plugins agent)}))
+
+(defn- note-search-handler
+  "Search notes by BM25 relevance using the `q` and `limit` query parameters."
+  {:malli/schema [:-> #'RouteContext #'Response]}
+  [{:keys [agent query]}]
+  (let [q     (get query "q")
+        limit (parse-limit (get query "limit"))]
+    (if (str/blank? (str q))
+      (json-response 400 {:error "A search query is required"})
+      (json-response 200 (agent/search-notes! agent {:q q :limit limit})))))
+
+(defn- namespaces-handler
+  "List every namespace loaded in this JVM, for the namespace explorer."
+  {:malli/schema [:-> #'RouteContext #'Response]}
+  [_ctx]
+  (json-response 200 (namespaces/list-namespaces)))
+
+(defn- namespace-vars-handler
+  "List the public Vars of the namespace named by the route."
+  {:malli/schema [:-> #'RouteContext #'Response]}
+  [{:keys [params]}]
+  (json-response 200 (namespaces/namespace-vars (:namespace params))))
+
+(defn- namespace-var-handler
+  "Return one Var's detail, named by the route's namespace and the `name`
+  query parameter."
+  {:malli/schema [:-> #'RouteContext #'Response]}
+  [{:keys [params query]}]
+  (let [namespace-name (:namespace params)
+        var-name       (get query "name")]
+    (if (str/blank? (str var-name))
+      (json-response 400 {:error "A var name is required"})
+      (if-let [detail (namespaces/var-detail namespace-name var-name)]
+        (json-response 200 detail)
+        (not-found (str "No var " namespace-name "/" var-name))))))
+
+;; ---------------------------------------------------------------------------
+;; Route construction
+;; ---------------------------------------------------------------------------
+
+(defn- crud-routes
+  "Build the five conventional REST routes -- list, create, read, update,
+  delete -- for one stored resource described by `spec`.
+
+  This is where the resources' shared shape lives: their paths differ only by
+  base and id parameter, and their 404 messages only by `:label`."
+  {:malli/schema [:-> #'CrudSpec [:vector :map]]}
+  [{:keys [path id label list load create update delete]}]
+  (let [item-path (str path "/:" (name id))
+        missing   (fn [resource-id]
+                    (not-found (str "No " label " " resource-id)))]
+    [{:method   :get
+      :template path
+      :handler  (fn [{:keys [agent query]}]
+                  (json-response 200 (list agent query)))}
+
+     {:method   :post
+      :template path
+      :handler  (fn [{:keys [agent request]}]
+                  (with-json-body request
+                    #(json-response 201 (create agent %))))}
+
+     {:method   :get
+      :template item-path
+      :handler  (fn [{:keys [agent params]}]
+                  (let [resource-id (get params id)]
+                    (if-let [resource (load agent resource-id)]
+                      (json-response 200 resource)
+                      (missing resource-id))))}
+
+     {:method   :put
+      :template item-path
+      :handler  (fn [{:keys [agent params request]}]
+                  (let [resource-id (get params id)]
+                    (with-json-body request
+                      #(if-let [resource (update agent resource-id %)]
+                         (json-response 200 resource)
+                         (missing resource-id)))))}
+
+     {:method   :delete
+      :template item-path
+      :handler  (fn [{:keys [agent params]}]
+                  (let [resource-id (get params id)]
+                    (if (delete agent resource-id)
+                      (json-response 200 {:deleted resource-id})
+                      (missing resource-id))))}]))
+
+(defn- compile-route
+  "Turn `route`'s `:template` into a `:regex` plus the keyword `:params` it
+  captures.
+
+  A template is a path like `/api/notes/:noteId`, where a `:name` segment
+  captures exactly one (percent-encoded) path segment."
+  {:malli/schema [:-> :map :map]}
+  [route]
+  (let [segments  (remove str/blank? (str/split (:template route) #"/"))
+        capture?  (fn [segment] (str/starts-with? segment ":"))
+        regex     (str "^"
+                       (str/join "" (map (fn [segment]
+                                           (str "/"
+                                                (if (capture? segment)
+                                                  "([^/]+)"
+                                                  (Pattern/quote segment))))
+                                         segments))
+                       "$")]
+    (assoc route
+           :regex  (re-pattern regex)
+           :params (into [] (comp (filter capture?)
+                                  (map #(keyword (subs % 1))))
+                         segments))))
+
+(defn- find-route
+  "The first route in `routes` that matches `request`, as `[route params]`,
+  with the path captures percent-decoded. Nil when nothing matches."
+  {:malli/schema [:-> [:vector :map] :map
+                  [:maybe [:tuple :map [:map-of :keyword :string]]]]}
+  [routes request]
   (let [method (:request-method request)
-        uri    (request-path request)
-        agent  (:agent state)]
+        path   (request-path request)]
+    (some (fn [{:keys [regex params] :as route}]
+            (when-let [captures (and (= method (:method route))
+                                     (re-matches regex path))]
+              [route (zipmap params (map codec/url-decode (rest captures)))]))
+          routes)))
+
+(def ^:private agent-config-spec
+  "How the API stores agent configurations."
+  {:path   "/api/agent-configs"
+   :id     :configId
+   :label  "agent configuration"
+   :list   (fn [agent _query] {:configs (list-agent-configs agent)})
+   :load   (fn [agent config-id]
+             (agent/load-agent-config! agent {:configId config-id}))
+   :create (fn [agent config]
+             (agent/create-agent-config! agent config))
+   :update (fn [agent config-id config]
+             (agent/update-agent-config! agent (assoc config :configId config-id)))
+   :delete (fn [agent config-id]
+             (agent/delete-agent-config! agent {:configId config-id}))})
+
+(def ^:private git-repo-spec
+  "How the API stores git repositories."
+  {:path   "/api/git-repos"
+   :id     :repoId
+   :label  "git repository"
+   :list   (fn [agent _query] (agent/list-git-repos! agent {}))
+   :load   (fn [agent repo-id] (agent/load-git-repo! agent {:repoId repo-id}))
+   :create (fn [agent repo] (agent/create-git-repo! agent repo))
+   :update (fn [agent repo-id repo]
+             (agent/update-git-repo! agent (assoc repo :repoId repo-id)))
+   :delete (fn [agent repo-id] (agent/delete-git-repo! agent {:repoId repo-id}))})
+
+(def ^:private git-worktree-spec
+  "How the API stores git worktrees. The listing filters on `?repoId=`."
+  {:path   "/api/git-worktrees"
+   :id     :worktreeId
+   :label  "git worktree"
+   :list   (fn [agent query]
+             (agent/list-git-worktrees! agent {:repoId (get query "repoId")}))
+   :load   (fn [agent worktree-id]
+             (agent/load-git-worktree! agent {:worktreeId worktree-id}))
+   :create (fn [agent worktree] (agent/create-git-worktree! agent worktree))
+   :update (fn [agent worktree-id worktree]
+             (agent/update-git-worktree! agent
+                                        (assoc worktree :worktreeId worktree-id)))
+   :delete (fn [agent worktree-id]
+             (agent/delete-git-worktree! agent {:worktreeId worktree-id}))})
+
+(def ^:private note-spec
+  "How the API stores notes. The search route lives in [[special-routes]]
+  instead, because it must be matched before `/api/notes/:noteId`."
+  {:path   "/api/notes"
+   :id     :noteId
+   :label  "note"
+   :list   (fn [agent _query] (agent/list-notes! agent {}))
+   :load   (fn [agent note-id] (agent/load-note! agent {:noteId note-id}))
+   :create (fn [agent note] (agent/create-note! agent note))
+   :update (fn [agent note-id note]
+             (agent/update-note! agent (assoc note :noteId note-id)))
+   :delete (fn [agent note-id] (agent/delete-note! agent {:noteId note-id}))})
+
+(def ^:private special-routes
+  "The API routes that do not fit the CRUD shape [[crud-routes]] builds.
+
+  They are listed before the generated resource routes, because the templates
+  that capture a path segment would otherwise swallow a literal path
+  (`/api/notes/search`) or a deeper route (`/api/sessions/:sessionId/files`)."
+  [{:method :get :template "/api/health" :handler health-handler}
+   {:method :get :template "/api/sessions" :handler sessions-handler}
+   {:method :post :template "/api/sessions" :handler create-session-handler}
+   {:method :get :template "/api/sessions/:sessionId/completions" :handler session-completions-handler}
+   {:method :get :template "/api/sessions/:sessionId/files" :handler session-files-handler}
+   {:method :get :template "/api/sessions/:sessionId/file" :handler session-file-handler}
+   {:method :get :template "/api/sessions/:sessionId" :handler load-session-handler}
+   {:method :delete :template "/api/sessions/:sessionId" :handler delete-session-handler}
+   {:method :get :template "/api/plugins" :handler plugins-handler}
+   {:method :get :template "/api/notes/search" :handler note-search-handler}
+   {:method :get :template "/api/namespaces" :handler namespaces-handler}
+   {:method :get :template "/api/namespaces/:namespace/vars" :handler namespace-vars-handler}
+   {:method :get :template "/api/namespaces/:namespace/var" :handler namespace-var-handler}])
+
+(def ^:private api-routes
+  "The JSON API's routing table, first match wins. Literal paths and deeper
+  templates come first so a capture template cannot swallow them."
+  (into (mapv compile-route special-routes)
+        (comp (mapcat crud-routes) (map compile-route))
+        [agent-config-spec
+         git-repo-spec
+         git-worktree-spec
+         note-spec]))
+
+(defn- websocket-response
+  "Upgrade `request` to a WebSocket listener, refusing browser origins outside
+  loopback."
+  {:malli/schema [:-> #'State :map :map]}
+  [state request]
+  (if (loopback-origin? request)
+    {::ws/listener (make-listener state)}
+    (json-response 403 {:error "WebSocket origin is not allowed"})))
+
+(defn- fallback-response
+  "Answer a path no route claimed: a JSON 404 under `/api/`, otherwise the
+  static React build (or its 404)."
+  {:malli/schema [:-> #'State :map :map]}
+  [state request]
+  (let [uri (request-path request)]
+    (if (str/starts-with? uri "/api/")
+      (json-response 404 {:error (str "No route for "
+                                      (:request-method request) " " uri)})
+      (static-response (:root state) uri))))
+
+(defn- route
+  "Dispatch one Ring request to the WebSocket, the API routing table, or the
+  static UI."
+  {:malli/schema [:-> #'State :map :map]}
+  [state request]
+  (let [uri (request-path request)]
     (cond
       (and (= uri "/ws") (ws/upgrade-request? request))
-      (if (loopback-origin? request)
-        {::ws/listener (make-listener state)}
-        (json-response 403 {:error "WebSocket origin is not allowed"}))
+      (websocket-response state request)
 
-      (and (= uri "/ws") (= method :get))
+      (and (= uri "/ws") (= :get (:request-method request)))
       (json-response 400 {:error "Expected a WebSocket upgrade"})
 
-      (and (= method :get) (= uri "/api/health"))
-      (let [base {:nreplPort   (:nrepl-port state)
-                  :provider    (:provider agent)
-                  :model       (:model agent)
-                  :connections (count @(:connections state))}]
-        (try
-          (json-response 200 (assoc base
-                                    :ok true
-                                    :sessions (count (list-sessions agent))))
-          (catch Throwable e
-            (json-response 503 (assoc base
-                                      :ok false
-                                      :database "error"
-                                      :error (util/error-message e))))))
-
-      (and (= method :get) (= uri "/api/sessions"))
-      (json-response 200 {:sessions (list-sessions agent)})
-
-      (and (= method :get) (= uri "/api/agent-configs"))
-      (json-response 200 {:configs (list-agent-configs agent)})
-
-      (and (= method :get) (= uri "/api/plugins"))
-      (json-response 200 {:plugins (list-plugins agent)})
-
-      (and (= method :get) (re-matches agent-config-path uri))
-      (let [config-id (second (re-matches agent-config-path uri))]
-        (if-let [config (agent/load-agent-config! agent {:configId config-id})]
-          (json-response 200 config)
-          (json-response 404 {:error (str "No agent configuration " config-id)})))
-
-      (and (= method :post) (= uri "/api/agent-configs"))
-      (try
-        (let [config (read-json-body request)]
-          (json-response 201 (agent/create-agent-config! agent config)))
-        (catch Throwable e
-          (json-response 400 {:error (util/error-message e)})))
-
-      (and (= method :put) (re-matches agent-config-path uri))
-      (let [config-id (second (re-matches agent-config-path uri))]
-        (try
-          (let [config (read-json-body request)]
-            (if-let [updated (update-agent-config-from-request!
-                              agent config-id config)]
-              (json-response 200 updated)
-              (json-response 404
-                             {:error (str "No agent configuration " config-id)})))
-          (catch Throwable e
-            (json-response 400 {:error (util/error-message e)}))))
-
-      (and (= method :delete) (re-matches agent-config-path uri))
-      (let [config-id (second (re-matches agent-config-path uri))]
-        (if (agent/delete-agent-config! agent {:configId config-id})
-          (json-response 200 {:deleted config-id})
-          (json-response 404
-                         {:error (str "No agent configuration " config-id)})))
-
-      (and (= method :get) (= uri "/api/git-repos"))
-      (json-response 200 (agent/list-git-repos! agent {}))
-
-      (and (= method :post) (= uri "/api/git-repos"))
-      (try
-        (json-response 201
-                       (agent/create-git-repo! agent (read-json-body request)))
-        (catch Throwable e
-          (json-response 400 {:error (util/error-message e)})))
-
-      (and (= method :get) (re-matches git-repo-path uri))
-      (let [repo-id (codec/url-decode (second (re-matches git-repo-path uri)))]
-        (if-let [repo (agent/load-git-repo! agent {:repoId repo-id})]
-          (json-response 200 repo)
-          (json-response 404 {:error (str "No git repository " repo-id)})))
-
-      (and (= method :put) (re-matches git-repo-path uri))
-      (let [repo-id (codec/url-decode (second (re-matches git-repo-path uri)))]
-        (try
-          (if-let [updated (agent/update-git-repo!
-                            agent (assoc (read-json-body request)
-                                         :repoId repo-id))]
-            (json-response 200 updated)
-            (json-response 404 {:error (str "No git repository " repo-id)}))
-          (catch Throwable e
-            (json-response 400 {:error (util/error-message e)}))))
-
-      (and (= method :delete) (re-matches git-repo-path uri))
-      (let [repo-id (codec/url-decode (second (re-matches git-repo-path uri)))]
-        (if (agent/delete-git-repo! agent {:repoId repo-id})
-          (json-response 200 {:deleted repo-id})
-          (json-response 404 {:error (str "No git repository " repo-id)})))
-
-      (and (= method :get) (= uri "/api/git-worktrees"))
-      (json-response 200
-                     (agent/list-git-worktrees!
-                      agent {:repoId (get (query-params request) "repoId")}))
-
-      (and (= method :post) (= uri "/api/git-worktrees"))
-      (try
-        (json-response 201
-                       (agent/create-git-worktree! agent (read-json-body request)))
-        (catch Throwable e
-          (json-response 400 {:error (util/error-message e)})))
-
-      (and (= method :get) (re-matches git-worktree-path uri))
-      (let [worktree-id (codec/url-decode
-                         (second (re-matches git-worktree-path uri)))]
-        (if-let [worktree (agent/load-git-worktree! agent
-                                                    {:worktreeId worktree-id})]
-          (json-response 200 worktree)
-          (json-response 404 {:error (str "No git worktree " worktree-id)})))
-
-      (and (= method :put) (re-matches git-worktree-path uri))
-      (let [worktree-id (codec/url-decode
-                         (second (re-matches git-worktree-path uri)))]
-        (try
-          (if-let [updated (agent/update-git-worktree!
-                            agent (assoc (read-json-body request)
-                                         :worktreeId worktree-id))]
-            (json-response 200 updated)
-            (json-response 404 {:error (str "No git worktree " worktree-id)}))
-          (catch Throwable e
-            (json-response 400 {:error (util/error-message e)}))))
-
-      (and (= method :delete) (re-matches git-worktree-path uri))
-      (let [worktree-id (codec/url-decode
-                         (second (re-matches git-worktree-path uri)))]
-        (if (agent/delete-git-worktree! agent {:worktreeId worktree-id})
-          (json-response 200 {:deleted worktree-id})
-          (json-response 404 {:error (str "No git worktree " worktree-id)})))
-
-      (and (= method :get) (= uri "/api/notes"))
-      (json-response 200 (agent/list-notes! agent {}))
-
-      (and (= method :post) (= uri "/api/notes"))
-      (try
-        (json-response 201 (agent/create-note! agent (read-json-body request)))
-        (catch Throwable e
-          (json-response 400 {:error (util/error-message e)})))
-
-      ;; Before `note-path`, which would otherwise read "search" as an id.
-      (and (= method :get) (= uri "/api/notes/search"))
-      (let [{:strs [q limit]} (query-params request)]
-        (if (str/blank? (str q))
-          (json-response 400 {:error "A search query is required"})
-          (json-response 200 (agent/search-notes! agent
-                                                  {:q     q
-                                                   :limit (parse-limit limit)}))))
-
-      (and (= method :get) (re-matches note-path uri))
-      (let [note-id (codec/url-decode (second (re-matches note-path uri)))]
-        (if-let [note (agent/load-note! agent {:noteId note-id})]
-          (json-response 200 note)
-          (json-response 404 {:error (str "No note " note-id)})))
-
-      (and (= method :put) (re-matches note-path uri))
-      (let [note-id (codec/url-decode (second (re-matches note-path uri)))]
-        (try
-          (if-let [updated (agent/update-note!
-                            agent (assoc (read-json-body request)
-                                         :noteId note-id))]
-            (json-response 200 updated)
-            (json-response 404 {:error (str "No note " note-id)}))
-          (catch Throwable e
-            (json-response 400 {:error (util/error-message e)}))))
-
-      (and (= method :delete) (re-matches note-path uri))
-      (let [note-id (codec/url-decode (second (re-matches note-path uri)))]
-        (if (agent/delete-note! agent {:noteId note-id})
-          (json-response 200 {:deleted note-id})
-          (json-response 404 {:error (str "No note " note-id)})))
-
-      (and (= method :post) (= uri "/api/sessions"))
-      (try
-        (let [{:keys [cwd configId]} (read-json-body request)
-              {:keys [sessionId]} (agent/new-session! agent
-                                                      {:cwd      (some-> cwd str)
-                                                       :configId (some-> configId str)})]
-          (json-response 201 (session-payload agent sessionId)))
-        (catch Throwable e
-          (json-response 400 {:error (util/error-message e)})))
-
-      (and (= method :get) (= uri namespaces-path))
-      (json-response 200 (namespaces/list-namespaces))
-
-      (and (= method :get) (re-matches namespace-vars-path uri))
-      (json-response 200
-                     (namespaces/namespace-vars
-                      (path-namespace namespace-vars-path uri)))
-
-      (and (= method :get) (re-matches namespace-var-path uri))
-      (let [namespace-name (path-namespace namespace-var-path uri)
-            var-name       (get (query-params request) "name")]
-        (cond
-          (str/blank? (str var-name))
-          (json-response 400 {:error "A var name is required"})
-
-          :else
-          (if-let [detail (namespaces/var-detail namespace-name var-name)]
-            (json-response 200 detail)
-            (json-response 404
-                           {:error (str "No var " namespace-name "/" var-name)}))))
-
-      (and (= method :get) (re-matches session-completions-path uri))
-      (let [session-id (second (re-matches session-completions-path uri))]
-        (if-let [cwd (agent/session-cwd! agent {:sessionId session-id})]
-          (json-response 200 (completions cwd request))
-          (json-response 404 {:error (str "No session " session-id)})))
-
-      (and (= method :get) (re-matches session-files-path uri))
-      (let [session-id (second (re-matches session-files-path uri))]
-        (if-let [cwd (agent/session-cwd! agent {:sessionId session-id})]
-          (json-response 200 (directory-listing cwd request))
-          (json-response 404 {:error (str "No session " session-id)})))
-
-      (and (= method :get) (re-matches session-file-path uri))
-      (let [session-id (second (re-matches session-file-path uri))]
-        (if-let [cwd (agent/session-cwd! agent {:sessionId session-id})]
-          (if-let [file (file-preview cwd request)]
-            (json-response 200 file)
-            (json-response 404 {:error "No such file"}))
-          (json-response 404 {:error (str "No session " session-id)})))
-
-      (and (= method :get) (re-matches session-path uri))
-      (let [session-id (second (re-matches session-path uri))]
-        (if-let [session (session-payload agent session-id)]
-          (json-response 200 session)
-          (json-response 404 {:error (str "No session " session-id)})))
-
-      (and (= method :delete) (re-matches session-path uri))
-      (let [session-id (second (re-matches session-path uri))]
-        (agent/delete-session! agent {:sessionId session-id})
-        (json-response 200 {:deleted session-id}))
-
-      (str/starts-with? uri "/api/")
-      (json-response 404 {:error (str "No route for " method " " uri)})
-
       :else
-      (static-response (:root state) uri))))
+      (let [[route params] (find-route api-routes request)]
+        (if route
+          ((:handler route) {:state   state
+                             :request request
+                             :agent   (:agent state)
+                             :params  params
+                             :query   (query-params request)})
+          (fallback-response state request))))))
 
 (defn handler
   "Build the Ring handler for `state`.
@@ -853,9 +953,9 @@
       ;; ordinary HTTP responses, so they are returned unchanged.
       (route state request)
       (catch Throwable e
-        (tel/error! {:id ::request-failed
+        (tel/error! {:id   ::request-failed
                      :data {:method (:request-method request)
-                            :uri (request-path request)}}
+                            :uri    (request-path request)}}
                     e)
         (json-response 500 {:error (util/error-message e)})))))
 

@@ -2,31 +2,23 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import {
   EMPTY_NOTE_FORM,
-  addLink,
   formToNoteInput,
-  linkCandidates,
   linkLabel,
   noteId,
   notePreview,
   noteTitle,
   noteToForm,
-  normalizeLinks,
-  removeLink,
+  resolveTitle,
   sortNotes,
+  titleIds,
   titleLookup,
 } from './notes.js'
 
-test('normalizeLinks trims, drops blanks, and de-duplicates as strings', () => {
-  assert.deepEqual(normalizeLinks([' 2 ', 2, '', null, '1', '  ']), ['2', '1'])
-  assert.deepEqual(normalizeLinks(undefined), [])
-  assert.deepEqual(normalizeLinks('1'), [])
-})
-
-test('noteToForm round-trips a loaded note', () => {
+test('noteToForm keeps only the fields the editor shows', () => {
   const stored = {
     noteId: '7',
     title: 'BM25',
-    content: 'Notes are ranked by BM25.',
+    content: 'Notes are ranked by BM25, see [[Links]].',
     links: ['2'],
     backlinks: ['9'],
     createdAt: '2024-01-02T03:04:05Z',
@@ -34,39 +26,28 @@ test('noteToForm round-trips a loaded note', () => {
   }
   assert.deepEqual(noteToForm(stored), {
     title: 'BM25',
-    content: 'Notes are ranked by BM25.',
-    links: ['2'],
+    content: 'Notes are ranked by BM25, see [[Links]].',
   })
   assert.deepEqual(noteToForm(null), EMPTY_NOTE_FORM)
 })
 
-test('formToNoteInput trims the title and content and keeps the links', () => {
+test('formToNoteInput trims the title and content', () => {
   assert.deepEqual(
     formToNoteInput({
       title: '  BM25  ',
       content: '\n Notes are ranked. \n',
-      links: ['3', '3'],
     }),
-    { title: 'BM25', content: 'Notes are ranked.', links: ['3'] },
+    { title: 'BM25', content: 'Notes are ranked.' },
   )
 })
 
-test('formToNoteInput requires a title and content and always returns links', () => {
+test('formToNoteInput requires a title and content', () => {
   assert.throws(() => formToNoteInput({ title: '  ', content: 'x' }), {
     message: 'A note title is required.',
   })
   assert.throws(() => formToNoteInput({ title: 'x', content: ' \n ' }), {
     message: 'Note content is required.',
   })
-  assert.deepEqual(formToNoteInput({ title: 'x', content: 'y' }).links, [])
-})
-
-test('addLink adds once and removeLink drops only that link', () => {
-  assert.deepEqual(addLink(['1'], '2'), ['1', '2'])
-  assert.deepEqual(addLink(['1'], 1), ['1'])
-  assert.deepEqual(addLink(['1'], ''), ['1'])
-  assert.deepEqual(removeLink(['1', '2'], 1), ['2'])
-  assert.deepEqual(removeLink(['1'], '5'), ['1'])
 })
 
 test('notePreview collapses whitespace and ellipsizes long content', () => {
@@ -113,19 +94,16 @@ test('titleLookup and linkLabel resolve ids to titles with a fallback', () => {
   assert.equal(linkLabel(titleLookup([]), '5'), 'Note #5')
 })
 
-test('linkCandidates excludes the note itself and its current links', () => {
-  const notes = [
-    { noteId: '1', title: 'Zeta' },
-    { noteId: '2', title: 'alpha' },
-    { noteId: '3', title: 'Middle' },
+test('titleIds and resolveTitle resolve a [[Title]] reference like storage', () => {
+  const ids = titleIds([
+    { noteId: '1', title: 'BM25 ranking' },
+    { noteId: '2', title: 'Links' },
     { title: 'no id' },
-  ]
-  assert.deepEqual(
-    linkCandidates(notes, ['3'], '1').map((note) => note.noteId),
-    ['2'],
-  )
-  assert.deepEqual(
-    linkCandidates(notes, [], null).map((note) => note.noteId),
-    ['2', '3', '1'],
-  )
+  ])
+  assert.equal(resolveTitle(ids, 'BM25 ranking'), '1')
+  assert.equal(resolveTitle(ids, '  bm25 RANKING '), '1')
+  assert.equal(resolveTitle(ids, 'Links'), '2')
+  assert.equal(resolveTitle(ids, 'missing'), null)
+  assert.equal(resolveTitle(ids, '  '), null)
+  assert.equal(resolveTitle(ids, null), null)
 })

@@ -555,7 +555,8 @@
 
 (defn create-note!
   "Store a new note and return it with its links. `note` holds a mandatory
-  `:title` and `:content`, and optionally the `:links` it points at."
+  `:title` and `:content`; the content references other notes by title, as in
+  `[[BM25 ranking]]`, and the returned note resolves those references."
   {:malli/schema [:-> :map #'notes/NoteInput #'notes/NoteDetail]}
   [agent note]
   (let [saved (notes/create-note (:postgres agent) note)]
@@ -567,14 +568,13 @@
     saved))
 
 (defn update-note!
-  "Replace the title, content, and links of `opts`'s `:noteId` and return the
-  updated note, or nil when no such note is stored."
+  "Replace the title and content of `opts`'s `:noteId` and return the updated
+  note with its re-resolved links, or nil when no such note is stored."
   {:malli/schema [:-> :map [:map
                             [:noteId {:optional true}
                              [:maybe [:or :string :int]]]
                             [:title :string]
-                            [:content :string]
-                            [:links {:optional true} [:maybe [:vector :any]]]]
+                            [:content :string]]
                   [:maybe #'notes/NoteDetail]]}
   [agent {:keys [noteId] :as note}]
   (when-not (str/blank? (str noteId))
@@ -589,8 +589,8 @@
       updated)))
 
 (defn delete-note!
-  "Delete the note named by `opts`'s `:noteId`, along with the links that
-  point at it. Returns true when a note was deleted."
+  "Delete the note named by `opts`'s `:noteId`. Returns true when a note was
+  deleted."
   {:malli/schema [:-> :map [:map
                             [:noteId {:optional true}
                              [:maybe [:or :string :int]]]]

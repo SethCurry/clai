@@ -1,24 +1,37 @@
 # Notes
 
-`clai` stores notes in PostgreSQL: a note is a titled document with a mandatory
-`title` and `content`, and notes can link to each other directionally. Note
-content is indexed for full-text search, so a note can be found by what it says
-rather than only by its id.
+`clai` stores notes in PostgreSQL: a note is a titled Markdown document with a
+mandatory `title` and `content`. Note content is indexed for full-text search,
+so a note can be found by what it says rather than only by its id.
 
-The tables are created by the DDL in [`schema/schema.sql`](../schema/schema.sql),
+Notes link to each other by writing the other note's title in double square
+brackets:
+
+```markdown
+Notes are ranked by [[BM25 ranking]]; see also [[pg_textsearch]].
+```
+
+A title is therefore how notes address each other, and it is unique across the
+store. Titles are compared case-insensitively and ignoring surrounding space,
+so `[[bm25 ranking]]` and `[[BM25 ranking]]` name the same note. Creating or
+renaming a note to a title another note already uses is rejected.
+
+Links are not stored separately. They are read back out of the content every
+time a note is loaded, which means a link always matches the text, a link to a
+note that does not exist yet works as soon as that note is written, and
+deleting a note needs no link cleanup.
+
+The table is created by the DDL in [`schema/schema.sql`](../schema/schema.sql),
 which `clai.daemon.postgres/ensure-schema!` applies (and which `docker compose
 up` applies through its one-shot `schema` service).
 
-| Table       | Columns                                                            |
-| ----------- | ------------------------------------------------------------------ |
-| `note`      | `id`, `title`, `content`, `created_at`, `updated_at`               |
-| `note_link` | `from_note_id`, `to_note_id`, `created_at`                         |
+| Table  | Columns                                              |
+| ------ | ---------------------------------------------------- |
+| `note` | `id`, `title`, `content`, `created_at`, `updated_at` |
 
-`note_link` points from `from_note_id` to `to_note_id`, so a link has a
-direction: "note 1 cites note 2" is not the same row as "note 2 cites note 1".
-The pair is the table's primary key (a note cannot link to the same note
-twice), both columns are foreign keys to `note(id)` with `ON DELETE CASCADE`,
-and deleting a note therefore deletes the links that point at it.
+`schema/schema.sql` also creates `note_title_unique_idx`, the unique index over
+`lower(trim(title))` that keeps titles addressable, and `note_content_bm25_idx`,
+the search index described below.
 
 ## Search
 
@@ -45,22 +58,25 @@ left and the open note on the right.
   `/api/notes/search`, so matches come back ranked by relevance rather than
   filtered by hand; an empty field shows the whole list again, newest edit
   first. The count under the field says how many notes matched.
-- **Read** — click a note in the list. The right-hand pane renders its Markdown
-  and lists its **Links** (notes it points at) and **Backlinks** (notes that
-  point at it). Each chip opens that note, so you can follow links in either
-  direction.
-- **Create** — **+ New note** opens an editor for the title, the Markdown
-  content, and the outgoing links. Links are picked from a list of the stored
-  notes, and the chips can be removed again before saving.
+- **Read** — click a note in the list. The right-hand pane renders its Markdown.
+  A `[[Title]]` reference whose note exists becomes a link you can click; one
+  whose note has not been written yet stays as literal text. The **Links** and
+  **Backlinks** sections under the content list the notes this one points at
+  and the notes that point at it, as chips that open the note.
+- **Create** — **+ New note** opens an editor for the title and the Markdown
+  content. There is no link picker: write `[[Another note's title]]` in the
+  content. The **Links** section under the editor previews the references it
+  found, with a dashed chip for a title that does not exist yet.
 - **Edit** — **Edit** on an open note reopens the same editor. Saving replaces
-  the note, including its links, so removing every chip clears its outgoing
-  links.
-- **Delete** — **Delete** asks for confirmation and removes the note along with
-  the links pointing at it.
+  the note, so links follow whatever `[[Title]]` references the new content
+  has.
+- **Delete** — **Delete** asks for confirmation and removes the note. Links to
+  it in other notes simply stop resolving.
 
 `Ctrl`/`Cmd`+`Enter` saves from inside the editor. A blank title or a blank
 content is refused before the request is sent, and the daemon's own validation
-errors appear under the form (and in the banner at the top of the page).
+errors (including a title another note already uses) appear under the form and
+in the banner at the top of the page.
 
 ## In the agent
 
@@ -68,13 +84,13 @@ The chat agent has five built-in tools for the same store. They are
 part of the default tool set, so a conversation can use them without any
 setup beyond the PostgreSQL connection every session already needs:
 
-| Tool           | Arguments                                    | Does                                                      |
-| -------------- | -------------------------------------------- | --------------------------------------------------------- |
-| `notes_list`   | none                                         | list every note, newest edit first, with ids and previews |
-| `notes_search` | `query`, optional `limit` (default 20, max 100) | search note content, BM25-ranked when available        |
-| `notes_read`   | `id`                                         | one note with its content, links, and backlinks           |
-| `notes_update` | `id`, and any of `title`, `content`, `links` | change only the fields given                              |
-| `notes_delete` | `id`                                         | delete the note and the links pointing at it              |
+| Tool           | Arguments                                       | Does                                                      |
+| -------------- | ----------------------------------------------- | --------------------------------------------------------- |
+| `notes_list`   | none                                            | list every note, newest edit first, with ids and previews |
+| `notes_search` | `query`, optional `limit` (default 20, max 100) | search note content, BM25-ranked when available           |
+| `notes_read`   | `id`                                            | one note with its content, links, and backlinks           |
+| `notes_update` | `id`, and either or both of `title`, `content`  | change only the fields given                              |
+| `notes_delete` | `id`                                            | delete the note                                           |
 
 Tool ids are stable, so a `:tools` list in `clai.edn` can name them
 (see [Models and providers](providers.md)):
@@ -89,10 +105,10 @@ between. A session started without storage answers with a clear error
 instead of failing.
 
 `notes_update` is a partial update: it reads the note first and merges the
-fields you give, so renaming a note does not resend its content. `links` is
-an array of note ids and replaces the outgoing links wholesale -- pass `[]`
-to remove them. Titles and content are trimmed, a blank one is rejected, and
-a link to a note that does not exist fails the update.
+fields you give, so renaming a note does not resend its content. Links follow
+from the content, so there is no `links` argument: add, change, or remove a
+`[[Title]]` reference in the content and save. Titles and content are trimmed,
+a blank one is rejected, and a title another note already uses is refused.
 
 `notes_read` cuts content past 20,000 characters with a
 `[truncated at 20000 characters]` marker; the whole note is still stored
@@ -113,8 +129,7 @@ and visible in the web UI. List and search results show a one-line,
 ;;     :links [] :backlinks [] :createdAt "..." :updatedAt "..."}
 
 (def links (notes/create-note client {:title   "Links"
-                                      :content "This note points at the ranking note."
-                                      :links   [(:noteId ranking)]}))
+                                      :content "This note points at [[BM25]]."}))
 ;; => {..., :links ["1"], :backlinks []}
 
 (notes/load-note client (:noteId ranking))
@@ -125,21 +140,20 @@ and visible in the web UI. List and search results show a one-line,
 (notes/search-notes client {:q "ranked" :limit 5})
 ```
 
-Titles and content are trimmed, and a blank one is rejected. `:links` names
-the notes this one links to; it may hold ids as numbers or as strings, and is
-replaced wholesale on update:
+Titles and content are trimmed, and a blank one is rejected. `:links` and
+`:backlinks` are outputs, not inputs: they are the ids resolved from the
+`[[Title]]` references in the content. Updating a note replaces its content and
+so replaces its links:
 
 ```clojure
 (notes/update-note client "1" {:title   "BM25 ranking"
-                               :content "Notes are ranked by BM25 relevance."
-                               :links   ["2"]})
+                               :content "Notes are ranked by BM25; see [[Links]]."})
 
-(notes/delete-note client "1")   ; also deletes the links pointing at note 1
+(notes/delete-note client "1")   ; links to note 1 stop resolving
 ```
 
-Because a link target must be a stored note, linking to a missing id fails and
-rolls the whole update back. Updating a note without `:links` leaves it with no
-outgoing links, since the note is replaced as a whole.
+A reference to a title with no note is simply left unresolved, which is how a
+link can be written before its target exists.
 
 ## HTTP API
 
@@ -152,12 +166,12 @@ same operations as JSON under `/api/notes`:
 | `POST`   | `/api/notes`                        | create a note                            |
 | `GET`    | `/api/notes/<id>`                   | read one note with its links/backlinks   |
 | `PUT`    | `/api/notes/<id>`                   | replace a note                           |
-| `DELETE` | `/api/notes/<id>`                   | delete a note and its incoming links     |
+| `DELETE` | `/api/notes/<id>`                   | delete a note                            |
 | `GET`    | `/api/notes/search?q=<text>&limit=<n>` | search notes by relevance             |
 
 The list and search responses wrap their results in a `notes` key; single-note
-responses are the note itself. `POST` and `PUT` take a JSON body with `title`,
-`content`, and an optional `links` array.
+responses are the note itself. `POST` and `PUT` take a JSON body with `title`
+and `content`; links are whatever `[[Title]]` references the content has.
 
 ```sh
 # create
@@ -168,10 +182,10 @@ curl -s -X POST localhost:8080/api/notes \
 # read
 curl -s localhost:8080/api/notes/1
 
-# update (links replace the note's outgoing links)
+# update (links follow the content, so this points at note 1)
 curl -s -X PUT localhost:8080/api/notes/2 \
   -H 'content-type: application/json' \
-  -d '{"title": "Links", "content": "Points at BM25.", "links": ["1"]}'
+  -d '{"title": "Links", "content": "Points at [[BM25]]."}'
 
 # search
 curl -s 'localhost:8080/api/notes/search?q=ranked&limit=5'
@@ -180,6 +194,6 @@ curl -s 'localhost:8080/api/notes/search?q=ranked&limit=5'
 curl -s -X DELETE localhost:8080/api/notes/2
 ```
 
-A missing note answers `404`, and a rejected body (blank title or content, a
-link to a note that does not exist, a blank `q`) answers `400` with an `error`
+A missing note answers `404`, and a rejected body (a blank title or content, a
+title another note already uses, a blank `q`) answers `400` with an `error`
 message.

@@ -46,7 +46,8 @@ its nice for a user to use from the REPL.
 | Web namespace explorer      | ./web/src/components/ClojureExplorer.jsx |
 | Web notes page (view, search, create, edit) | ./web/src/components/NotesPage.jsx |
 | Web notes state + API calls | ./web/src/useNotes.js                    |
-| Web note form/link helpers + tests | ./web/src/notes.js, ./web/src/notes.test.js |
+| Web note form/validation helpers + tests | ./web/src/notes.js, ./web/src/notes.test.js |
+| Web `[[Title]]` link parsing + Markdown rendering | ./web/src/noteLinks.js, ./web/src/noteLinks.test.js, ./web/src/components/Markdown.jsx |
 | Web shared date formatting  | ./web/src/format.js                      |
 
 Make sure to maintain files like this that list major file and subdirectories and what they contain.

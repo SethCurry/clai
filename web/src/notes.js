@@ -1,12 +1,15 @@
 /**
  * Shape, validate, and sort notes for the web UI's notes page. Keeping this
- * separate from the components makes the trimming and link rules testable
+ * separate from the components makes the trimming and title rules testable
  * without a DOM, and keeps them in step with
  * `clai.daemon.postgres.notes/prepare-note`.
+ *
+ * Notes link to each other through `[[Title]]` references in their Markdown
+ * content (see `noteLinks.js`), so a note form holds only a title and content.
  */
 
 /** The values a blank note editor starts from. */
-export const EMPTY_NOTE_FORM = { title: '', content: '', links: [] }
+export const EMPTY_NOTE_FORM = { title: '', content: '' }
 
 /** Longest preview a note card shows before it is cut with an ellipsis. */
 export const PREVIEW_LENGTH = 140
@@ -41,64 +44,27 @@ export function notePreview(content, maxLength = PREVIEW_LENGTH) {
 }
 
 /**
- * Trim and de-duplicate a link list, keeping the order the ids were given in.
- * Ids are compared as strings because the API exposes note ids as strings
- * whether or not the JSON body sent them as numbers.
- */
-export function normalizeLinks(links) {
-  const seen = new Set()
-  const result = []
-  for (const link of Array.isArray(links) ? links : []) {
-    const id = String(link ?? '').trim()
-    if (!id || seen.has(id)) continue
-    seen.add(id)
-    result.push(id)
-  }
-  return result
-}
-
-/**
  * Turn a loaded note into editable form values. Only the fields the form shows
- * are kept; the daemon fills in timestamps and backlinks.
+ * are kept; the daemon fills in timestamps, links, and backlinks.
  */
 export function noteToForm(note) {
   return {
     title: note?.title ?? '',
     content: note?.content ?? '',
-    links: normalizeLinks(note?.links),
   }
 }
 
 /**
  * Trim and validate a note form. The title and content are both mandatory, and
  * the daemon re-checks the same rules, but rejecting blanks here gives
- * immediate feedback. `links` always comes back as an array, because a note
- * saved without links must replace its outgoing links with nothing.
+ * immediate feedback.
  */
 export function formToNoteInput(form) {
   const title = String(form.title ?? '').trim()
   const content = String(form.content ?? '').trim()
   if (!title) throw new Error('A note title is required.')
   if (!content) throw new Error('Note content is required.')
-  return { title, content, links: normalizeLinks(form.links) }
-}
-
-/**
- * Add `id` to `links` unless it is already there.
- */
-export function addLink(links, id) {
-  const link = String(id ?? '').trim()
-  const current = normalizeLinks(links)
-  if (!link || current.includes(link)) return current
-  return [...current, link]
-}
-
-/**
- * Drop `id` from `links`, leaving the rest in order.
- */
-export function removeLink(links, id) {
-  const link = String(id ?? '').trim()
-  return normalizeLinks(links).filter((current) => current !== link)
+  return { title, content }
 }
 
 /** A note's update time in milliseconds, with a missing one sorting oldest. */
@@ -139,25 +105,33 @@ export function titleLookup(notes) {
 }
 
 /**
+ * A lower-cased title -> `noteId` map, the reverse of `titleLookup`, so a
+ * `[[Title]]` reference resolves the way storage resolves it: ignoring case
+ * and surrounding space.
+ */
+export function titleIds(notes) {
+  const ids = new Map()
+  for (const note of notes) {
+    const id = noteId(note)
+    if (id) ids.set(noteTitle(note).toLowerCase(), id)
+  }
+  return ids
+}
+
+/**
+ * The id a `[[Title]]` reference names through `titleIds`, or null when no
+ * stored note has that title.
+ */
+export function resolveTitle(ids, title) {
+  const key = String(title ?? '').trim().toLowerCase()
+  return key ? ids?.get(key) ?? null : null
+}
+
+/**
  * The label for a linked note: its title when the note is in `titles`, and a
  * readable `Note #id` fallback when the list has not loaded it.
  */
 export function linkLabel(titles, id) {
   const key = String(id)
   return titles?.get(key) ?? `Note #${key}`
-}
-
-/**
- * The notes a note's link editor may add: everything except the note being
- * edited, its existing links, and notes without an id, sorted by title.
- */
-export function linkCandidates(notes, links, currentNoteId) {
-  const linked = new Set(normalizeLinks(links))
-  const self = currentNoteId == null ? null : String(currentNoteId)
-  return notes
-    .filter((note) => {
-      const id = noteId(note)
-      return id !== null && id !== self && !linked.has(id)
-    })
-    .sort((a, b) => noteTitle(a).localeCompare(noteTitle(b)))
 }

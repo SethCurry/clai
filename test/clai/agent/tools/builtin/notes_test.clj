@@ -38,7 +38,7 @@
 
 (def ^:private linking-note
   "A second note, so a listing has more than one entry."
-  {:noteId "9" :title "Links" :content "This note points at BM25."})
+  {:noteId "9" :title "Links" :content "This note points at [[BM25]]."})
 
 (def ^:private ranking-detail
   "`ranking-note` as `load-note` returns it, with its links and backlinks."
@@ -55,6 +55,15 @@
   (doseq [tool (vals tools-by-id)]
     (is (malli/validate schema/tool-spec (:spec tool))
         (str (:id tool) " spec should be a valid tool definition"))))
+
+(deftest notes-update-takes-no-links-argument
+  (let [{:keys [description parameters]}
+        (get-in tools-by-id ["notes_update" :spec :function])
+        properties (:properties parameters)]
+    (is (= #{"id" "title" "content"} (set (keys properties)))
+        "links are read from the content, so they need no argument")
+    (is (str/includes? description "[[Note title]]")
+        "the description says how to link notes")))
 
 ;; ---------------------------------------------------------------------------
 ;; Listing and searching
@@ -134,13 +143,12 @@
                     (assoc ranking-detail :title (:title note)))]
       (let [text (handler "notes_update" {:id "12" :title "BM25 ranking"} ctx)]
         (is (= ["12" {:title   "BM25 ranking"
-                      :content "Notes are ranked by BM25."
-                      :links   ["9"]}]
+                      :content "Notes are ranked by BM25."}]
                @seen)
             "the fields that were not given keep their stored value")
         (is (str/starts-with? text "Updated note 12."))))))
 
-(deftest update-notes-normalizes-links
+(deftest update-notes-sends-content-with-its-inline-links
   (let [seen (atom nil)]
     (with-redefs [notes/load-note
                   (fn [_client _id] ranking-detail)
@@ -148,14 +156,16 @@
                   (fn [_client _id note]
                     (reset! seen note)
                     ranking-detail)]
-      (handler "notes_update" {:id "12" :links "9"} ctx)
-      (is (= ["9"] (:links @seen)) "a bare id is wrapped in a vector")
-      (handler "notes_update" {:id "12" :links []} ctx)
-      (is (= [] (:links @seen)) "an empty array removes the links"))))
+      (handler "notes_update"
+               {:id "12" :content "Points at [[Links]]."}
+               ctx)
+      (is (= "Points at [[Links]]." (:content @seen))
+          "the content, and so its links, replaces the stored content")
+      (is (= "BM25" (:title @seen))))))
 
 (deftest update-notes-requires-a-field-to-change
   (is (thrown-with-msg? clojure.lang.ExceptionInfo
-                        #"requires at least one of"
+                        #"requires `title` or `content`"
                         (handler "notes_update" {:id "12"} ctx))))
 
 (deftest update-notes-reports-a-missing-note

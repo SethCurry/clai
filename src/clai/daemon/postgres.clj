@@ -46,8 +46,7 @@
       plugin                       installed Clojure-jar plugins
       git_repo                     registered git repositories
       git_worktree                 worktrees checked out from a repository
-      note                         titled documents, searched with BM25
-      note_link                    directional links between notes
+      note                         titled Markdown documents, searched with BM25
 
   Every statement in that file is idempotent, so applying it on every process
   start (or from the container's `psql` init step) is safe.

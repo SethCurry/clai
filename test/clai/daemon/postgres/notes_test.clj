@@ -6,6 +6,7 @@
   (:require [clai.daemon.postgres :as pg]
             [clai.daemon.postgres.notes :as notes]
             [clai.test-support :refer [instrument quiet-logs]]
+            [clojure.string :as str]
             [clojure.test :refer :all])
   (:import [java.util UUID]))
 
@@ -36,30 +37,54 @@
 (deftest prepare-note-trims-and-validates
   (is (= {:title "Title" :content "Body"}
          (notes/prepare-note {:title "  Title  " :content "  Body  "})))
-  (is (= {:title "Title" :content "Body" :links [7 8]}
-         (notes/prepare-note {:title "Title"
-                              :content "Body"
-                              :links ["7" 8 7]})))
-  (is (= {:title "Title" :content "Body"}
-         (notes/prepare-note {:title "Title" :content "Body" :links nil})))
   (is (= {:title "Title" :content "Body"}
          (notes/prepare-note {:title "Title" :content "Body" :noteId "9"})))
+  (is (= {:title "Title" :content "Body"}
+         (notes/prepare-note {:title "Title" :content "Body" :links ["7"]}))
+      "a leftover links field is ignored, not stored")
   (is (thrown? clojure.lang.ExceptionInfo
                (notes/prepare-note {:title "   " :content "Body"})))
   (is (thrown? clojure.lang.ExceptionInfo
                (notes/prepare-note {:title "Title" :content ""})))
   (is (thrown? clojure.lang.ExceptionInfo
-               (notes/prepare-note {:title "Title"})))
-  (is (thrown? clojure.lang.ExceptionInfo
-               (notes/prepare-note {:title "Title" :content "Body" :links "7"})))
-  (is (thrown? clojure.lang.ExceptionInfo
-               (notes/prepare-note {:title "Title"
-                                    :content "Body"
-                                    :links ["not-a-row"]}))))
+               (notes/prepare-note {:title "Title"}))))
 
 (deftest rows-convert-to-public-shapes
   (is (= {:noteId "3" :title "Title" :content "Body"}
          (notes/row->note {:id 3 :title "Title" :content "Body"}))))
+
+;; ---------------------------------------------------------------------------
+;; Links
+;; ---------------------------------------------------------------------------
+
+(deftest link-titles-parses-the-bracket-syntax
+  (is (= ["BM25 ranking" "Links"]
+         (notes/link-titles
+          "See [[BM25 ranking]], then [[ Links ]] and [[BM25 ranking]] again.")))
+  (is (= [] (notes/link-titles "No links here, just [array] and [text](url).")))
+  (is (= [] (notes/link-titles "A stray [[bracket.")))
+  (is (= [] (notes/link-titles "A blank [[]] reference.")))
+  (is (= [] (notes/link-titles "A reference across
+lines [[is not
+a link]].")))
+  (is (= [] (notes/link-titles nil))))
+
+(deftest note-detail-resolves-both-link-directions
+  (let [rows [{:id 1 :title "BM25" :content "Notes are ranked by BM25."}
+              {:id 2 :title "Links"
+               :content "This note points at [[bm25]] and [[Missing]]."}
+              {:id 3 :title "Self" :content "This note links to [[Self]]."}]]
+    (is (= {:links [] :backlinks ["2"]}
+           (select-keys (notes/note-detail rows (first rows))
+                        [:links :backlinks])))
+    (is (= {:links ["1"] :backlinks []}
+           (select-keys (notes/note-detail rows (second rows))
+                        [:links :backlinks]))
+        "a title resolves ignoring case, and an unknown title is dropped")
+    (is (= {:links [] :backlinks []}
+           (select-keys (notes/note-detail rows (nth rows 2))
+                        [:links :backlinks]))
+        "a note's reference to itself is not a link")))
 
 ;; ---------------------------------------------------------------------------
 ;; Optional integration test
@@ -86,38 +111,44 @@
           (is (= [] (:backlinks note)))
           (is (some? (:createdAt note)))
 
-          (is (= note-id (:noteId (notes/load-note client note-id))))
+          (is (= [note-id (:createdAt note)]
+                 ((juxt :noteId :createdAt) (notes/load-note client note-id)))
+              "loading a note keeps its timestamps")
           (is (nil? (notes/load-note client "not-a-row")))
           (is (some #(= note-id (:noteId %)) (notes/list-notes client)))
 
-          ;; A note's links are directional: the linked note only sees a
-          ;; backlink.
-          (let [linking (notes/create-note client {:title   (unique-title "linker")
-                                                   :content "This one points at the ranking note."
-                                                   :links   [note-id]})]
+          ;; A title is how notes address each other, so it cannot be reused,
+          ;; in any case.
+          (is (thrown-with-msg?
+               clojure.lang.ExceptionInfo #"already exists"
+               (notes/create-note client {:title   (str/upper-case title)
+                                          :content "A duplicate title."})))
+
+          ;; A link is written in the content and read back out of it.
+          (let [linker (notes/create-note
+                        client {:title   (unique-title "linker")
+                                :content (str "This one points at [[" title "]].")})]
             (try
-              (is (= [note-id] (:links linking)))
-              (is (= [] (:backlinks linking)))
-              (is (= [(:noteId linking)] (:backlinks (notes/load-note client note-id))))
+              (is (= [note-id] (:links linker)))
+              (is (= [] (:backlinks linker)))
+              (is (= [(:noteId linker)]
+                     (:backlinks (notes/load-note client note-id))))
 
-              ;; A link to a note that does not exist is rejected, and the
-              ;; whole update is rolled back.
-              (is (thrown? clojure.lang.ExceptionInfo
-                           (notes/update-note client note-id
-                                              {:title   title
-                                               :content "replaced"
-                                               :links   ["999999999"]})))
-              (is (= "Notes are ranked by BM25."
-                     (:content (notes/load-note client note-id))))
+              ;; Renaming onto a stored title is rejected too.
+              (is (thrown-with-msg?
+                   clojure.lang.ExceptionInfo #"already exists"
+                   (notes/update-note client (:noteId linker)
+                                      {:title   title
+                                       :content "Renamed onto another note."})))
+
+              ;; Removing the reference removes the link.
+              (is (= [] (:links (notes/update-note
+                                 client (:noteId linker)
+                                 {:title   (:title linker)
+                                  :content "No links now."}))))
+              (is (= [] (:backlinks (notes/load-note client note-id))))
               (finally
-                (notes/delete-note client (:noteId linking))))
-
-            ;; Updating without :links drops the links the note used to have.
-            (is (= [] (:backlinks (notes/load-note client note-id))))
-            (is (= [note-id] (:links (notes/update-note client note-id
-                                                        {:title   title
-                                                         :content "Notes are ranked by BM25."
-                                                         :links   [note-id]})))))
+                (notes/delete-note client (:noteId linker)))))
 
           (is (some #(= note-id (:noteId %))
                     (notes/search-notes client {:q "BM25"})))

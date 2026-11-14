@@ -1,15 +1,17 @@
 (ns clai.agent.tools.builtin.notes
   "Built-in tools for the notes stored in PostgreSQL.
 
-  Notes are first-class documents, not session history: a titled note with a
-  mandatory title and content, optionally linking to other notes
-  directionally (see `clai.daemon.postgres.notes`). The tools let an agent work
-  with the same store the web Notes page does:
+  Notes are first-class Markdown documents, not session history: a titled note
+  with a mandatory title and content. A note links to another by writing that
+  note's title in double brackets, as in `[[BM25 ranking]]`; links are read out
+  of the content rather than passed as an argument (see
+  `clai.daemon.postgres.notes`). The tools let an agent work with the same store
+  the web Notes page does:
 
     notes_list    every note, most recently updated first
     notes_search  BM25 (or substring) search over note content
     notes_read    one note with its content, links, and backlinks
-    notes_update  change a note's title, content, or outgoing links
+    notes_update  change a note's title or content, and with it its links
     notes_delete  remove a note and the links pointing at it
 
   The tools call `clai.daemon.postgres.notes` directly with the session's
@@ -22,7 +24,8 @@
   tool reads the stored note first and merges the given fields over it. A
   model can therefore change a title without resending the content, which
   would otherwise cost a round trip through `notes_read` and risks dropping
-  text."
+  text. Links need no argument: they are whatever the saved content references
+  with `[[Title]]`."
   (:require [clai.agent.tools.builtin.common :as common]
             [clai.agent.tools.schema :as schema]
             [clai.daemon.postgres.notes :as notes]
@@ -91,18 +94,6 @@
             (string? value) (parse-long (str/trim value))
             :else nil)]
     (when (and n (pos? n)) n)))
-
-(defn- link-ids
-  "Normalize the `links` tool argument to a vector of note ids. A single id is
-  wrapped, since a model may send `\"links\": \"7\"` instead of an array, and
-  strings are trimmed so a padded id still names its note."
-  {:malli/schema [:-> :any [:vector :any]]}
-  [links]
-  (mapv (fn [link] (if (string? link) (str/trim link) link))
-        (cond
-          (nil? links)        []
-          (sequential? links) links
-          :else               [links])))
 
 ;; ---------------------------------------------------------------------------
 ;; Formatting
@@ -209,28 +200,28 @@
       (str "No note " id " is stored."))))
 
 (defn update-note-fn
-  "Tool: change the title, content, or outgoing links of stored note `id`.
+  "Tool: change the title or content of stored note `id`.
 
   Fields that are not given keep their stored value: the note is read first
-  and the changes merged over it, because storage replaces a whole note.
-  `links` replaces the note's outgoing links, and an empty array removes them.
-  Returns the updated note."
+  and the changes merged over it, because storage replaces a whole note. Links
+  follow from the content, so writing `[[Title]]` in new content links the
+  note, and removing the reference removes the link. Returns the updated
+  note."
   {:malli/schema [:-> #'schema/tool-args #'schema/tool-ctx :string]}
   [{:keys [id] :as args} ctx]
   (let [id      (note-id id)
         changes (cond-> {}
                   (contains? args :title)   (assoc :title (:title args))
-                  (contains? args :content) (assoc :content (:content args))
-                  (contains? args :links)   (assoc :links (link-ids (:links args))))]
+                  (contains? args :content) (assoc :content (:content args)))]
     (when (empty? changes)
-      (throw (ex-info (str "Updating note " id " requires at least one of "
-                           "`title`, `content`, or `links`.")
+      (throw (ex-info (str "Updating note " id " requires `title` or "
+                           "`content`.")
                       {:id id})))
     (let [client (notes-client ctx)]
       (if-let [current (notes/load-note client id)]
         (let [updated (notes/update-note
                        client id
-                       (merge (select-keys current [:title :content :links])
+                       (merge (select-keys current [:title :content])
                               changes))]
           (str "Updated note " id ".\n\n" (note-detail-text updated)))
         (str "No note " id " is stored.")))))
@@ -294,8 +285,9 @@
    {:name "notes_read"
     :description
     (str "Read one stored note by id: its title, content, creation and update "
-         "times, the notes it links to, and the notes that link to it. Note "
-         "content longer than " max-content-chars " characters is truncated.")
+         "times, the notes its content links to with [[Note title]], and the "
+         "notes that link to it. Note content longer than " max-content-chars
+         " characters is truncated.")
     :parameters
     {:type "object"
      :properties {"id" id-property}
@@ -306,13 +298,13 @@
    :function
    {:name "notes_update"
     :description
-    (str "Change a stored note. Give the note id and any of title, content, "
-         "and links; fields you leave out keep their stored value, so this is "
-         "a partial update rather than a replacement. `links` is the array of "
-         "note ids the note should link to and replaces the existing links, "
-         "so an empty array removes them. Returns the updated note; read it "
-         "with notes_read first so you preserve the text you are not "
-         "changing.")
+    (str "Change a stored note. Give the note id and the title and/or content; "
+         "fields you leave out keep their stored value, so this is a partial "
+         "update rather than a replacement. Links between notes are written "
+         "in the content as `[[Note title]]` and are re-read when the note is "
+         "saved, so there is no links argument: edit the content to change "
+         "them. Returns the updated note; read it with notes_read first so you "
+         "preserve the text you are not changing.")
     :parameters
     {:type "object"
      :properties
@@ -320,12 +312,9 @@
       "title"   {:type "string"
                  :description "New note title."}
       "content" {:type "string"
-                 :description "New note body in Markdown."}
-      "links"   {:type "array"
-                 :items {:type "string"}
-                 :description (str "Ids of the notes this note should link "
-                                   "to; replaces the existing outgoing links, "
-                                   "and [] removes them.")}}
+                 :description (str "New note body in Markdown. Link another "
+                                   "note by writing its title as "
+                                   "[[Note title]].")}}
      :required ["id"]}}})
 
 (def ^:private notes-delete-spec
@@ -333,9 +322,9 @@
    :function
    {:name "notes_delete"
     :description
-    (str "Delete a stored note by id, along with the links that point at it. "
-         "This cannot be undone; use notes_read first if you are unsure which "
-         "note it is.")
+    (str "Delete a stored note by id. Links to it are read out of other "
+         "notes' content, so they simply stop resolving. This cannot be undone; "
+         "use notes_read first if you are unsure which note it is.")
     :parameters
     {:type "object"
      :properties {"id" id-property}

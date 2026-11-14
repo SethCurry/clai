@@ -1,17 +1,27 @@
 (ns clai.daemon.postgres.notes
   "Note storage on PostgreSQL for `clai`'s daemon.
 
-  The tables are declared in `schema/schema.sql` and created by
+  The table is declared in `schema/schema.sql` and created by
   `clai.daemon.postgres/ensure-schema!`:
 
-      note       id, title, content, created_at, updated_at
-      note_link  from_note_id, to_note_id, created_at
+      note  id, title, content, created_at, updated_at
 
-  A note is a titled document; `title` and `content` are both mandatory and a
-  blank one is rejected. Notes link to each other directionally: a `note_link`
-  row points from `from_note_id` to `to_note_id`, so [[load-note]] returns both
-  the note's outgoing `:links` and its incoming `:backlinks`. Deleting a note
-  deletes the links that point at it (`ON DELETE CASCADE`).
+  A note is a titled Markdown document; `title` and `content` are both
+  mandatory and a blank one is rejected.
+
+  ## Links
+
+  A note links to another note by writing its title in double square brackets,
+  as in `[[BM25 ranking]]`. The links are not stored separately: they are read
+  back out of the content whenever a note is loaded, so a link is always in
+  step with the text and a reference to a note that does not exist yet simply
+  resolves once that note is written.
+
+  A title is therefore how notes address each other, and it is unique across
+  the store, compared case-insensitively and ignoring surrounding space, so
+  `[[bm25 ranking]]` and `[[BM25 ranking]]` name the same note. Creating or
+  renaming a note to a title another note already uses is rejected with an
+  `ex-info`.
 
   ## Search
 
@@ -37,15 +47,14 @@
       (def ranking (notes/create-note client {:title   \"BM25\"
                                               :content \"Notes are ranked by BM25.\"}))
 
-      (notes/create-note client {:title   \"Links\"
-                                 :content \"This note points at BM25.\"
-                                 :links   [(:noteId ranking)]})
+      (def links (notes/create-note client {:title   \"Links\"
+                                            :content \"This note points at [[BM25]].\"}))
 
-      (notes/search-notes client {:q \"ranked\"})
-      (notes/load-note client (:noteId ranking))"
+      (notes/load-note client (:noteId links))   ; => links [ranking id]
+      (notes/load-note client (:noteId ranking)) ; => backlinks [links id]
+      (notes/search-notes client {:q \"ranked\"})"
   (:require [clai.daemon.postgres :as postgres]
             [clojure.string :as str]
-            [next.jdbc :as jdbc]
             [taoensso.telemere :as tel]))
 
 ;; ---------------------------------------------------------------------------
@@ -56,19 +65,13 @@
   "A string of at least one character."
   postgres/non-empty-string)
 
-(def NoteRef
-  "A reference to a `note` row: its database id as a number or as a string of
-  digits."
-  [:or pos-int? [:re #"^[1-9][0-9]*$"]])
-
 (def NoteInput
-  "A note accepted by [[create-note]] and [[update-note]]. `:title` and
-  `:content` are mandatory, and the optional `:links` vector names the notes
-  this one links to (they replace any existing outgoing links)."
+  "A note accepted by [[create-note]] and [[update-note]]: a mandatory `:title`
+  and `:content`. A note links to others by writing their titles as
+  `[[Title]]` in its content; there is no separate link field."
   [:map
    [:title non-empty-string]
-   [:content non-empty-string]
-   [:links {:optional true} [:vector NoteRef]]])
+   [:content non-empty-string]])
 
 (def Note
   "A `note` row, as returned by [[list-notes]] and [[search-notes]]."
@@ -80,9 +83,9 @@
    [:updatedAt {:optional true} [:maybe :string]]])
 
 (def NoteDetail
-  "A `note` row with its directional links, as returned by [[load-note]],
-  [[create-note]], and [[update-note]]. `:links` are the ids this note links
-  to, `:backlinks` the ids of the notes that link to it."
+  "A `note` row with its links, as returned by [[load-note]], [[create-note]],
+  and [[update-note]]. `:links` are the ids of the notes its content references
+  with `[[Title]]`, `:backlinks` the ids of the notes that reference it."
   [:map
    [:noteId non-empty-string]
    [:title non-empty-string]
@@ -126,34 +129,17 @@
     (when-let [n (if (number? id) id (parse-long (str id)))]
       (when (pos? n) n))))
 
-(defn- link-keys
-  "The distinct `note.id` keys named by `links`, rejecting ids that name no
-  row."
-  {:malli/schema [:-> [:maybe [:sequential NoteRef]] [:vector pos-int?]]}
-  [links]
-  (->> (or links [])
-       (mapv (fn [link]
-               (or (row-key link)
-                   (throw (ex-info (str "Invalid note link: " (pr-str link))
-                                   {:value link})))))
-       distinct
-       vec))
-
 (defn ^:no-doc prepare-note
   "Validate and normalize a note input for storage: the title and content are
-  trimmed, a blank one is rejected, and `:links` becomes a vector of distinct
-  numeric `note.id` keys."
+  trimmed and a blank one is rejected."
   {:malli/schema [:-> :map #'NoteInput]}
   [note]
   ;; Only the note's own fields are considered, so a JSON body may carry extra
   ;; keys (such as the id from a PUT path) without failing validation.
-  (let [note (cond-> (-> (select-keys note [:title :content :links])
-                         (update :title blank->nil)
-                         (update :content blank->nil))
-               (nil? (:links note)) (dissoc :links))
-        note (postgres/validate! NoteInput note "note")]
-    (cond-> (dissoc note :links)
-      (contains? note :links) (assoc :links (link-keys (:links note))))))
+  (let [note (-> (select-keys note [:title :content])
+                 (update :title blank->nil)
+                 (update :content blank->nil))]
+    (postgres/validate! NoteInput note "note")))
 
 (defn ^:no-doc row->note
   "Convert a `note` row to the public note shape."
@@ -169,6 +155,72 @@
     (assoc :updatedAt (postgres/timestamp->iso (:updated-at row)))))
 
 ;; ---------------------------------------------------------------------------
+;; Links
+;; ---------------------------------------------------------------------------
+;;
+;; A link is written in a note's Markdown as `[[Title]]`. Nothing about the
+;; link is stored: reading a note parses the references out of every note's
+;; content and resolves them against the stored titles, which keeps both
+;; directions in step with the text and with the note titles.
+
+(def ^:private note-link-re
+  "Matches the `[[Title]]` wiki-link syntax. The title may not contain brackets
+  or a line break, so a stray `[[` cannot swallow the rest of a note."
+  #"\[\[([^\[\]\r\n]+)\]\]")
+
+(defn ^:no-doc link-titles
+  "The titles `content` links to with the `[[Title]]` syntax, trimmed, in
+  first-appearance order and without duplicates."
+  {:malli/schema [:-> [:maybe :string] [:vector non-empty-string]]}
+  [content]
+  (->> (re-seq note-link-re (str content))
+       (map (comp str/trim second))
+       (remove str/blank?)
+       distinct
+       vec))
+
+(defn- title-key
+  "The key two titles are compared by: trimmed and lower-cased, so `[[BM25]]`
+  names a note titled \"bm25\"."
+  {:malli/schema [:-> :any [:maybe non-empty-string]]}
+  [title]
+  (some-> title str str/trim str/lower-case not-empty))
+
+(defn- resolved-link-ids
+  "Resolve `titles` to note ids through `ids-by-title`, dropping titles that
+  name no note and the note `self-id` itself, keeping the order the titles
+  appear in."
+  [ids-by-title self-id titles]
+  (->> titles
+       (keep (fn [title] (get ids-by-title (title-key title))))
+       (remove #{self-id})
+       distinct
+       vec))
+
+(defn- note-links
+  "The outgoing `:links` and incoming `:backlinks` of `row` among `rows`, both
+  as note-id strings. `rows` are every stored note."
+  [rows row]
+  (let [ids-by-title (into {} (map (juxt (comp title-key :title) :id)) rows)
+        ids-of (fn [note]
+                 (resolved-link-ids ids-by-title (:id note)
+                                    (link-titles (:content note))))
+        id (:id row)]
+    {:links     (mapv str (ids-of row))
+     :backlinks (->> rows
+                     (remove #(= id (:id %)))
+                     (filter #(some #{id} (ids-of %)))
+                     (mapv (comp str :id)))}))
+
+(defn ^:no-doc note-detail
+  "The `NoteDetail` shape for `row`: its public fields plus the links its
+  content references and the notes that reference it, both resolved through
+  `rows`, every stored note."
+  {:malli/schema [:-> [:sequential :map] :map #'NoteDetail]}
+  [rows row]
+  (merge (row->note row) (note-links rows row)))
+
+;; ---------------------------------------------------------------------------
 ;; Note SQL
 ;; ---------------------------------------------------------------------------
 
@@ -181,50 +233,43 @@
   (str "SELECT " note-columns " FROM note"))
 
 (def ^:private list-notes-sql
+  "Every note, most recently updated first."
   (str select-note-columns " ORDER BY updated_at DESC, id DESC"))
 
-(def ^:private load-note-sql
-  (str select-note-columns " WHERE id = ?"))
+(def ^:private link-scan-sql
+  "Every note, ordered by id so link resolution and the backlinks built from it
+  are deterministic. The scan carries the timestamps as well, so [[load-note]]
+  can read the whole note from it."
+  (str select-note-columns " ORDER BY id"))
+
+(def ^:private title-taken-sql
+  "The id of another note that already has the title, compared the way links
+  resolve titles."
+  "SELECT id FROM note WHERE lower(trim(title)) = lower(trim(?)) AND id <> ?")
 
 (def ^:private insert-note-sql
+  "Insert a note and return its row."
   (str "INSERT INTO note (title, content)
         VALUES (?, ?)
         RETURNING " note-columns))
 
 (def ^:private update-note-sql
+  "Replace a note's title and content and return its row."
   (str "UPDATE note
            SET title = ?, content = ?, updated_at = now()
          WHERE id = ?
         RETURNING " note-columns))
 
 (def ^:private delete-note-sql
+  "Delete one note."
   "DELETE FROM note WHERE id = ?")
-
-;; ---------------------------------------------------------------------------
-;; Link SQL
-;; ---------------------------------------------------------------------------
-
-(def ^:private links-sql
-  "SELECT to_note_id FROM note_link WHERE from_note_id = ? ORDER BY to_note_id")
-
-(def ^:private backlinks-sql
-  "SELECT from_note_id FROM note_link WHERE to_note_id = ? ORDER BY from_note_id")
-
-(def ^:private delete-links-sql
-  "DELETE FROM note_link WHERE from_note_id = ?")
-
-(def ^:private insert-link-sql
-  ;; Selecting from `note` rather than inserting the id directly makes an
-  ;; unknown target return no row instead of raising a foreign key error.
-  "INSERT INTO note_link (from_note_id, to_note_id)
-   SELECT ?, id FROM note WHERE id = ?
-   RETURNING to_note_id")
 
 ;; ---------------------------------------------------------------------------
 ;; Search SQL
 ;; ---------------------------------------------------------------------------
 
 (def ^:private bm25-search-sql
+  "BM25-ranked matches for a query, best match first."
   ;; `<@>` scores against the BM25 index and returns negative scores, so
   ;; ascending order puts the best match first; matches score below zero and
   ;; the rest are filtered out. `to_bm25query` takes the index by name because
@@ -236,6 +281,7 @@
     LIMIT ?")
 
 (def ^:private substring-search-sql
+  "The no-extension fallback: notes whose content contains the query."
   ;; The fallback when pg_textsearch is not installed: a case-insensitive
   ;; containment test, with no relevance ranking.
   "SELECT id, title, content, created_at, updated_at
@@ -243,42 +289,6 @@
     WHERE position(lower(?) in lower(content)) > 0
     ORDER BY updated_at DESC, id DESC
     LIMIT ?")
-
-;; ---------------------------------------------------------------------------
-;; Link helpers
-;; ---------------------------------------------------------------------------
-
-(defn- link-ids
-  "The note ids in `rows` under `column`, as strings."
-  [column rows]
-  (mapv (comp str column) rows))
-
-(defn- replace-links!
-  "Make `note-id`'s outgoing links exactly `to-ids`: the existing links are
-  deleted and each target is inserted. A target that names no note throws an
-  `ex-info`, so a note cannot link to a missing note."
-  {:malli/schema [:-> :any pos-int? [:maybe [:sequential pos-int?]] :nil]}
-  [connectable note-id to-ids]
-  (postgres/exec! connectable ::delete-links delete-links-sql [note-id])
-  (doseq [to-id to-ids]
-    (when-not (postgres/exec-one! connectable ::insert-link insert-link-sql
-                                  [note-id to-id])
-      (throw (ex-info (str "No note " to-id " to link to")
-                      {:noteId (str note-id) :link (str to-id)}))))
-  nil)
-
-(defn- note-detail
-  "The `NoteDetail` shape for `row`, reading its links and backlinks through
-  `connectable`."
-  {:malli/schema [:-> :any :map #'NoteDetail]}
-  [connectable row]
-  (assoc (row->note row)
-         :links (link-ids :to-note-id
-                          (postgres/exec! connectable ::links links-sql
-                                          [(:id row)]))
-         :backlinks (link-ids :from-note-id
-                              (postgres/exec! connectable ::backlinks
-                                              backlinks-sql [(:id row)]))))
 
 ;; ---------------------------------------------------------------------------
 ;; Search mode
@@ -305,6 +315,36 @@
          true))))
 
 ;; ---------------------------------------------------------------------------
+;; Note rows
+;; ---------------------------------------------------------------------------
+
+(defn- all-note-rows
+  "Every stored note, the rows link resolution works from."
+  {:malli/schema [:-> [:fn #(instance? javax.sql.DataSource %)] [:vector :map]]}
+  [datasource]
+  (postgres/exec! datasource ::link-scan link-scan-sql []))
+
+(defn- ensure-title-free!
+  "Throw when another note already has `title`, compared the way links resolve
+  titles. `note-id` is the note being updated, or nil when creating one."
+  {:malli/schema [:-> [:fn #(instance? javax.sql.DataSource %)]
+                  non-empty-string [:maybe pos-int?] :nil]}
+  [datasource title note-id]
+  (when-let [row (postgres/exec-one! datasource ::title-taken title-taken-sql
+                                     [title (or note-id 0)])]
+    (throw (ex-info (str "A note titled " (pr-str title) " already exists")
+                    {:title title :noteId (str (:id row))})))
+  nil)
+
+(defn- saved-detail
+  "The `NoteDetail` of the freshly written `row`, resolved against the stored
+  notes."
+  {:malli/schema [:-> [:fn #(instance? javax.sql.DataSource %)] :map
+                  #'NoteDetail]}
+  [datasource row]
+  (note-detail (all-note-rows datasource) row))
+
+;; ---------------------------------------------------------------------------
 ;; Public API
 ;; ---------------------------------------------------------------------------
 
@@ -322,63 +362,60 @@
   {:malli/schema [:-> #'postgres/client-schema #'non-empty-string
                   [:maybe #'NoteDetail]]}
   [client note-id]
-  (let [datasource (:datasource (postgres/ready client))]
-    (when-let [id (row-key note-id)]
-      (when-let [row (postgres/exec-one! datasource ::load-note
-                                         load-note-sql [id])]
-        (note-detail datasource row)))))
+  (when-let [id (row-key note-id)]
+    (let [rows (all-note-rows (:datasource (postgres/ready client)))]
+      (when-let [row (first (filter #(= id (:id %)) rows))]
+        (note-detail rows row)))))
 
 (defn create-note
-  "Store a new note and return it with its links.
+  "Store a new note and return it with its links and backlinks.
 
-  `note` is validated with [[NoteInput]]. The optional `:links` names the notes
-  it links to; each must be a stored note."
+  `note` is validated with [[NoteInput]]. Its title must not match another
+  note's title, because `[[Title]]` references in other notes address a note by
+  its title."
   {:malli/schema [:-> #'postgres/client-schema #'NoteInput #'NoteDetail]}
   [client note]
-  (let [note  (prepare-note note)
-        saved (jdbc/with-transaction [tx (:datasource (postgres/ready client))]
-                (let [row (postgres/exec-one! tx ::create-note insert-note-sql
-                                              [(:title note) (:content note)])]
-                  (replace-links! tx (:id row) (:links note))
-                  (note-detail tx row)))]
-    (tel/log! {:level :debug
-               :id    ::note-created
-               :data  {:noteId (:noteId saved)
-                       :title  (:title saved)
-                       :links  (count (:links saved))}}
-              "Created PostgreSQL note")
-    saved))
+  (let [note       (prepare-note note)
+        datasource (:datasource (postgres/ready client))]
+    (ensure-title-free! datasource (:title note) nil)
+    (let [row   (postgres/exec-one! datasource ::create-note insert-note-sql
+                                    [(:title note) (:content note)])
+          saved (saved-detail datasource row)]
+      (tel/log! {:level :debug
+                 :id    ::note-created
+                 :data  {:noteId (:noteId saved)
+                         :title  (:title saved)
+                         :links  (count (:links saved))}}
+                "Created PostgreSQL note")
+      saved)))
 
 (defn update-note
-  "Replace the title, content, and links of `note-id`, returning the updated
-  note, or nil when no such note is stored.
+  "Replace the title and content of `note-id`, returning the updated note, or
+  nil when no such note is stored.
 
-  `note` is validated with [[NoteInput]]; because the whole note is replaced, a
-  note without `:links` ends up with no outgoing links."
+  `note` is validated with [[NoteInput]]. The note's links are whatever its new
+  content references with `[[Title]]`, and its title must not match another
+  note's title."
   {:malli/schema [:-> #'postgres/client-schema #'non-empty-string
                   #'NoteInput [:maybe #'NoteDetail]]}
   [client note-id note]
   (let [note (prepare-note note)]
     (when-let [id (row-key note-id)]
-      (let [updated (jdbc/with-transaction [tx (:datasource (postgres/ready client))]
-                      (when-let [row (postgres/exec-one! tx ::update-note
-                                                         update-note-sql
-                                                         [(:title note)
-                                                          (:content note)
-                                                          id])]
-                        (replace-links! tx id (:links note))
-                        (note-detail tx row)))]
-        (when updated
-          (tel/log! {:level :debug
-                     :id    ::note-updated
-                     :data  {:noteId (:noteId updated)
-                             :links  (count (:links updated))}}
-                    "Updated PostgreSQL note"))
-        updated))))
+      (let [datasource (:datasource (postgres/ready client))]
+        (ensure-title-free! datasource (:title note) id)
+        (when-let [row (postgres/exec-one! datasource ::update-note
+                                           update-note-sql
+                                           [(:title note) (:content note) id])]
+          (let [updated (saved-detail datasource row)]
+            (tel/log! {:level :debug
+                       :id    ::note-updated
+                       :data  {:noteId (:noteId updated)
+                               :links  (count (:links updated))}}
+                      "Updated PostgreSQL note")
+            updated))))))
 
 (defn delete-note
-  "Delete `note-id` and the links that point at it. Returns true when a note
-  was removed."
+  "Delete `note-id`. Returns true when a note was removed."
   {:malli/schema [:-> #'postgres/client-schema #'non-empty-string boolean?]}
   [client note-id]
   (let [deleted? (boolean

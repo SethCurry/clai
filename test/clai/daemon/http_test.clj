@@ -518,6 +518,30 @@
       (let [handler (http/handler (state (atom {})))]
         (is (= 404 (:status (handler (request :get "/api/nope")))))))))
 
+(deftest the-routing-table-prefers-literal-paths-and-decodes-captures
+  (let [match  @#'http/find-route
+        routes (var-get #'http/api-routes)
+        route  (fn [request] (first (match routes request)))]
+    (testing "a literal path wins over a capture template"
+      (is (= "/api/notes/search"
+             (:template (route {:request-method :get :uri "/api/notes/search"})))))
+
+    (testing "a deeper template is not swallowed by a shallower one"
+      (is (= "/api/sessions/:sessionId/files"
+             (:template (route {:request-method :get
+                                :uri            "/api/sessions/1/files"})))))
+
+    (testing "captured segments are percent-decoded"
+      (is (= {:noteId "a b"}
+             (second (match routes {:request-method :get
+                                    :uri            "/api/notes/a%20b"})))))
+
+    (testing "a request only matches its own method"
+      (is (nil? (route {:request-method :post :uri "/api/notes/1"})))
+      (is (= "/api/git-repos/:repoId"
+             (:template (route {:request-method :delete
+                                :uri            "/api/git-repos/1"})))))))
+
 (deftest serves-the-react-build-with-a-client-side-fallback
   (let [root (io/file (System/getProperty "java.io.tmpdir")
                       (str "clai-web-" (UUID/randomUUID)))]
@@ -787,7 +811,7 @@
                         (when (contains? @notes (str noteId))
                           (let [saved (assoc (dissoc note :noteId)
                                              :noteId (str noteId)
-                                             :links (:links note)
+                                             :links []
                                              :backlinks [])]
                             (swap! notes assoc (str noteId) saved)
                             saved)))
@@ -835,11 +859,10 @@
 
             (let [updated (handler (request :put "/api/notes/1"
                                             {:title   "BM25 ranking"
-                                             :content "Notes are ranked by relevance."
-                                             :links   ["2"]}))]
+                                             :content "Notes are ranked by relevance, see [[Links]]."}))]
               (is (= 200 (:status updated)))
               (is (= "BM25 ranking" (:title (response-body updated))))
-              (is (= ["2"] (:links (response-body updated)))))
+              (is (= [] (:links (response-body updated)))))
 
             (is (= 404 (:status (handler (request :put "/api/notes/99"
                                                   {:title   "missing"

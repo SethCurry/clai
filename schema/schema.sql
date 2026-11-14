@@ -128,9 +128,15 @@ CREATE TABLE IF NOT EXISTS git_worktree (
     UNIQUE (directory)
 );
 
--- Notes. A note is a titled document the user or an agent writes and later
--- reads back; `title` and `content` are both mandatory. Notes are addressed by
--- the database id, and links that point at a note are deleted with it.
+-- Notes. A note is a titled Markdown document the user or an agent writes
+-- and later reads back; `title` and `content` are both mandatory.
+--
+-- A note links to another note by writing its title in double brackets, as in
+-- `[[BM25 ranking]]` (see `clai.daemon.postgres.notes`). Links are read back
+-- out of the content rather than stored, so a title is how notes address each
+-- other: it must be unique, compared case-insensitively and ignoring
+-- surrounding space (`lower` and `trim` are both immutable, so the index
+-- expression is allowed).
 CREATE TABLE IF NOT EXISTS note (
     id BIGSERIAL PRIMARY KEY,
     title TEXT NOT NULL,
@@ -138,6 +144,8 @@ CREATE TABLE IF NOT EXISTS note (
     created_at TIMESTAMPTZ DEFAULT now(),
     updated_at TIMESTAMPTZ DEFAULT now()
 );
+
+CREATE UNIQUE INDEX IF NOT EXISTS note_title_unique_idx ON note (lower(trim(title)));
 
 -- BM25 full-text index over note content, so `content <@> 'some words'`
 -- ranks notes by relevance (see `clai.daemon.postgres.notes/search-notes`).
@@ -154,16 +162,6 @@ BEGIN
 END
 $$;
 
--- Directional links between notes: `from_note_id` refers to `to_note_id`.
--- The pair is the primary key, so a note cannot link to the same note twice,
--- and deleting either endpoint deletes the link.
-CREATE TABLE IF NOT EXISTS note_link (
-    from_note_id BIGINT NOT NULL REFERENCES note(id) ON DELETE CASCADE,
-    to_note_id BIGINT NOT NULL REFERENCES note(id) ON DELETE CASCADE,
-    created_at TIMESTAMPTZ DEFAULT now(),
-    PRIMARY KEY (from_note_id, to_note_id)
-);
-
--- Backlink lookups (`WHERE to_note_id = ?`) are what the note detail view
--- needs; forward lookups use the primary key.
-CREATE INDEX IF NOT EXISTS note_link_to_note_idx ON note_link (to_note_id);
+-- Links used to be materialized in a `note_link` table. They are now read out
+-- of note content, so the old table is dropped rather than left stale.
+DROP TABLE IF EXISTS note_link;
