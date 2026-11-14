@@ -127,3 +127,43 @@ CREATE TABLE IF NOT EXISTS git_worktree (
     UNIQUE (git_repo_id, branch),
     UNIQUE (directory)
 );
+
+-- Notes. A note is a titled document the user or an agent writes and later
+-- reads back; `title` and `content` are both mandatory. Notes are addressed by
+-- the database id, and links that point at a note are deleted with it.
+CREATE TABLE IF NOT EXISTS note (
+    id BIGSERIAL PRIMARY KEY,
+    title TEXT NOT NULL,
+    content TEXT NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT now(),
+    updated_at TIMESTAMPTZ DEFAULT now()
+);
+
+-- BM25 full-text index over note content, so `content <@> 'some words'`
+-- ranks notes by relevance (see `clai.daemon.postgres.notes/search-notes`).
+-- PostgreSQL cannot create an index conditionally in one statement, hence the
+-- guard: the index is only created when pg_textsearch is installed, which
+-- keeps this file applicable to servers without the extension (there the
+-- storage layer falls back to substring matching).
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_textsearch') THEN
+        CREATE INDEX IF NOT EXISTS note_content_bm25_idx
+            ON note USING bm25(content) WITH (text_config = 'english');
+    END IF;
+END
+$$;
+
+-- Directional links between notes: `from_note_id` refers to `to_note_id`.
+-- The pair is the primary key, so a note cannot link to the same note twice,
+-- and deleting either endpoint deletes the link.
+CREATE TABLE IF NOT EXISTS note_link (
+    from_note_id BIGINT NOT NULL REFERENCES note(id) ON DELETE CASCADE,
+    to_note_id BIGINT NOT NULL REFERENCES note(id) ON DELETE CASCADE,
+    created_at TIMESTAMPTZ DEFAULT now(),
+    PRIMARY KEY (from_note_id, to_note_id)
+);
+
+-- Backlink lookups (`WHERE to_note_id = ?`) are what the note detail view
+-- needs; forward lookups use the primary key.
+CREATE INDEX IF NOT EXISTS note_link_to_note_idx ON note_link (to_note_id);

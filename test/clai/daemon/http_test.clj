@@ -323,6 +323,164 @@
           (is (= 404 (:status (handler (request :delete
                                                 "/api/agent-configs/99"))))))))))
 
+(deftest git-repositories-can-be-listed-created-updated-and-deleted
+  (with-fake-agent (atom {})
+    (fn []
+      (let [repos (atom {"1" {:repoId "1"
+                               :name   "clai"
+                               :url    "https://example.com/clai.git"}})]
+        (with-redefs [agent/list-git-repos!
+                      (fn [_ _] {:repos (vec (vals @repos))})
+
+                      agent/load-git-repo!
+                      (fn [_ {:keys [repoId]}]
+                        (get @repos (str repoId)))
+
+                      agent/create-git-repo!
+                      (fn [_ repo]
+                        (let [saved (assoc repo :repoId "2")]
+                          (swap! repos assoc "2" saved)
+                          saved))
+
+                      agent/update-git-repo!
+                      (fn [_ {:keys [repoId] :as repo}]
+                        (when (contains? @repos (str repoId))
+                          (let [saved (assoc (dissoc repo :repoId)
+                                             :repoId (str repoId))]
+                            (swap! repos assoc (str repoId) saved)
+                            saved)))
+
+                      agent/delete-git-repo!
+                      (fn [_ {:keys [repoId]}]
+                        (boolean
+                         (when (contains? @repos (str repoId))
+                           (swap! repos dissoc (str repoId))
+                           true)))]
+          (let [handler (http/handler (state (atom {})))]
+            (is (= [{:repoId "1"
+                     :name   "clai"
+                     :url    "https://example.com/clai.git"}]
+                   (:repos (response-body
+                            (handler (request :get "/api/git-repos"))))))
+
+            (let [created (handler (request :post "/api/git-repos"
+                                            {:name "other"
+                                             :url  "git@example.com:me/other.git"}))]
+              (is (= 201 (:status created)))
+              (is (= {:repoId "2"
+                      :name   "other"
+                      :url    "git@example.com:me/other.git"}
+                     (response-body created))))
+
+            (is (= 200 (:status (handler (request :get "/api/git-repos/1")))))
+            (is (= 404 (:status (handler (request :get "/api/git-repos/99")))))
+
+            (let [updated (handler (request :put "/api/git-repos/1"
+                                            {:name "clai-main"
+                                             :url  "git@example.com:me/clai.git"}))]
+              (is (= 200 (:status updated)))
+              (is (= {:repoId "1"
+                      :name   "clai-main"
+                      :url    "git@example.com:me/clai.git"}
+                     (response-body updated))))
+
+            (is (= 404 (:status (handler (request :put "/api/git-repos/99"
+                                                  {:name "missing"
+                                                   :url  "missing"})))))
+
+            (let [deleted (handler (request :delete "/api/git-repos/2"))]
+              (is (= 200 (:status deleted)))
+              (is (= "2" (:deleted (response-body deleted)))))
+
+            (is (= 404 (:status (handler (request :delete
+                                                  "/api/git-repos/99")))))))))))
+
+(deftest git-worktrees-can-be-listed-created-updated-and-deleted
+  (with-fake-agent (atom {})
+    (fn []
+      (let [worktrees (atom {"3" {:worktreeId "3"
+                                   :repoId     "1"
+                                   :repoName   "clai"
+                                   :repoUrl    "https://example.com/clai.git"
+                                   :branch     "main"
+                                   :directory  "/tmp/clai"}})]
+        (with-redefs [agent/list-git-worktrees!
+                      (fn [_ {:keys [repoId]}]
+                        {:worktrees (cond->> (vals @worktrees)
+                                      (not (str/blank? (str repoId)))
+                                      (filter #(= (str repoId) (:repoId %))))})
+
+                      agent/load-git-worktree!
+                      (fn [_ {:keys [worktreeId]}]
+                        (get @worktrees (str worktreeId)))
+
+                      agent/create-git-worktree!
+                      (fn [_ worktree]
+                        (let [saved (assoc worktree
+                                           :worktreeId "4"
+                                           :repoName "clai"
+                                           :repoUrl "https://example.com/clai.git")]
+                          (swap! worktrees assoc "4" saved)
+                          saved))
+
+                      agent/update-git-worktree!
+                      (fn [_ {:keys [worktreeId] :as worktree}]
+                        (when (contains? @worktrees (str worktreeId))
+                          (let [saved (assoc (dissoc worktree :worktreeId)
+                                             :worktreeId (str worktreeId)
+                                             :repoName "clai"
+                                             :repoUrl "https://example.com/clai.git")]
+                            (swap! worktrees assoc (str worktreeId) saved)
+                            saved)))
+
+                      agent/delete-git-worktree!
+                      (fn [_ {:keys [worktreeId]}]
+                        (boolean
+                         (when (contains? @worktrees (str worktreeId))
+                           (swap! worktrees dissoc (str worktreeId))
+                           true)))]
+          (let [handler (http/handler (state (atom {})))]
+            (is (= 1 (count (:worktrees (response-body
+                                         (handler (request :get
+                                                           "/api/git-worktrees")))))))
+            (is (= ["3"]
+                   (mapv :worktreeId
+                         (:worktrees (response-body
+                                      (handler (request :get
+                                                        "/api/git-worktrees?repoId=1")))))))
+            (is (empty? (:worktrees (response-body
+                                     (handler (request :get
+                                                       "/api/git-worktrees?repoId=2"))))))
+
+            (let [created (handler (request :post "/api/git-worktrees"
+                                            {:repoId    "1"
+                                             :branch    "feature/git-ui"
+                                             :directory "/tmp/clai-git-ui"}))]
+              (is (= 201 (:status created)))
+              (is (= "4" (:worktreeId (response-body created)))))
+
+            (is (= 200 (:status (handler (request :get "/api/git-worktrees/3")))))
+            (is (= 404 (:status (handler (request :get "/api/git-worktrees/99")))))
+
+            (let [updated (handler (request :put "/api/git-worktrees/4"
+                                            {:repoId    "1"
+                                             :branch    "feature/renamed"
+                                             :directory "/tmp/clai-renamed"}))]
+              (is (= 200 (:status updated)))
+              (is (= "feature/renamed" (:branch (response-body updated)))))
+
+            (is (= 404 (:status (handler (request :put "/api/git-worktrees/99"
+                                                  {:repoId    "1"
+                                                   :branch    "x"
+                                                   :directory "/tmp/x"})))))
+
+            (let [deleted (handler (request :delete "/api/git-worktrees/4"))]
+              (is (= 200 (:status deleted)))
+              (is (= "4" (:deleted (response-body deleted)))))
+
+            (is (= 404 (:status (handler (request :delete
+                                                  "/api/git-worktrees/99")))))))))))
+
 (deftest sessions-remember-their-agent-configuration
   (let [store (atom {})]
     (with-fake-agent store
@@ -594,3 +752,108 @@
                 (is (= 404 (:status (handler
                                      (request :get
                                               "/api/sessions/nope/file?path=a.txt")))))))))))))
+
+(deftest notes-can-be-listed-created-loaded-updated-deleted-and-searched
+  (with-fake-agent (atom {})
+    (fn []
+      (let [notes    (atom {"1" {:noteId    "1"
+                                 :title     "BM25"
+                                 :content   "Notes are ranked by relevance."
+                                 :links     []
+                                 :backlinks []}})
+            searches (atom [])]
+        (with-redefs [agent/list-notes!
+                      (fn [_ _]
+                        {:notes (mapv #(dissoc % :links :backlinks)
+                                      (vals @notes))})
+
+                      agent/load-note!
+                      (fn [_ {:keys [noteId]}]
+                        (get @notes (str noteId)))
+
+                      agent/create-note!
+                      (fn [_ note]
+                        (if (str/blank? (str (:title note)))
+                          (throw (ex-info "Invalid note value" {}))
+                          (let [saved (assoc note
+                                             :noteId "2"
+                                             :links []
+                                             :backlinks [])]
+                            (swap! notes assoc "2" saved)
+                            saved)))
+
+                      agent/update-note!
+                      (fn [_ {:keys [noteId] :as note}]
+                        (when (contains? @notes (str noteId))
+                          (let [saved (assoc (dissoc note :noteId)
+                                             :noteId (str noteId)
+                                             :links (:links note)
+                                             :backlinks [])]
+                            (swap! notes assoc (str noteId) saved)
+                            saved)))
+
+                      agent/delete-note!
+                      (fn [_ {:keys [noteId]}]
+                        (boolean
+                         (when (contains? @notes (str noteId))
+                           (swap! notes dissoc (str noteId))
+                           true)))
+
+                      agent/search-notes!
+                      (fn [_ opts]
+                        (swap! searches conj opts)
+                        {:notes (mapv #(dissoc % :links :backlinks)
+                                      (filter (fn [note]
+                                                (str/includes? (:content note)
+                                                               (str (:q opts))))
+                                              (vals @notes)))})]
+          (let [handler (http/handler (state (atom {})))]
+            (let [listed (handler (request :get "/api/notes"))]
+              (is (= 200 (:status listed)))
+              (is (= [{:noteId "1"
+                       :title   "BM25"
+                       :content "Notes are ranked by relevance."}]
+                     (:notes (response-body listed)))))
+
+            (let [created (handler (request :post "/api/notes"
+                                            {:title   "Links"
+                                             :content "Points at BM25."}))]
+              (is (= 201 (:status created)))
+              (is (= {:noteId    "2"
+                      :title     "Links"
+                      :content   "Points at BM25."
+                      :links     []
+                      :backlinks []}
+                     (response-body created))))
+
+            ;; A rejected note is a bad request, not a server error.
+            (is (= 400 (:status (handler (request :post "/api/notes"
+                                                  {:title "  " :content "x"})))))
+
+            (is (= 200 (:status (handler (request :get "/api/notes/1")))))
+            (is (= 404 (:status (handler (request :get "/api/notes/99")))))
+
+            (let [updated (handler (request :put "/api/notes/1"
+                                            {:title   "BM25 ranking"
+                                             :content "Notes are ranked by relevance."
+                                             :links   ["2"]}))]
+              (is (= 200 (:status updated)))
+              (is (= "BM25 ranking" (:title (response-body updated))))
+              (is (= ["2"] (:links (response-body updated)))))
+
+            (is (= 404 (:status (handler (request :put "/api/notes/99"
+                                                  {:title   "missing"
+                                                   :content "missing"})))))
+
+            ;; `search` is a route of its own, not a note id.
+            (let [found (handler (request :get "/api/notes/search?q=ranked&limit=5"))]
+              (is (= 200 (:status found)))
+              (is (= ["1"] (mapv :noteId (:notes (response-body found))))))
+            (is (= {:q "ranked" :limit 5} (last @searches)))
+            (is (= 400 (:status (handler (request :get "/api/notes/search?q=")))))
+            (is (= 400 (:status (handler (request :get "/api/notes/search")))))
+
+            (let [deleted (handler (request :delete "/api/notes/2"))]
+              (is (= 200 (:status deleted)))
+              (is (= "2" (:deleted (response-body deleted)))))
+            (is (= 404 (:status (handler (request :delete "/api/notes/2")))))))))))

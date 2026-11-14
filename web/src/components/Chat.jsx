@@ -12,7 +12,7 @@ function shortId(id) {
 /**
  * The conversation timeline and composer. Updates are appended in stream order
  * by `useClaiSocket`; tool-call fragments are merged before they reach here.
- * Typing `@` in the composer offers files and folders from the session's
+ * Typing `./` in the composer offers files and folders from the session's
  * working directory.
  */
 export function Chat({ session, updates, promptRunning, onPrompt, onRename }) {
@@ -122,7 +122,7 @@ export function Chat({ session, updates, promptRunning, onPrompt, onRename }) {
         />
         <div className="composer__footer">
           <span className="composer__hint">
-            Enter to send · Shift+Enter for a newline · @ to mention a file or
+            Enter to send · Shift+Enter for a newline · ./ to complete a file or
             folder
           </span>
           <button

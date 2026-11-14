@@ -1,5 +1,5 @@
 (ns clai.daemon.files-test
-  "Tests for the `@`-mention filesystem completion used by the web UI."
+  "Tests for the path-completion filesystem listing used by the web UI."
   (:require [clai.daemon.files :as files]
             [clai.test-support :refer [instrument quiet-logs]]
             [clojure.java.io :as io]

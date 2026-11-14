@@ -11,9 +11,9 @@ function directoryOf(path) {
 }
 
 /**
- * The `@`-mention popup above the prompt composer. Entries and the active row
- * come from `usePathAutocomplete`; picking a row keeps focus in the textarea
- * because rows act on `mousedown` instead of `click`.
+ * The `./` path-completion popup above the prompt composer. Entries and the
+ * active row come from `usePathAutocomplete`; picking a row keeps focus in the
+ * textarea because rows act on `mousedown` instead of `click`.
  */
 export function PathAutocomplete({ completion, onPick, onHover }) {
   const listRef = useRef(null)

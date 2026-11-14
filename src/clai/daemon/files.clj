@@ -1,8 +1,8 @@
 (ns clai.daemon.files
-  "Filesystem browsing for the web UI: `@`-mention completion and the file
+  "Filesystem browsing for the web UI: `./` path completion and the file
   explorer.
 
-  When the user types `@` in the prompt composer, the UI asks the daemon for
+  When the user types `./` in the prompt composer, the UI asks the daemon for
   the entries of the session's working directory and narrows them as the user
   keeps typing. The file explorer asks the same question without a prefix and
   then asks [[read-file]] for the text of whatever the user clicks. The daemon
@@ -38,7 +38,7 @@
 
 (def CompletionRequest
   "Options for [[list-entries]]. `:root` is the directory the user may browse
-  (normally the session's `cwd`); `:path` is the text typed after `@`, or the
+  (normally the session's `cwd`); `:path` is the text typed after `./`, or the
   directory to list when it ends in `/`; `:limit` caps the number of returned
   entries; and `:include-hidden?` lists dotfiles unconditionally, which the
   file explorer does."
@@ -180,7 +180,7 @@
 
 (defn list-entries
   "List completion entries under `:root` for the text the user typed after
-  `@`, or for the directory named by a `:path` that ends in `/`.
+  `./`, or for the directory named by a `:path` that ends in `/`.
 
   Returns a [[CompletionResult]]; a missing root, a directory that does not
   exist, or a path escaping the root all yield an empty `:entries` vector

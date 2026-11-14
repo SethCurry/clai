@@ -1,10 +1,12 @@
-# `@`-mention file completion
+# Path completion (`./`) in the web UI
 
 ## Decision
 
-Typing `@` in the web UI's prompt composer opens a popup of files and folders
-from the session's `cwd`, filtered as the user types. The daemon owns the
-listing; the browser only renders it.
+Typing a word that starts with `./` in the web UI's prompt composer opens a
+popup of files and folders from the session's `cwd`, filtered as the user
+types. The daemon owns the listing; the browser only renders it. The trigger
+used to be `@`, which was changed to `./` because a leading `./` reads as a
+path (and does not collide with `@` in email addresses and handles).
 
 ## Why the daemon lists files
 
@@ -21,7 +23,8 @@ listing; the browser only renders it.
 - `src/clai/daemon/files.clj` -- `list-entries`, the pure directory lister.
   It treats the typed text as a path relative to `:root`: everything before
   the last `/` names the directory and the final segment is a
-  case-insensitive prefix. Directories are listed first and their `:path`
+  case-insensitive prefix. A leading `./` is normalized away, so the UI may
+  send the typed text as-is. Directories are listed first and their `:path`
   ends in `/` so the UI can keep descending. Dotfiles are offered only when
   the prefix starts with `.`. A resolved directory that escapes `:root`
   (via `..` or a symlink) returns no entries. `DefaultLimit` (100) caps a
@@ -35,9 +38,11 @@ listing; the browser only renders it.
   returns `{:directory :prefix :entries}`; 404 for an unknown session. Query
   parsing uses `ring.util.codec/form-decode`, and a non-numeric `limit` falls
   back to the default instead of erroring.
-- `web/src/mentions.js` -- pure `tokenAt`/`mentionAt` helpers. A mention is a
-  whitespace-delimited word that starts with `@`, so `me@example.com` does
-  not trigger the popup.
+- `web/src/paths.js` -- pure `tokenAt`/`pathAt` helpers, plus
+  `PATH_PREFIX` (`"./"`). A path token is a whitespace-delimited word that
+  starts with `./`; `path` is the text after the prefix, so `./src/cl` sends
+  `src/cl` to the daemon and a pick is written as `./` + the entry's path.
+  `src/cl` alone, `...` and `a./b` do not trigger the popup.
 - `web/src/usePathAutocomplete.js` -- popup state, 120 ms debounce, aborted
   in-flight requests, arrow/Enter/Tab/Escape handling, and applying a pick
   back into the draft. Picking a directory reopens the list for it; picking a
@@ -53,7 +58,7 @@ listing; the browser only renders it.
   using a temporary tree.
 - `test/clai/daemon/http_test.clj` covers the endpoint through the Ring
   handler and its 404. The fake agent stubs `agent/session-cwd!`.
-- `web/src/mentions.test.js` covers the token helpers and runs with
+- `web/src/paths.test.js` covers the token helpers and runs with
   `npm test` in `web/` (`node --test`). There is no browser test runner; the
   rest of the hook is exercised by hand.
 
@@ -64,7 +69,7 @@ listing; the browser only renders it.
 
 ## Deliberately not done
 
-- No mention support in the Clojure REPL panel -- it is not a prompt.
+- No completion in the Clojure REPL panel -- it is not a prompt.
 - No file-content preview or fuzzy matching; it is a plain prefix match on
   names.
 - Absolute paths and `~` are not accepted. The popup only browses the

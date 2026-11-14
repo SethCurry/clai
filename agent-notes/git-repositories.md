@@ -34,19 +34,31 @@ index also serves lookups by repository, so no extra index is needed.
   (by directory), `create-worktree`, `update-worktree`, `delete-worktree`.
 - Worktree reads join `git_repo` and expose `:repoName`/`:repoUrl` so a
   listing is readable without a second query.
+- Agent API: `clai.agent.core` wraps the storage namespace with
+  `list-git-repos!`, `load-git-repo!`, `create-git-repo!`,
+  `update-git-repo!`, `delete-git-repo!`, and the matching
+  `*git-worktree!` functions. HTTP handlers call those, like they do for
+  sessions and agent configurations.
+- HTTP API: `clai.daemon.http` serves `/api/git-repos` and
+  `/api/git-worktrees` (list/create), plus `/:id` for load, update, and
+  delete. `GET /api/git-worktrees?repoId=1` filters by repository.
+- Web UI: `web/src/components/GitReposPage.jsx` is reached from the topbar's
+  **Git repos** tab. It is a master/detail registry with forms for
+  repositories and worktrees; `web/src/useGitRepos.js` owns the API calls and
+  list state, and `web/src/gitRepos.js` holds the pure form/validation helpers
+  with `web/src/gitRepos.test.js`.
 - Malli schema types are uppercase (`GitRepo`, `GitRepoInput`, `GitWorktree`,
   `GitWorktreeInput`, `RepoRef`), and `clai.instrument` requires the namespace
   so the validators run.
 - Tests: `test/clai/daemon/postgres/git_test.clj`. Pure normalization/conversion
   tests always run; the round-trip test runs only when `CLAI_TEST_POSTGRES_URL`
-  is set.
+  is set. The agent wrappers are covered in `test/clai/agent/core_test.clj` and
+  the HTTP routes in `test/clai/daemon/http_test.clj`.
 
 ## Deliberately not done
 
-- No `git worktree add`/`remove` calls: the storage namespace only records
-  rows. Shelling out stays in `clai.shell.git`.
-- No web UI or HTTP API for the registry yet; the wiki documents the REPL
-  workflow (`agent-wiki/git-repositories.md`).
+- No `git worktree add`/`remove` calls: the storage, HTTP, and UI layers only
+  record rows. Shelling out stays in `clai.shell.git`.
 - The `directory` is stored as given (trimmed), not canonicalized, because the
   daemon may not share a filesystem with the worktree.
 - Branch is `NOT NULL`; detached-HEAD worktrees are not modeled.

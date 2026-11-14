@@ -63,7 +63,19 @@ GET    /api/sessions/:id/file?path=src/clai/core.clj
 GET    /api/namespaces
 GET    /api/namespaces/:namespace/vars
 GET    /api/namespaces/:namespace/var?name=join
+GET    /api/notes
+GET    /api/notes/search?q=ranked&limit=50
+GET    /api/notes/:id
+POST   /api/notes
+PUT    /api/notes/:id
+DELETE /api/notes/:id
 ```
+
+The notes endpoints are what the Notes page uses: list and search responses
+wrap their results in a `notes` key, single-note responses are the note itself
+(with its `links` and `backlinks`), and `POST`/`PUT` bodies carry `title`,
+`content`, and an optional `links` array of note ids. See
+[`agent-wiki/notes.md`](../agent-wiki/notes.md) for the storage rules.
 
 Request and response bodies use the same shape as the `agent-config` rows,
 with kebab-case keys such as `system-prompt` and `max-tool-rounds`. A `null`
@@ -71,10 +83,10 @@ with kebab-case keys such as `system-prompt` and `max-tool-rounds`. A `null`
 disables tools for sessions that select the configuration. A `null` `plugins`
 value means every enabled plugin, while an empty array disables plugins.
 
-The completions endpoint powers the composer's `@` mentions. `path` is the
-text typed after the `@`: everything before the last `/` picks the directory
-to list (relative to the session's `cwd`) and the final segment is a
-case-insensitive name prefix. Directories are listed first and their `path`
+The completions endpoint powers the composer's `./` path completion. `path`
+is the text typed after the `./`: everything before the last `/` picks the
+directory to list (relative to the session's `cwd`) and the final segment is
+a case-insensitive name prefix. Directories are listed first and their `path`
 ends in `/` so the UI can keep descending. Paths that escape the session's
 `cwd` return no entries.
 
@@ -158,11 +170,11 @@ card until the status becomes `completed` or `failed`.
 - `src/components/AgentConfigManager.jsx` creates, edits, and deletes stored
   agent configurations, including their active-plugin list.
 - `src/components/UpdateView.jsx` renders messages, thoughts, and tool calls.
-- `src/components/Chat.jsx` is the prompt timeline and composer. Typing `@`
-  in the composer opens the file/folder completion popup.
+- `src/components/Chat.jsx` is the prompt timeline and composer. Starting a
+  word with `./` opens the file/folder completion popup.
 - `src/usePathAutocomplete.js` owns that popup's state: debounced requests to
   the completions endpoint, keyboard navigation, and inserting the picked
-  path into the draft. `src/mentions.js` holds the pure caret/token helpers
+  path into the draft. `src/paths.js` holds the pure caret/token helpers
   it builds on, and `src/components/PathAutocomplete.jsx` renders the list.
 - `src/components/ReplPanel.jsx` evaluates Clojure through the daemon's nREPL
   connection, defaulting to the selected session's `sessions.<id>` namespace.
@@ -181,6 +193,12 @@ card until the status becomes `completed` or `failed`.
   a Var when it is clicked. The session's own namespace (`sessions.<id>`, or
   `user` without a session) starts open. `src/cljExplorer.js` holds its pure
   helpers, including `visibleRows` and `sortNamespaces`.
-- `src/api.js` holds the shared `fetch` body reader.
+- `src/components/NotesPage.jsx` is the Notes page: a searchable note list,
+  the open note rendered as Markdown with its links and backlinks, and an
+  editor for the title, content, and outgoing links. `src/useNotes.js` owns its
+  data -- the full list, the debounced search results, and the selected note --
+  and `src/notes.js` holds the pure form and link helpers.
+- `src/api.js` holds the shared `fetch` body reader, and `src/format.js` the
+  shared timestamp formatting both list pages use.
 - `src/sessionNamespace.js` derives that namespace from a session id, matching
   `clai.repl/session-ns`.

@@ -12,3 +12,17 @@ export async function responseBody(response) {
     return {}
   }
 }
+
+/**
+ * Fetch `path` and parse its JSON response. A non-2xx response is turned into
+ * an `Error` carrying the daemon's message, so callers can show it directly
+ * instead of decoding the body twice.
+ */
+export async function requestJson(path, options = {}) {
+  const response = await fetch(path, options)
+  const body = await responseBody(response)
+  if (!response.ok) {
+    throw new Error(body.error || `Request failed (${response.status}).`)
+  }
+  return body
+}

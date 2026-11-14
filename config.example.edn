@@ -92,6 +92,12 @@
                   "run_command"
                   "eval_clojure"
                   "spawn_agent"
+                  ;; Notes tools (stored in the PostgreSQL database):
+                  "notes_list"
+                  "notes_search"
+                  "notes_read"
+                  "notes_update"
+                  "notes_delete"
                   ;; OpenProject tools (configure :openproject above first):
                   ;; "openproject_list_projects"
                   ;; "openproject_list_work_packages"

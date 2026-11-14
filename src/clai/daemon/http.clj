@@ -4,12 +4,15 @@
   The browser cannot speak nREPL's bencode transport, so this namespace
   serves two things from the same JVM as the agent:
 
-    * a JSON HTTP API for sessions, agent configurations, plugins,
-      session-scoped filesystem reads, and introspection of this JVM's Clojure
-      namespaces (`/api/sessions`, `/api/agent-configs`, `/api/plugins`,
-      `/api/sessions/<id>/completions`, `/api/sessions/<id>/files`,
-      `/api/sessions/<id>/file`, `/api/namespaces`,
-      `/api/namespaces/<ns>/vars`, `/api/namespaces/<ns>/var`, `/api/health`),
+    * a JSON HTTP API for sessions, agent configurations, plugins, the
+      registered git repositories and worktrees, notes, session-scoped
+      filesystem reads, and introspection of this JVM's Clojure namespaces
+      (`/api/sessions`, `/api/agent-configs`, `/api/plugins`,
+      `/api/git-repos`, `/api/git-worktrees`, `/api/notes`,
+      `/api/notes/search`, `/api/sessions/<id>/completions`,
+      `/api/sessions/<id>/files`, `/api/sessions/<id>/file`,
+      `/api/namespaces`, `/api/namespaces/<ns>/vars`,
+      `/api/namespaces/<ns>/var`, `/api/health`),
       and
     * a WebSocket at `/ws` that streams agent updates and forwards Clojure
       evaluations to the running nREPL server.
@@ -200,8 +203,8 @@
   (:plugins (agent/list-plugins! agent {})))
 
 (defn- completions
-  "Resolve `request`'s `path` and `limit` query parameters into `@`-mention
-  completion entries relative to `cwd`."
+  "Resolve `request`'s `path` and `limit` query parameters into the path
+  completion entries the composer offers, relative to `cwd`."
   [cwd request]
   (let [{:strs [path limit]} (query-params request)]
     (files/list-entries {:root  cwd
@@ -495,6 +498,10 @@
 ;; HTTP routing
 ;; ---------------------------------------------------------------------------
 
+(def ^:private note-path
+  "Regex matching `/api/notes/<id>`."
+  #"^/api/notes/([^/]+)$")
+
 (def ^:private session-path
   "Regex matching `/api/sessions/<id>`."
   #"^/api/sessions/([^/]+)$")
@@ -503,8 +510,16 @@
   "Regex matching `/api/agent-configs/<id>`."
   #"^/api/agent-configs/([^/]+)$")
 
+(def ^:private git-repo-path
+  "Regex matching `/api/git-repos/<id>`."
+  #"^/api/git-repos/([^/]+)$")
+
+(def ^:private git-worktree-path
+  "Regex matching `/api/git-worktrees/<id>`."
+  #"^/api/git-worktrees/([^/]+)$")
+
 (def ^:private session-completions-path
-  "Regex matching `/api/sessions/<id>/completions`, the `@`-mention completion
+  "Regex matching `/api/sessions/<id>/completions`, the path completion
   endpoint for a session's working directory."
   #"^/api/sessions/([^/]+)/completions$")
 
@@ -643,6 +658,119 @@
           (json-response 200 {:deleted config-id})
           (json-response 404
                          {:error (str "No agent configuration " config-id)})))
+
+      (and (= method :get) (= uri "/api/git-repos"))
+      (json-response 200 (agent/list-git-repos! agent {}))
+
+      (and (= method :post) (= uri "/api/git-repos"))
+      (try
+        (json-response 201
+                       (agent/create-git-repo! agent (read-json-body request)))
+        (catch Throwable e
+          (json-response 400 {:error (util/error-message e)})))
+
+      (and (= method :get) (re-matches git-repo-path uri))
+      (let [repo-id (codec/url-decode (second (re-matches git-repo-path uri)))]
+        (if-let [repo (agent/load-git-repo! agent {:repoId repo-id})]
+          (json-response 200 repo)
+          (json-response 404 {:error (str "No git repository " repo-id)})))
+
+      (and (= method :put) (re-matches git-repo-path uri))
+      (let [repo-id (codec/url-decode (second (re-matches git-repo-path uri)))]
+        (try
+          (if-let [updated (agent/update-git-repo!
+                            agent (assoc (read-json-body request)
+                                         :repoId repo-id))]
+            (json-response 200 updated)
+            (json-response 404 {:error (str "No git repository " repo-id)}))
+          (catch Throwable e
+            (json-response 400 {:error (util/error-message e)}))))
+
+      (and (= method :delete) (re-matches git-repo-path uri))
+      (let [repo-id (codec/url-decode (second (re-matches git-repo-path uri)))]
+        (if (agent/delete-git-repo! agent {:repoId repo-id})
+          (json-response 200 {:deleted repo-id})
+          (json-response 404 {:error (str "No git repository " repo-id)})))
+
+      (and (= method :get) (= uri "/api/git-worktrees"))
+      (json-response 200
+                     (agent/list-git-worktrees!
+                      agent {:repoId (get (query-params request) "repoId")}))
+
+      (and (= method :post) (= uri "/api/git-worktrees"))
+      (try
+        (json-response 201
+                       (agent/create-git-worktree! agent (read-json-body request)))
+        (catch Throwable e
+          (json-response 400 {:error (util/error-message e)})))
+
+      (and (= method :get) (re-matches git-worktree-path uri))
+      (let [worktree-id (codec/url-decode
+                         (second (re-matches git-worktree-path uri)))]
+        (if-let [worktree (agent/load-git-worktree! agent
+                                                    {:worktreeId worktree-id})]
+          (json-response 200 worktree)
+          (json-response 404 {:error (str "No git worktree " worktree-id)})))
+
+      (and (= method :put) (re-matches git-worktree-path uri))
+      (let [worktree-id (codec/url-decode
+                         (second (re-matches git-worktree-path uri)))]
+        (try
+          (if-let [updated (agent/update-git-worktree!
+                            agent (assoc (read-json-body request)
+                                         :worktreeId worktree-id))]
+            (json-response 200 updated)
+            (json-response 404 {:error (str "No git worktree " worktree-id)}))
+          (catch Throwable e
+            (json-response 400 {:error (util/error-message e)}))))
+
+      (and (= method :delete) (re-matches git-worktree-path uri))
+      (let [worktree-id (codec/url-decode
+                         (second (re-matches git-worktree-path uri)))]
+        (if (agent/delete-git-worktree! agent {:worktreeId worktree-id})
+          (json-response 200 {:deleted worktree-id})
+          (json-response 404 {:error (str "No git worktree " worktree-id)})))
+
+      (and (= method :get) (= uri "/api/notes"))
+      (json-response 200 (agent/list-notes! agent {}))
+
+      (and (= method :post) (= uri "/api/notes"))
+      (try
+        (json-response 201 (agent/create-note! agent (read-json-body request)))
+        (catch Throwable e
+          (json-response 400 {:error (util/error-message e)})))
+
+      ;; Before `note-path`, which would otherwise read "search" as an id.
+      (and (= method :get) (= uri "/api/notes/search"))
+      (let [{:strs [q limit]} (query-params request)]
+        (if (str/blank? (str q))
+          (json-response 400 {:error "A search query is required"})
+          (json-response 200 (agent/search-notes! agent
+                                                  {:q     q
+                                                   :limit (parse-limit limit)}))))
+
+      (and (= method :get) (re-matches note-path uri))
+      (let [note-id (codec/url-decode (second (re-matches note-path uri)))]
+        (if-let [note (agent/load-note! agent {:noteId note-id})]
+          (json-response 200 note)
+          (json-response 404 {:error (str "No note " note-id)})))
+
+      (and (= method :put) (re-matches note-path uri))
+      (let [note-id (codec/url-decode (second (re-matches note-path uri)))]
+        (try
+          (if-let [updated (agent/update-note!
+                            agent (assoc (read-json-body request)
+                                         :noteId note-id))]
+            (json-response 200 updated)
+            (json-response 404 {:error (str "No note " note-id)}))
+          (catch Throwable e
+            (json-response 400 {:error (util/error-message e)}))))
+
+      (and (= method :delete) (re-matches note-path uri))
+      (let [note-id (codec/url-decode (second (re-matches note-path uri)))]
+        (if (agent/delete-note! agent {:noteId note-id})
+          (json-response 200 {:deleted note-id})
+          (json-response 404 {:error (str "No note " note-id)})))
 
       (and (= method :post) (= uri "/api/sessions"))
       (try

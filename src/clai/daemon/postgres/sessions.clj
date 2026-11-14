@@ -11,7 +11,7 @@
   argument. Build one with `clai.daemon.postgres/open` (which applies the
   schema immediately), or with `clai.daemon.postgres/make-client`; either way
   the first storage operation ensures the schema (once per client, see
-  [[ready]]), so a `make-client` client needs no explicit
+  `clai.daemon.postgres/ready`), so a `make-client` client needs no explicit
   `clai.daemon.postgres/ensure-schema!` call. Because a session is database
   rows, mutations are transactional and a session is visible to every process
   sharing the database.
@@ -110,27 +110,6 @@
    [:cwd [:or :string [:fn #(instance? File %)]]]
    [:createdAt {:optional true} [:maybe :string]]
    [:history {:optional true} [:vector message]]])
-
-;; ---------------------------------------------------------------------------
-;; Schema readiness
-;; ---------------------------------------------------------------------------
-
-(defonce ^:private schema-ready
-  ;; Clients whose storage tables have already been ensured. Keeping this here
-  ;; lets callers build a client (and even an agent) without touching the
-  ;; database; the schema is created on the first storage operation.
-  (atom #{}))
-
-(defn- ready
-  "Ensure the storage tables exist for `client` (once per client) and return
-  it."
-  [client]
-  (when-not (contains? @schema-ready client)
-    (locking schema-ready
-      (when-not (contains? @schema-ready client)
-        (postgres/ensure-schema! client)
-        (swap! schema-ready conj client))))
-  client)
 
 ;; ---------------------------------------------------------------------------
 ;; Row conversion
@@ -293,7 +272,7 @@
   {:malli/schema [:-> #'postgres/client-schema #'save-session-state
                   [:maybe #'session]]}
   [client state]
-  (let [client  (ready client)
+  (let [client  (postgres/ready client)
         state   (-> state
                     (assoc :cwd (canonical-cwd (:cwd state)))
                     (assoc :history (vec (or (:history state) []))))
@@ -367,7 +346,7 @@
   {:malli/schema [:-> #'postgres/client-schema #'non-empty-string
                   [:maybe #'session]]}
   [client session-id]
-  (let [client (ready client)]
+  (let [client (postgres/ready client)]
     (when-let [id (session-key session-id)]
       (let [datasource (:datasource client)]
         (when-let [row (postgres/exec-one! datasource ::load-session
@@ -386,7 +365,7 @@
   removed, false otherwise."
   {:malli/schema [:-> #'postgres/client-schema #'non-empty-string boolean?]}
   [client session-id]
-  (let [client   (ready client)
+  (let [client   (postgres/ready client)
         id       (session-key session-id)
         result   (when id
                    (postgres/exec-one! (:datasource client) ::delete-session
@@ -406,7 +385,7 @@
   {:malli/schema [:-> #'postgres/client-schema #'non-empty-string
                   [:maybe :string] [:maybe #'session-summary]]}
   [client session-id title]
-  (let [client (ready client)]
+  (let [client (postgres/ready client)]
     (if-let [id (session-key session-id)]
       (let [datasource (:datasource client)
             title      (normalize-title title)
@@ -432,7 +411,7 @@
   "Return true when `session-id` is recorded."
   {:malli/schema [:-> #'postgres/client-schema #'non-empty-string boolean?]}
   [client session-id]
-  (let [client (ready client)]
+  (let [client (postgres/ready client)]
     (boolean
      (when-let [id (session-key session-id)]
        (postgres/exec-one! (:datasource client) ::session-exists
@@ -445,10 +424,10 @@
 
   Reads only the session's metadata row, so this is much cheaper than
   [[load-session]] for callers that do not need the conversation -- the web
-  UI's `@`-mention completion runs on every keystroke."
+  UI's path completion runs on every keystroke."
   {:malli/schema [:-> #'postgres/client-schema #'non-empty-string [:maybe :string]]}
   [client session-id]
-  (let [client (ready client)]
+  (let [client (postgres/ready client)]
     (when-let [id (session-key session-id)]
       (some-> (postgres/exec-one! (:datasource client) ::load-session
                                   select-session-sql [id])
@@ -460,7 +439,7 @@
   histories. Use [[list-session-summaries]] for metadata only."
   {:malli/schema [:-> #'postgres/client-schema [:vector #'session]]}
   [client]
-  (let [datasource (:datasource (ready client))
+  (let [datasource (:datasource (postgres/ready client))
         rows       (postgres/exec! datasource ::list-sessions
                                    list-sessions-sql [])
         events     (postgres/exec! datasource ::list-messages
@@ -484,7 +463,7 @@
   {:malli/schema [:-> #'postgres/client-schema [:vector #'session-summary]]}
   [client]
   (mapv row->summary
-        (postgres/exec! (:datasource (ready client)) ::list-session-summaries
+        (postgres/exec! (:datasource (postgres/ready client)) ::list-session-summaries
                         list-sessions-sql [])))
 
 ;; ---------------------------------------------------------------------------
@@ -498,7 +477,7 @@
                   [:vector #'message]]}
   [client session-id]
   (if-let [id (session-key session-id)]
-    (history-from (:datasource (ready client)) id)
+    (history-from (:datasource (postgres/ready client)) id)
     []))
 
 (defn append-history
@@ -508,7 +487,7 @@
                   [:maybe #'message]]}
   [client session-id msg]
   (postgres/validate! message msg "append-history")
-  (let [client (ready client)
+  (let [client (postgres/ready client)
         result (when-let [id (session-key session-id)]
                  (postgres/exec-one!
                   (:datasource client) ::append-history
@@ -534,7 +513,7 @@
   {:malli/schema [:-> #'postgres/client-schema #'non-empty-string
                   [:maybe #'session]]}
   [client session-id]
-  (let [client (ready client)]
+  (let [client (postgres/ready client)]
     (if-let [id (session-key session-id)]
       (jdbc/with-transaction [tx (:datasource client)]
         (if-let [row (postgres/exec-one! tx ::load-session

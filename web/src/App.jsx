@@ -3,6 +3,8 @@ import { AgentConfigManager } from './components/AgentConfigManager.jsx'
 import { Chat } from './components/Chat.jsx'
 import { ErrorToasts } from './components/ErrorToasts.jsx'
 import { ExplorerPanel } from './components/ExplorerPanel.jsx'
+import { GitReposPage } from './components/GitReposPage.jsx'
+import { NotesPage } from './components/NotesPage.jsx'
 import { ReplPanel } from './components/ReplPanel.jsx'
 import { SessionSidebar } from './components/SessionSidebar.jsx'
 import { useClaiSocket } from './useClaiSocket.js'
@@ -38,10 +40,13 @@ function EmptyState({ hasSessions, onNewSession }) {
 /**
  * The web UI shell: connection status, the session sidebar, the chat timeline,
  * and the optional Clojure REPL and explorer panels. The explorer shows either
- * the session's files or the Clojure namespaces the REPL can use.
+ * the session's files or the Clojure namespaces the REPL can use. The topbar
+ * switches between the session console, the git repository registry, and the
+ * notes page.
  */
 export default function App() {
   const clai = useClaiSocket()
+  const [view, setView] = useState('sessions')
   const [replOpen, setReplOpen] = useState(true)
   const [explorerOpen, setExplorerOpen] = useState(true)
   const [explorerTab, setExplorerTab] = useState('files')
@@ -67,6 +72,29 @@ export default function App() {
           <span className="brand-name">clai</span>
           <span className="brand-tag">agent console</span>
         </div>
+        <nav className="view-tabs" aria-label="Main views">
+          <button
+            className={`view-tab${view === 'sessions' ? ' view-tab--active' : ''}`}
+            aria-current={view === 'sessions' ? 'page' : undefined}
+            onClick={() => setView('sessions')}
+          >
+            Sessions
+          </button>
+          <button
+            className={`view-tab${view === 'git' ? ' view-tab--active' : ''}`}
+            aria-current={view === 'git' ? 'page' : undefined}
+            onClick={() => setView('git')}
+          >
+            Git repos
+          </button>
+          <button
+            className={`view-tab${view === 'notes' ? ' view-tab--active' : ''}`}
+            aria-current={view === 'notes' ? 'page' : undefined}
+            onClick={() => setView('notes')}
+          >
+            Notes
+          </button>
+        </nav>
         <div className="topbar__meta">
           <span className={`connection connection--${clai.status}`}>
             <span className="connection__dot" />
@@ -82,73 +110,83 @@ export default function App() {
           {clai.sessionInfo.nreplPort && (
             <span className="pill">nREPL :{clai.sessionInfo.nreplPort}</span>
           )}
-          <button
-            className="button button--quiet"
-            onClick={() => setReplOpen((open) => !open)}
-          >
-            {replOpen ? 'Hide REPL' : 'Show REPL'}
-          </button>
-          <button
-            className="button button--quiet"
-            onClick={() => setExplorerOpen((open) => !open)}
-          >
-            {explorerOpen ? 'Hide explorer' : 'Show explorer'}
-          </button>
+          {view === 'sessions' && (
+            <>
+              <button
+                className="button button--quiet"
+                onClick={() => setReplOpen((open) => !open)}
+              >
+                {replOpen ? 'Hide REPL' : 'Show REPL'}
+              </button>
+              <button
+                className="button button--quiet"
+                onClick={() => setExplorerOpen((open) => !open)}
+              >
+                {explorerOpen ? 'Hide explorer' : 'Show explorer'}
+              </button>
+            </>
+          )}
         </div>
       </header>
 
-      <div className={layoutClass}>
-        <SessionSidebar
-          sessions={clai.sessions}
-          currentSession={clai.currentSession}
-          agentConfigs={clai.agentConfigs}
-          selectedConfigId={clai.selectedConfigId}
-          status={clai.status}
-          sessionInfo={clai.sessionInfo}
-          onNewSession={clai.newSession}
-          onSelectConfig={clai.selectAgentConfig}
-          onManageConfigs={() => setConfigManagerOpen(true)}
-          onRefresh={clai.refreshSessions}
-          onLoadSession={clai.loadSession}
-          onDeleteSession={clai.deleteSession}
-        />
-
-        {clai.currentSession ? (
-          <Chat
-            session={clai.currentSession}
-            updates={clai.updates}
-            promptRunning={clai.promptRunning}
-            onPrompt={clai.runPrompt}
-            onRename={clai.renameSession}
-          />
-        ) : (
-          <EmptyState
-            hasSessions={clai.sessions.length > 0}
+      {view === 'git' ? (
+        <GitReposPage onClose={() => setView('sessions')} />
+      ) : view === 'notes' ? (
+        <NotesPage onClose={() => setView('sessions')} />
+      ) : (
+        <div className={layoutClass}>
+          <SessionSidebar
+            sessions={clai.sessions}
+            currentSession={clai.currentSession}
+            agentConfigs={clai.agentConfigs}
+            selectedConfigId={clai.selectedConfigId}
+            status={clai.status}
+            sessionInfo={clai.sessionInfo}
             onNewSession={clai.newSession}
+            onSelectConfig={clai.selectAgentConfig}
+            onManageConfigs={() => setConfigManagerOpen(true)}
+            onRefresh={clai.refreshSessions}
+            onLoadSession={clai.loadSession}
+            onDeleteSession={clai.deleteSession}
           />
-        )}
 
-        {replOpen && (
-          <ReplPanel
-            nreplPort={clai.sessionInfo.nreplPort}
-            currentSession={clai.currentSession}
-            entries={clai.replEntries}
-            running={clai.evalRunning}
-            onEval={clai.evalForm}
-            onClear={clai.clearRepl}
-            onClose={() => setReplOpen(false)}
-          />
-        )}
+          {clai.currentSession ? (
+            <Chat
+              session={clai.currentSession}
+              updates={clai.updates}
+              promptRunning={clai.promptRunning}
+              onPrompt={clai.runPrompt}
+              onRename={clai.renameSession}
+            />
+          ) : (
+            <EmptyState
+              hasSessions={clai.sessions.length > 0}
+              onNewSession={clai.newSession}
+            />
+          )}
 
-        {explorerOpen && (
-          <ExplorerPanel
-            tab={explorerTab}
-            onTab={setExplorerTab}
-            currentSession={clai.currentSession}
-            onClose={() => setExplorerOpen(false)}
-          />
-        )}
-      </div>
+          {replOpen && (
+            <ReplPanel
+              nreplPort={clai.sessionInfo.nreplPort}
+              currentSession={clai.currentSession}
+              entries={clai.replEntries}
+              running={clai.evalRunning}
+              onEval={clai.evalForm}
+              onClear={clai.clearRepl}
+              onClose={() => setReplOpen(false)}
+            />
+          )}
+
+          {explorerOpen && (
+            <ExplorerPanel
+              tab={explorerTab}
+              onTab={setExplorerTab}
+              currentSession={clai.currentSession}
+              onClose={() => setExplorerOpen(false)}
+            />
+          )}
+        </div>
+      )}
 
       <ErrorToasts errors={clai.errors} onDismiss={clai.dismissError} />
 

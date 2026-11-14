@@ -28,15 +28,26 @@ its nice for a user to use from the REPL.
 | PostgreSQL client           | ./src/clai/daemon/postgres.clj           |
 | Session storage             | ./src/clai/daemon/postgres/sessions.clj  |
 | Git repo/worktree storage   | ./src/clai/daemon/postgres/git.clj       |
+| Git repo/worktree HTTP API  | ./src/clai/daemon/http.clj               |
+| Note storage + BM25 note search | ./src/clai/daemon/postgres/notes.clj  |
+| Note HTTP API (CRUD + search) | ./src/clai/daemon/http.clj              |
 | OpenProject task/comment tools | ./src/clai/agent/tools/builtin/openproject.clj |
+| Note tools (list/search/read/update/delete) | ./src/clai/agent/tools/builtin/notes.clj |
 | `eval_clojure` tool (agent REPL) | ./src/clai/agent/tools/builtin/eval.clj |
 | Agent REPL namespace (`eval_clojure` default, `tools`/`history` helpers) | ./src/clai/home/core.clj |
 | File listing/preview (web)  | ./src/clai/daemon/files.clj              |
 | Clojure runtime introspection (web) | ./src/clai/daemon/namespaces.clj |
 | Storage DDL                 | ./schema/schema.sql                      |
+| Local dev database (compose, pg_textsearch image) | ./docker-compose.yml, ./docker/postgres/Dockerfile |
 | Web UI                      | ./web                                    |
+| Web git repository page    | ./web/src/components/GitReposPage.jsx    |
+| Web git repository state   | ./web/src/useGitRepos.js                 |
 | Web file explorer           | ./web/src/components/FileExplorer.jsx    |
 | Web namespace explorer      | ./web/src/components/ClojureExplorer.jsx |
+| Web notes page (view, search, create, edit) | ./web/src/components/NotesPage.jsx |
+| Web notes state + API calls | ./web/src/useNotes.js                    |
+| Web note form/link helpers + tests | ./web/src/notes.js, ./web/src/notes.test.js |
+| Web shared date formatting  | ./web/src/format.js                      |
 
 Make sure to maintain files like this that list major file and subdirectories and what they contain.
 

@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { mentionAt } from './mentions.js'
+import { PATH_PREFIX, pathAt } from './paths.js'
 
 // Wait for a short pause in typing before asking the daemon, so a path like
-// `@src/clai/daemon` produces one request instead of one per keystroke.
+// `./src/clai/daemon` produces one request instead of one per keystroke.
 const DEBOUNCE_MS = 120
 
 /**
@@ -21,10 +21,10 @@ async function fetchCompletions(sessionId, path, signal) {
 }
 
 /**
- * `@`-mention file completion for a prompt textarea.
+ * `./`-triggered file completion for a prompt textarea.
  *
  * The hook watches the caret in `value`, asks the daemon's completion endpoint
- * whenever the user is typing a word that starts with `@`, and applies the
+ * whenever the user is typing a word that starts with `./`, and applies the
  * selected entry back into the text. Picking a directory reopens the list for
  * its contents; picking a file inserts a trailing space and closes the list.
  *
@@ -37,8 +37,8 @@ export function usePathAutocomplete({ sessionId, value, onChange, textareaRef })
   const timerRef = useRef(null)
   const controllerRef = useRef(null)
   const sequenceRef = useRef(0)
-  // The mention text the user dismissed with Escape. The popup stays closed
-  // until the token changes, so Escape is not undone by the next keystroke.
+  // The token the user dismissed with Escape. The popup stays closed until the
+  // token changes, so Escape is not undone by the next keystroke.
   const dismissedRef = useRef(null)
   // Caret position to restore after `onChange` replaces the draft.
   const pendingRef = useRef(null)
@@ -60,9 +60,9 @@ export function usePathAutocomplete({ sessionId, value, onChange, textareaRef })
     update(null)
   }, [update])
 
-  /** Ask the daemon for entries matching `mention`. */
+  /** Ask the daemon for entries matching the path `token`. */
   const load = useCallback(
-    (mention, immediate) => {
+    (token, immediate) => {
       if (timerRef.current !== null) window.clearTimeout(timerRef.current)
       controllerRef.current?.abort()
       const sequence = ++sequenceRef.current
@@ -70,14 +70,14 @@ export function usePathAutocomplete({ sessionId, value, onChange, textareaRef })
         timerRef.current = null
         const controller = new AbortController()
         controllerRef.current = controller
-        fetchCompletions(sessionId, mention.path, controller.signal)
+        fetchCompletions(sessionId, token.path, controller.signal)
           .then((entries) => {
             if (sequence !== sequenceRef.current) return
             update({
-              start: mention.start,
-              end: mention.end,
-              token: mention.text,
-              path: mention.path,
+              start: token.start,
+              end: token.end,
+              token: token.text,
+              path: token.path,
               entries,
               index: 0,
             })
@@ -94,20 +94,20 @@ export function usePathAutocomplete({ sessionId, value, onChange, textareaRef })
     [sessionId, update],
   )
 
-  /** Re-read the mention at `caret` and refresh the popup. */
+  /** Re-read the path token at `caret` and refresh the popup. */
   const refresh = useCallback(
     (text, caret, immediate = false) => {
-      const mention = mentionAt(text, caret)
-      if (!mention || !sessionId) {
+      const token = pathAt(text, caret)
+      if (!token || !sessionId) {
         close()
         return
       }
-      if (dismissedRef.current === mention.text) {
+      if (dismissedRef.current === token.text) {
         close()
         return
       }
       dismissedRef.current = null
-      load(mention, immediate)
+      load(token, immediate)
     },
     [close, load, sessionId],
   )
@@ -128,7 +128,7 @@ export function usePathAutocomplete({ sessionId, value, onChange, textareaRef })
       const current = completionRef.current
       if (!current || !entry) return
       const directory = entry.type === 'directory'
-      const inserted = `@${entry.path}${directory ? '' : ' '}`
+      const inserted = `${PATH_PREFIX}${entry.path}${directory ? '' : ' '}`
       const caret = current.start + inserted.length
       const nextValue =
         value.slice(0, current.start) + inserted + value.slice(current.end)

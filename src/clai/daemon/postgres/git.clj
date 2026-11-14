@@ -94,27 +94,6 @@
    [:updatedAt {:optional true} [:maybe :string]]])
 
 ;; ---------------------------------------------------------------------------
-;; Schema readiness
-;; ---------------------------------------------------------------------------
-
-(defonce ^:private schema-ready
-  ;; Clients whose storage tables have already been ensured. Keeping this here
-  ;; lets callers build a client (and even an agent) without touching the
-  ;; database; the schema is created on the first repository operation.
-  (atom #{}))
-
-(defn- ready
-  "Ensure the storage tables exist for `client` (once per client) and return
-  it."
-  [client]
-  (when-not (contains? @schema-ready client)
-    (locking schema-ready
-      (when-not (contains? @schema-ready client)
-        (postgres/ensure-schema! client)
-        (swap! schema-ready conj client))))
-  client)
-
-;; ---------------------------------------------------------------------------
 ;; Input normalization and row conversion
 ;; ---------------------------------------------------------------------------
 
@@ -288,7 +267,7 @@
   {:malli/schema [:-> #'postgres/client-schema [:vector #'GitRepo]]}
   [client]
   (mapv row->repo
-        (postgres/exec! (:datasource (ready client)) ::list-repos
+        (postgres/exec! (:datasource (postgres/ready client)) ::list-repos
                         list-repos-sql [])))
 
 (defn load-repo
@@ -297,7 +276,7 @@
   {:malli/schema [:-> #'postgres/client-schema #'non-empty-string
                   [:maybe #'GitRepo]]}
   [client repo-id]
-  (let [client (ready client)]
+  (let [client (postgres/ready client)]
     (when-let [id (row-key repo-id)]
       (some-> (postgres/exec-one! (:datasource client) ::load-repo
                                   load-repo-sql [id])
@@ -309,7 +288,7 @@
   {:malli/schema [:-> #'postgres/client-schema #'non-empty-string
                   [:maybe #'GitRepo]]}
   [client name]
-  (some-> (postgres/exec-one! (:datasource (ready client)) ::select-repo
+  (some-> (postgres/exec-one! (:datasource (postgres/ready client)) ::select-repo
                               select-repo-sql [(str/trim name)])
           row->repo))
 
@@ -322,7 +301,7 @@
   [client repo]
   (let [repo  (prepare-repo repo)
         saved (row->repo
-               (postgres/exec-one! (:datasource (ready client)) ::create-repo
+               (postgres/exec-one! (:datasource (postgres/ready client)) ::create-repo
                                    insert-repo-sql
                                    [(:name repo) (:url repo)]))]
     (tel/log! {:level :debug
@@ -339,7 +318,7 @@
   {:malli/schema [:-> #'postgres/client-schema #'non-empty-string
                   #'GitRepoInput [:maybe #'GitRepo]]}
   [client repo-id repo]
-  (let [client (ready client)
+  (let [client (postgres/ready client)
         repo   (prepare-repo repo)]
     (when-let [id (row-key repo-id)]
       (some-> (postgres/exec-one! (:datasource client) ::update-repo
@@ -352,7 +331,7 @@
   `ON DELETE CASCADE`). Returns true when a repository was removed."
   {:malli/schema [:-> #'postgres/client-schema #'non-empty-string boolean?]}
   [client repo-id]
-  (let [client   (ready client)
+  (let [client   (postgres/ready client)
         id       (row-key repo-id)
         deleted? (boolean
                   (when id
@@ -369,7 +348,7 @@
   "Return true when `repo-id` names a stored repository."
   {:malli/schema [:-> #'postgres/client-schema #'non-empty-string boolean?]}
   [client repo-id]
-  (let [client (ready client)]
+  (let [client (postgres/ready client)]
     (boolean
      (when-let [id (row-key repo-id)]
        (postgres/exec-one! (:datasource client) ::repo-exists
@@ -386,10 +365,10 @@
                    [:vector #'GitWorktree]]]}
   ([client]
    (mapv row->worktree
-         (postgres/exec! (:datasource (ready client)) ::list-worktrees
+         (postgres/exec! (:datasource (postgres/ready client)) ::list-worktrees
                          list-worktrees-sql [])))
   ([client repo-id]
-   (let [client (ready client)]
+   (let [client (postgres/ready client)]
      (if-let [id (row-key repo-id)]
        (mapv row->worktree
              (postgres/exec! (:datasource client) ::list-repo-worktrees
@@ -402,7 +381,7 @@
   {:malli/schema [:-> #'postgres/client-schema #'non-empty-string
                   [:maybe #'GitWorktree]]}
   [client worktree-id]
-  (let [client (ready client)]
+  (let [client (postgres/ready client)]
     (when-let [id (row-key worktree-id)]
       (worktree-by-id (:datasource client) id))))
 
@@ -412,7 +391,7 @@
   {:malli/schema [:-> #'postgres/client-schema #'non-empty-string
                   [:maybe #'GitWorktree]]}
   [client directory]
-  (some-> (postgres/exec-one! (:datasource (ready client)) ::find-worktree
+  (some-> (postgres/exec-one! (:datasource (postgres/ready client)) ::find-worktree
                               find-worktree-sql [(str/trim directory)])
           row->worktree))
 
@@ -426,7 +405,7 @@
   {:malli/schema [:-> #'postgres/client-schema #'GitWorktreeInput
                   #'GitWorktree]}
   [client worktree]
-  (let [client   (ready client)
+  (let [client   (postgres/ready client)
         worktree (prepare-worktree worktree)
         result   (postgres/exec-one! (:datasource client) ::create-worktree
                                      insert-worktree-sql
@@ -449,7 +428,7 @@
   {:malli/schema [:-> #'postgres/client-schema #'non-empty-string
                   #'GitWorktreeInput [:maybe #'GitWorktree]]}
   [client worktree-id worktree]
-  (let [client   (ready client)
+  (let [client   (postgres/ready client)
         worktree (prepare-worktree worktree)]
     (when-let [id (row-key worktree-id)]
       (when-let [result (postgres/exec-one!
@@ -465,7 +444,7 @@
   "Delete `worktree-id`. Returns true when a worktree was removed."
   {:malli/schema [:-> #'postgres/client-schema #'non-empty-string boolean?]}
   [client worktree-id]
-  (let [client   (ready client)
+  (let [client   (postgres/ready client)
         id       (row-key worktree-id)
         deleted? (boolean
                   (when id

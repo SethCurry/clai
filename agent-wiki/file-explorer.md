@@ -22,7 +22,7 @@ for that.
 ## What it reads
 
 The panel only browses the selected session's `cwd`, exactly like
-[`@` mentions](file-mentions.md). The daemon answers two requests:
+[Path completion](path-completion.md). The daemon answers two requests:
 
 ```text
 GET /api/sessions/<session-id>/files?path=src/&limit=500
@@ -43,13 +43,13 @@ named but not shown.
 - Folders are fetched lazily, the first time you open them, so opening a big
   repository does not read all of it.
 - A folder with more than 500 entries says so instead of listing the rest.
-  Narrow it down by opening a subfolder, or use `@` completion in the prompt
-  composer, which filters by name as you type.
+  Narrow it down by opening a subfolder, or start a word with `./` in the
+  prompt composer, which filters by name as you type.
 
 ## See also
 
-- [Mentioning files and folders](file-mentions.md): the `@` completion popup,
-  which searches the same directory.
+- [Completing file and folder paths](path-completion.md): the `./`
+  completion popup, which searches the same directory.
 - [Browsing Clojure namespaces](namespaces.md): the other half of the
   explorer panel, for inspecting the runtime the REPL evaluates in.
 - [Plugins](plugins.md): add behavior to every prompt.

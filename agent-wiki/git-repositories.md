@@ -87,5 +87,37 @@ without a second lookup, which makes them easy to pipe into a picker:
 
 ## From the web UI
 
-The web UI does not expose the registry yet; for now manage repositories and
-worktrees from the REPL with the functions above.
+The web console has a **Git repos** tab next to **Sessions**. It lists every
+registered repository and lets you:
+
+- register a repository with **+ New repository** (a name and a git URL or
+  path);
+- select a repository to view its URL, timestamps, and recorded worktrees;
+- edit or delete the selected repository (deleting it also removes its
+  worktrees);
+- record a worktree for the selected repository, or edit and delete existing
+  worktrees.
+
+The worktree form stores what you enter; it does not run
+`git worktree add`. Use `clai.shell.git` for the git side and then record the
+result in the UI.
+
+The page talks to the daemon's JSON API:
+
+| Method   | Path                     | Purpose                             |
+| -------- | ------------------------ | ----------------------------------- |
+| `GET`    | `/api/git-repos`         | list repositories                   |
+| `POST`   | `/api/git-repos`         | register a repository               |
+| `GET`    | `/api/git-repos/:id`     | load one repository                 |
+| `PUT`    | `/api/git-repos/:id`     | replace its name and URL            |
+| `DELETE` | `/api/git-repos/:id`     | delete it and its worktrees         |
+| `GET`    | `/api/git-worktrees`     | list worktrees (`?repoId=` filters) |
+| `POST`   | `/api/git-worktrees`     | record a worktree                   |
+| `GET`    | `/api/git-worktrees/:id` | load one worktree                   |
+| `PUT`    | `/api/git-worktrees/:id` | replace its repo, branch, directory |
+| `DELETE` | `/api/git-worktrees/:id` | delete it                           |
+
+Requests and responses use JSON. Creating a repository needs
+`{"name": "clai", "url": "git@github.com:me/clai.git"}`, and creating a
+worktree needs `{"repoId": "1", "branch": "main", "directory":
+"/home/me/src/clai"}`.

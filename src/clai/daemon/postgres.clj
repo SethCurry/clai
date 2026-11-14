@@ -46,6 +46,8 @@
       plugin                       installed Clojure-jar plugins
       git_repo                     registered git repositories
       git_worktree                 worktrees checked out from a repository
+      note                         titled documents, searched with BM25
+      note_link                    directional links between notes
 
   Every statement in that file is idempotent, so applying it on every process
   start (or from the container's `psql` init step) is safe.
@@ -468,6 +470,32 @@
                        :statements (count statements)}}
               "Ensured PostgreSQL storage schema")
     nil))
+
+;; ---------------------------------------------------------------------------
+;; Schema readiness
+;; ---------------------------------------------------------------------------
+;;
+;; `open` applies the schema immediately, but storage namespaces also ensure it
+;; once per client themselves ([[ready]]), so that building a client — and even
+;; an agent — does not touch the database.
+
+(defonce ^:private schema-ready
+  ;; Clients whose storage tables have already been ensured.
+  (atom #{}))
+
+(defn ^:no-doc ready
+  "Ensure the storage tables exist for `client` (once per client) and return
+  it unchanged.
+
+  Shared with `clai.daemon.postgres.sessions`, `.git`, and `.notes`."
+  {:malli/schema [:-> #'client-schema #'client-schema]}
+  [client]
+  (when-not (contains? @schema-ready client)
+    (locking schema-ready
+      (when-not (contains? @schema-ready client)
+        (ensure-schema! client)
+        (swap! schema-ready conj client))))
+  client)
 
 ;; ---------------------------------------------------------------------------
 ;; SQL helpers

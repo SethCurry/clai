@@ -6,6 +6,7 @@
             [clai.agent.core :as agent]
             [clai.agent.providers.ollama :as ollama]
             [clai.agent.providers.openrouter :as openrouter]
+            [clai.daemon.postgres.git :as git]
             [clai.daemon.postgres.sessions :as sessions]
             [clai.events.schema :as events]
             [clai.plugins :as plugins]
@@ -539,3 +540,79 @@
          (is (= "agent_message" (:type update)))
          (is (= "No session missing"
                 (events/content->text (:content update)))))))))
+
+(deftest git-registry-wrappers-delegate-to-storage
+  (let [agent {:postgres :fake-postgres}
+        repo  {:repoId "1" :name "clai" :url "https://example.com/clai.git"}
+        worktree {:worktreeId "3"
+                  :repoId     "1"
+                  :repoName   "clai"
+                  :repoUrl    "https://example.com/clai.git"
+                  :branch     "main"
+                  :directory  "/tmp/clai"}]
+    (with-redefs [git/list-repos     (fn [client]
+                                       (is (= :fake-postgres client))
+                                       [repo])
+                  git/load-repo      (fn [_ repo-id]
+                                       (when (= "1" repo-id) repo))
+                  git/select-repo    (fn [_ name]
+                                       (when (= "clai" name) repo))
+                  git/create-repo    (fn [_ input]
+                                       (is (= {:name "clai" :url "u"} input))
+                                       (assoc repo :name "clai" :url "u"))
+                  git/update-repo    (fn [_ repo-id input]
+                                       (when (= "1" repo-id)
+                                         (merge repo input)))
+                  git/delete-repo    (fn [_ repo-id]
+                                       (= "1" repo-id))
+                  git/list-worktrees (fn ([_]
+                                        [worktree])
+                                       ([_ repo-id]
+                                        (if (= "1" repo-id)
+                                          [worktree]
+                                          [])))
+                  git/load-worktree  (fn [_ worktree-id]
+                                       (when (= "3" worktree-id) worktree))
+                  git/create-worktree (fn [_ input]
+                                        (is (= {:repoId    "1"
+                                                :branch    "main"
+                                                :directory "/tmp/clai"}
+                                               input))
+                                        worktree)
+                  git/update-worktree (fn [_ worktree-id input]
+                                        (when (= "3" worktree-id)
+                                          (merge worktree input)))
+                  git/delete-worktree (fn [_ worktree-id]
+                                        (= "3" worktree-id))]
+      (is (= {:repos [repo]} (agent/list-git-repos! agent {})))
+      (is (= repo (agent/load-git-repo! agent {:repoId "1"})))
+      (is (= repo (agent/load-git-repo! agent {:name "clai"})))
+      (is (nil? (agent/load-git-repo! agent {})))
+      (is (= "u" (:url (agent/create-git-repo! agent {:name "clai" :url "u"}))))
+      (is (= "renamed" (:name (agent/update-git-repo!
+                                agent {:repoId "1" :name "renamed" :url "u"}))))
+      (is (nil? (agent/update-git-repo! agent {:repoId "9" :name "x" :url "u"})))
+      (is (true? (agent/delete-git-repo! agent {:repoId "1"})))
+      (is (false? (agent/delete-git-repo! agent {:repoId "9"})))
+
+      (is (= {:worktrees [worktree]} (agent/list-git-worktrees! agent {})))
+      (is (= {:worktrees [worktree]}
+             (agent/list-git-worktrees! agent {:repoId "1"})))
+      (is (= [] (:worktrees (agent/list-git-worktrees! agent {:repoId "2"}))))
+      (is (= worktree (agent/load-git-worktree! agent {:worktreeId "3"})))
+      (is (= worktree
+             (agent/create-git-worktree! agent {:repoId    "1"
+                                                :branch    "main"
+                                                :directory "/tmp/clai"})))
+      (is (= "dev" (:branch (agent/update-git-worktree!
+                              agent {:worktreeId "3"
+                                     :repoId      "1"
+                                     :branch      "dev"
+                                     :directory   "/tmp/clai"}))))
+      (is (nil? (agent/update-git-worktree!
+                 agent {:worktreeId "9"
+                        :repoId      "1"
+                        :branch      "dev"
+                        :directory   "/tmp/clai"})))
+      (is (true? (agent/delete-git-worktree! agent {:worktreeId "3"})))
+      (is (false? (agent/delete-git-worktree! agent {:worktreeId "9"}))))))

@@ -42,6 +42,7 @@
   OpenProject collection, case-insensitively. This lets a model write
   `\"status\": \"In progress\"` instead of first looking up a status id."
   (:require [cheshire.core :as json]
+            [clai.agent.tools.builtin.common :as common]
             [clai.agent.tools.schema :as schema]
             [clai.util :as util]
             [clj-http.client :as http]
@@ -535,14 +536,6 @@
 ;; Formatting
 ;; ---------------------------------------------------------------------------
 
-(defn- truncate
-  "Truncate `text` to `max-chars`, appending an ellipsis when shortened."
-  [text max-chars]
-  (let [text (str text)]
-    (if (> (count text) max-chars)
-      (str (subs text 0 max-chars) "...")
-      text)))
-
 (defn- attribute-line
   "Render the linked attributes of `wp` as one comma-separated line."
   [{:keys [startDate dueDate] :as wp}]
@@ -579,18 +572,7 @@
     (str (work-package-summary client wp)
          (when-not (str/blank? (str description))
            (str "\n  description: "
-                (truncate (str/replace (str description) #"\s+" " ") 500))))))
-
-(defn- format-timestamp
-  "Render an OpenProject ISO-8601 timestamp as `YYYY-MM-DD HH:MM UTC`, or nil
-  when `value` is blank. OpenProject reports UTC, so it is labelled rather than
-  silently converted."
-  [value]
-  (let [text (str value)]
-    (when-not (str/blank? text)
-      (str (-> (subs text 0 (min 16 (count text)))
-               (str/replace "T" " "))
-           " UTC"))))
+                (common/truncate (str/replace (str description) #"\s+" " ") 500))))))
 
 (defn- indent-lines
   "Indent every line of `text` by `width` spaces."
@@ -627,10 +609,10 @@
     (str (if comment "comment " "change ")
          (:id activity)
          " by " (activity-author activity name-for)
-         (when-let [at (format-timestamp (:createdAt activity))]
+         (when-let [at (common/format-timestamp (:createdAt activity))]
            (str " on " at))
          (when comment
-           (str "\n" (indent-lines (truncate text 2000) 2)))
+           (str "\n" (indent-lines (common/truncate text 2000) 2)))
          (when (and include-changes? (seq changes))
            (apply str "\n  changes:"
                   (map #(str "\n    - " %) changes))))))

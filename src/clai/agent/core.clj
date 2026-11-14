@@ -29,6 +29,8 @@
     * `clai.agent.resources`               -- resource blocks rendered as text
                                               for the model.
     * `clai.daemon.postgres.sessions`      -- PostgreSQL-backed session storage.
+    * `clai.daemon.postgres.notes`         -- PostgreSQL-backed note storage and
+                                              BM25 search.
     * `clai.agent.tools.registry`          -- immutable tool registries.
     * `clai.agent.tools.builtin`           -- the default built-in tools.
     * `clai.agent.tools.invoke`            -- running one model tool call.
@@ -42,6 +44,8 @@
             [clai.agent.tools.invoke :as tool-invoke]
             [clai.agent.tools.registry :as tools-registry]
             [clai.config :as config]
+            [clai.daemon.postgres.git :as git]
+            [clai.daemon.postgres.notes :as notes]
             [clai.daemon.postgres.sessions :as sessions]
             [clai.events.schema :as events]
             [clai.log]
@@ -230,7 +234,7 @@
   recorded.
 
   Reads only the session's metadata row, so callers that do not need the
-  conversation -- such as the web UI's `@`-mention completion -- avoid loading
+  conversation -- such as the web UI's path completion -- avoid loading
   its history or triggering [[load-session!]]'s side effects."
   {:malli/schema [:-> :map [:map [:sessionId {:optional true} [:maybe :string]]]
                   [:maybe :string]]}
@@ -353,6 +357,274 @@
                        :deleted? deleted?}}
               "Deleted agent configuration")
     (boolean deleted?)))
+
+;; ---------------------------------------------------------------------------
+;; Git repositories and worktrees
+;; ---------------------------------------------------------------------------
+
+(defn list-git-repos!
+  "List the registered git repositories. Returns `{:repos [repo ...]}`."
+  {:malli/schema [:-> :map [:map] :map]}
+  [agent _opts]
+  (let [repos (git/list-repos (:postgres agent))]
+    (tel/log! {:level :debug
+               :id    ::git-repo-list
+               :data  {:count (count repos)}}
+              "Listed git repositories")
+    {:repos repos}))
+
+(defn load-git-repo!
+  "Load one registered git repository by `:repoId` or `:name`, returning it
+  or nil when no matching repository is stored."
+  {:malli/schema [:-> :map [:map
+                            [:repoId {:optional true}
+                             [:maybe [:or :string :int]]]
+                            [:name {:optional true} [:maybe :string]]]
+                  [:maybe #'git/GitRepo]]}
+  [agent {:keys [repoId name]}]
+  (let [postgres (:postgres agent)]
+    (cond
+      (not (str/blank? (str repoId)))
+      (git/load-repo postgres (str repoId))
+
+      (not (str/blank? (str name)))
+      (git/select-repo postgres (str name))
+
+      :else nil)))
+
+(defn create-git-repo!
+  "Register a git repository and return it. `repo` holds a unique `:name` and
+  the git `:url` to fetch from."
+  {:malli/schema [:-> :map #'git/GitRepoInput #'git/GitRepo]}
+  [agent repo]
+  (let [saved (git/create-repo (:postgres agent) repo)]
+    (tel/log! {:level :info
+               :id    ::git-repo-created
+               :data  {:repoId (:repoId saved)
+                       :name   (:name saved)
+                       :url    (:url saved)}}
+              "Registered git repository")
+    saved))
+
+(defn update-git-repo!
+  "Replace the name and URL of `opts`'s `:repoId` and return the updated
+  repository, or nil when no such repository is stored."
+  {:malli/schema [:-> :map [:map
+                            [:repoId {:optional true}
+                             [:maybe [:or :string :int]]]
+                            [:name :string]
+                            [:url :string]]
+                  [:maybe #'git/GitRepo]]}
+  [agent {:keys [repoId] :as repo}]
+  (when-not (str/blank? (str repoId))
+    (when-let [updated (git/update-repo (:postgres agent)
+                                        (str repoId)
+                                        (dissoc repo :repoId))]
+      (tel/log! {:level :info
+                 :id    ::git-repo-updated
+                 :data  {:repoId (:repoId updated)
+                         :name   (:name updated)}}
+                "Updated git repository")
+      updated)))
+
+(defn delete-git-repo!
+  "Delete the repository named by `opts`'s `:repoId`, along with its
+  worktrees. Returns true when a repository was deleted."
+  {:malli/schema [:-> :map [:map
+                            [:repoId {:optional true}
+                             [:maybe [:or :string :int]]]]
+                  boolean?]}
+  [agent {:keys [repoId]}]
+  (let [deleted? (and (not (str/blank? (str repoId)))
+                      (git/delete-repo (:postgres agent) (str repoId)))]
+    (tel/log! {:level (if deleted? :info :warn)
+               :id    ::git-repo-deleted
+               :data  {:repoId repoId :deleted? deleted?}}
+              "Deleted git repository")
+    (boolean deleted?)))
+
+(defn list-git-worktrees!
+  "List recorded git worktrees, optionally limited to `:repoId`. Returns
+  `{:worktrees [worktree ...]}`."
+  {:malli/schema [:-> :map [:map
+                            [:repoId {:optional true}
+                             [:maybe [:or :string :int]]]]
+                  :map]}
+  [agent {:keys [repoId]}]
+  (let [postgres  (:postgres agent)
+        worktrees (if (str/blank? (str repoId))
+                    (git/list-worktrees postgres)
+                    (git/list-worktrees postgres (str repoId)))]
+    (tel/log! {:level :debug
+               :id    ::git-worktree-list
+               :data  {:count  (count worktrees)
+                       :repoId repoId}}
+              "Listed git worktrees")
+    {:worktrees worktrees}))
+
+(defn load-git-worktree!
+  "Load the git worktree named by `opts`'s `:worktreeId`, or nil when no such
+  worktree is stored."
+  {:malli/schema [:-> :map [:map
+                            [:worktreeId {:optional true}
+                             [:maybe [:or :string :int]]]]
+                  [:maybe #'git/GitWorktree]]}
+  [agent {:keys [worktreeId]}]
+  (when-not (str/blank? (str worktreeId))
+    (git/load-worktree (:postgres agent) (str worktreeId))))
+
+(defn create-git-worktree!
+  "Record a worktree checked out from a registered repository and return it.
+  `worktree` holds the `:repoId`, `:branch`, and `:directory`."
+  {:malli/schema [:-> :map #'git/GitWorktreeInput #'git/GitWorktree]}
+  [agent worktree]
+  (let [saved (git/create-worktree (:postgres agent) worktree)]
+    (tel/log! {:level :info
+               :id    ::git-worktree-created
+               :data  {:worktreeId (:worktreeId saved)
+                       :repoId     (:repoId saved)
+                       :branch     (:branch saved)
+                       :directory  (:directory saved)}}
+              "Recorded git worktree")
+    saved))
+
+(defn update-git-worktree!
+  "Replace the repository, branch, and directory of `opts`'s `:worktreeId`
+  and return the updated worktree, or nil when no such worktree is stored."
+  {:malli/schema [:-> :map [:map
+                            [:worktreeId {:optional true}
+                             [:maybe [:or :string :int]]]
+                            [:repoId [:or :string :int]]
+                            [:branch :string]
+                            [:directory :string]]
+                  [:maybe #'git/GitWorktree]]}
+  [agent {:keys [worktreeId] :as worktree}]
+  (when-not (str/blank? (str worktreeId))
+    (when-let [updated (git/update-worktree (:postgres agent)
+                                            (str worktreeId)
+                                            (dissoc worktree :worktreeId))]
+      (tel/log! {:level :info
+                 :id    ::git-worktree-updated
+                 :data  {:worktreeId (:worktreeId updated)
+                         :branch     (:branch updated)}}
+                "Updated git worktree")
+      updated)))
+
+(defn delete-git-worktree!
+  "Delete the worktree named by `opts`'s `:worktreeId`. Returns true when a
+  worktree was deleted."
+  {:malli/schema [:-> :map [:map
+                            [:worktreeId {:optional true}
+                             [:maybe [:or :string :int]]]]
+                  boolean?]}
+  [agent {:keys [worktreeId]}]
+  (let [deleted? (and (not (str/blank? (str worktreeId)))
+                      (git/delete-worktree (:postgres agent)
+                                           (str worktreeId)))]
+    (tel/log! {:level (if deleted? :info :warn)
+               :id    ::git-worktree-deleted
+               :data  {:worktreeId worktreeId :deleted? deleted?}}
+              "Deleted git worktree")
+    (boolean deleted?)))
+;; ---------------------------------------------------------------------------
+;; Notes
+;; ---------------------------------------------------------------------------
+
+(defn list-notes!
+  "List the stored notes, most recently updated first. Returns
+  `{:notes [note ...]}`."
+  {:malli/schema [:-> :map [:map] :map]}
+  [agent _opts]
+  (let [stored (notes/list-notes (:postgres agent))]
+    (tel/log! {:level :debug
+               :id    ::note-list
+               :data  {:count (count stored)}}
+              "Listed notes")
+    {:notes stored}))
+
+(defn load-note!
+  "Load the note named by `opts`'s `:noteId` with its links and backlinks, or
+  nil when no such note is stored."
+  {:malli/schema [:-> :map [:map
+                            [:noteId {:optional true}
+                             [:maybe [:or :string :int]]]]
+                  [:maybe #'notes/NoteDetail]]}
+  [agent {:keys [noteId]}]
+  (when-not (str/blank? (str noteId))
+    (notes/load-note (:postgres agent) (str noteId))))
+
+(defn create-note!
+  "Store a new note and return it with its links. `note` holds a mandatory
+  `:title` and `:content`, and optionally the `:links` it points at."
+  {:malli/schema [:-> :map #'notes/NoteInput #'notes/NoteDetail]}
+  [agent note]
+  (let [saved (notes/create-note (:postgres agent) note)]
+    (tel/log! {:level :info
+               :id    ::note-created
+               :data  {:noteId (:noteId saved)
+                       :title  (:title saved)}}
+              "Created note")
+    saved))
+
+(defn update-note!
+  "Replace the title, content, and links of `opts`'s `:noteId` and return the
+  updated note, or nil when no such note is stored."
+  {:malli/schema [:-> :map [:map
+                            [:noteId {:optional true}
+                             [:maybe [:or :string :int]]]
+                            [:title :string]
+                            [:content :string]
+                            [:links {:optional true} [:maybe [:vector :any]]]]
+                  [:maybe #'notes/NoteDetail]]}
+  [agent {:keys [noteId] :as note}]
+  (when-not (str/blank? (str noteId))
+    (when-let [updated (notes/update-note (:postgres agent)
+                                          (str noteId)
+                                          (dissoc note :noteId))]
+      (tel/log! {:level :info
+                 :id    ::note-updated
+                 :data  {:noteId (:noteId updated)
+                         :title  (:title updated)}}
+                "Updated note")
+      updated)))
+
+(defn delete-note!
+  "Delete the note named by `opts`'s `:noteId`, along with the links that
+  point at it. Returns true when a note was deleted."
+  {:malli/schema [:-> :map [:map
+                            [:noteId {:optional true}
+                             [:maybe [:or :string :int]]]]
+                  boolean?]}
+  [agent {:keys [noteId]}]
+  (let [deleted? (and (not (str/blank? (str noteId)))
+                      (notes/delete-note (:postgres agent) (str noteId)))]
+    (tel/log! {:level (if deleted? :info :warn)
+               :id    ::note-deleted
+               :data  {:noteId noteId :deleted? deleted?}}
+              "Deleted note")
+    (boolean deleted?)))
+
+(defn search-notes!
+  "Search the stored notes and return `{:notes [note ...]}`, most relevant
+  first. `opts` holds the query `:q` and an optional `:limit`."
+  {:malli/schema [:-> :map [:map
+                            [:q {:optional true} [:maybe :string]]
+                            [:limit {:optional true}
+                             [:maybe [:or :string :int]]]]
+                  :map]}
+  [agent {:keys [q limit]}]
+  (let [found (notes/search-notes (:postgres agent)
+                                  {:q     (str q)
+                                   :limit (when (some? limit) (parse-long (str limit)))})]
+    (tel/log! {:level :debug
+               :id    ::note-search
+               :data  {:q (str q) :count (count found)}}
+              "Searched notes")
+    {:notes found}))
+
+;; ---------------------------------------------------------------------------
+;; Session configuration
+;; ---------------------------------------------------------------------------
 
 (defn- session-agent-config
   "The stored configuration selected by `session`, or nil."

@@ -14,25 +14,56 @@
 #
 # Usage:
 #
-#   docker compose up -d      # start Postgres and ensure the schema
+#   docker compose up -d      # build/start Postgres, enable pg_textsearch,
+#                             # and ensure the schema
 #   lein run                  # clai connects to localhost:5432/clai
 #   docker compose down       # stop; data stays in ./local/postgres
 #
-# The data directory is the bind mount ./local/postgres, so removing the
-# containers (or the whole compose project) does not lose sessions. Delete
-# that directory to start over with a fresh database.
+# The data directory is the bind mount ./local/postgres. PostgreSQL 18 keeps
+# its clusters in a versioned subdirectory of it (PGDATA is
+# /var/lib/postgresql/18/docker), so a later major upgrade adds a new cluster
+# instead of colliding with the old one. Removing the containers (or the whole
+# compose project) does not lose sessions; delete ./local/postgres to start
+# over with a fresh database.
+#
+# The server image is built from docker/postgres/Dockerfile: stock PostgreSQL
+# plus the pg_textsearch extension (BM25-ranked full-text search,
+# https://github.com/timescale/pg_textsearch), which has no distribution
+# package. The extension must be listed in shared_preload_libraries before the
+# server starts, hence the `-c` argument below; `schema/schema.sql` does not
+# create it, so that the storage DDL stays applicable to servers that do not
+# have the extension. After changing the extension version in the Dockerfile,
+# rebuild with `docker compose build postgres` (and read the release's
+# UPGRADING.md: some versions require `REINDEX`).
+#
+# Using it:
+#
+#   CREATE INDEX message_body_idx ON some_table USING bm25(body)
+#       WITH (text_config = 'english');
+#   SELECT * FROM some_table ORDER BY body <@> 'search terms' LIMIT 10;
 #
 # Every `docker compose up` also runs the one-shot `schema` service, which
-# applies the idempotent DDL in schema/schema.sql (the same file
-# `clai.daemon.postgres/ensure-schema!` applies). That creates the storage
-# tables when they are missing, even in an existing data directory, and is a
-# no-op once they exist.
+# creates the pg_textsearch extension and applies the idempotent DDL in
+# schema/schema.sql (the same file `clai.daemon.postgres/ensure-schema!`
+# applies). That creates the storage tables when they are missing, even in an
+# existing data directory, and is a no-op once they exist.
 
 name: clai
 
 services:
   postgres:
-    image: postgres:17-alpine
+    # Built from docker/postgres/Dockerfile; see the header comment.
+    build:
+      context: ./docker/postgres
+    image: clai-postgres:18-pg_textsearch
+    # pg_textsearch allocates shared memory in its `_PG_init`, so it only
+    # loads when listed here before startup. Passing it as a server argument
+    # (rather than editing postgresql.conf in the mounted data directory)
+    # applies to existing clusters too.
+    command:
+      - postgres
+      - -c
+      - shared_preload_libraries=pg_textsearch
     restart: unless-stopped
     environment:
       POSTGRES_DB: ${CLAI_POSTGRES_DATABASE:-clai}
@@ -45,7 +76,9 @@ services:
       # Bound to loopback only: this database is for local development.
       - "127.0.0.1:${CLAI_POSTGRES_PORT:-5432}:5432"
     volumes:
-      - ./local/postgres:/var/lib/postgresql/data
+      # PostgreSQL 18's default PGDATA is
+      # /var/lib/postgresql/18/docker, inside this mount.
+      - ./local/postgres:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 5s
@@ -53,8 +86,10 @@ services:
       retries: 10
       start_period: 10s
 
+  # One-shot: enable the extension and apply the storage DDL. The plain
+  # postgres image is enough here; only psql (the client) runs.
   schema:
-    image: postgres:17-alpine
+    image: postgres:18-alpine
     depends_on:
       postgres:
         condition: service_healthy
@@ -68,5 +103,8 @@ services:
       - --username=${CLAI_POSTGRES_USER:-clai}
       - --dbname=${CLAI_POSTGRES_DATABASE:-clai}
       - --set=ON_ERROR_STOP=1
+      # psql runs multiple -c/-f options in order, so the extension exists
+      # before any schema object that might use it.
+      - --command=CREATE EXTENSION IF NOT EXISTS pg_textsearch
       - --file=/schema.sql
     restart: "no"
