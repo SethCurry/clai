@@ -71,8 +71,10 @@ only place that touches the runtime.
   `FileExplorer`).
 - `web/src/components/ExplorerPanel.jsx` -- tabs ("Files", "Namespaces") and
   the close button.
-- `web/src/App.jsx` -- `explorerOpen` + `explorerTab` replace `filesOpen`; the
-  layout class is now `layout--with-explorer`.
+- `web/src/components/SessionsPage.jsx` -- `explorerOpen` + `explorerTab`
+  replace `filesOpen`; the layout class is now `layout--with-explorer`. (This
+  state moved out of `App.jsx` when the pages became routes, see
+  [web-routing.md](web-routing.md).)
 - `web/src/styles.css` -- `.explorer__tabs`, `.explorer__tab`, `.explorer__filter`,
   `.explorer__panel`, `.explorer__hint`, and the `.clj-preview*` block.
 

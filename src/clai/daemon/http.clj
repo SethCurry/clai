@@ -22,15 +22,26 @@
   the UI from one port. During development the Vite dev server proxies `/api`
   and `/ws` to this daemon.
 
+  Everything but the login form's own three calls is authenticated.
+  `POST /api/auth/login` checks a username and password against the `app_user`
+  table (`clai.daemon.postgres.users`) and answers with an `HttpOnly` session
+  cookie; `GET /api/auth/me` reports whether the request carries a live
+  session, and `POST /api/auth/logout` revokes it. Every other `/api/` route,
+  and the `/ws` upgrade, answers 401
+  `{\"error\": \"Authentication required\"}` without one. The React build itself
+  is served unauthenticated, since the login page lives in it.
+
   Agent operations run in-process through `clai.agent.core`; the nREPL
   connection is used only for the REPL tab. A prompt runs in a background
   future and its event updates are pushed to the socket as they happen."
   (:require [cheshire.core :as json]
             [clai.agent.core :as agent]
             [clai.agent.providers.ollama.prompt :as ollama-prompt]
+            [clai.auth :as auth]
             [clai.daemon.files :as files]
             [clai.daemon.namespaces :as namespaces]
             [clai.daemon.nrepl :as nrepl-bridge]
+            [clai.daemon.postgres.users :as users]
             [clai.events.schema :as events]
             [clai.log]
             [clai.plugins :as plugins]
@@ -63,9 +74,13 @@
    [:agent {:optional true} [:maybe :map]]])
 
 (def State
-  "Shared server state passed to the Ring handler."
+  "Shared server state passed to the Ring handler.
+
+  `:auth` holds the authentication operations (`clai.daemon.postgres.users`),
+  bound to the daemon's database client."
   [:map
    [:agent :map]
+   [:auth #'users/AuthService]
    [:root [:fn #(instance? File %)]]
    [:nrepl-port [:maybe [:int {:min 1 :max 65535}]]]
    [:connections [:fn #(instance? clojure.lang.Atom %)]]
@@ -544,7 +559,10 @@
 (def RouteContext
   "What one route handler receives: the daemon [[State]], the Ring `request`,
   the `agent` it operates on, the path `params` captured by the route template,
-  and the decoded `query` parameters."
+  and the decoded `query` parameters.
+
+  Handlers do not receive the authenticated user: every account has the same
+  reach, so only the guard in [[route]] needs to know which one signed in."
   [:map
    [:state #'State]
    [:request :map]
@@ -587,6 +605,113 @@
     (f (read-json-body request))
     (catch Throwable e
       (json-response 400 {:error (util/error-message e)}))))
+
+;; ---------------------------------------------------------------------------
+;; Authentication
+;; ---------------------------------------------------------------------------
+
+(def ^:private public-routes
+  "The `[method path]` pairs reachable without a session: the login form's own
+  calls. Everything else under `/api/`, and the `/ws` upgrade, needs one.
+
+  Logout is here so that a session that has already expired can still clear its
+  cookie; revoking a token the caller does not hold does nothing."
+  #{[:post "/api/auth/login"]
+    [:get "/api/auth/me"]
+    [:post "/api/auth/logout"]})
+
+(defn- public-route?
+  "True when a request for `method` on `uri` may go ahead without a session."
+  {:malli/schema [:-> :keyword :string boolean?]}
+  [method uri]
+  (contains? public-routes [method uri]))
+
+(defn- api-path?
+  "True when `uri` names the API or the WebSocket, that is, something that
+  needs authentication. Everything else is the static React build, which has
+  to load before there is any way to log in."
+  {:malli/schema [:-> :string boolean?]}
+  [uri]
+  (or (= uri "/ws") (str/starts-with? uri "/api/")))
+
+(defn- request-user
+  "The user `request` is authenticated as, or nil when it carries no live
+  session.
+
+  The token is the session cookie a browser sends back, or an
+  `Authorization: Bearer <token>` header (see `clai.auth/request-token`); it is
+  checked against the `auth_token` table."
+  {:malli/schema [:-> #'State :map [:maybe #'users/User]]}
+  [state request]
+  (when-let [token (auth/request-token request)]
+    ((:resolve-token (:auth state)) token)))
+
+(defn- unauthorized
+  "The 401 that every authenticated route answers without a live session.
+
+  `www-authenticate` names the schemes the daemon accepts, so a non-browser
+  client can tell what to send."
+  {:malli/schema [:-> #'Response]}
+  []
+  (json-response 401 {:error "Authentication required"}
+                 {"www-authenticate"
+                  "Cookie realm=\"clai\", Bearer realm=\"clai\""}))
+
+(defn- login-handler
+  "Sign in with the request body's `username` and `password`.
+
+  A match answers 200 with the user and an `HttpOnly` session cookie; wrong
+  credentials answer 401, which is what the login form reports."
+  {:malli/schema [:-> #'RouteContext #'Response]}
+  [{:keys [state request]}]
+  (with-json-body request
+    (fn [{:keys [username password]}]
+      (let [username (str username)
+            password (str password)
+            {:keys [auth]} state]
+        (cond
+          (or (str/blank? username) (str/blank? password))
+          (json-response 400 {:error "Both username and password are required"})
+
+          :else
+          (if-let [user ((:authenticate auth) username password)]
+            (let [{:keys [token]} ((:issue-token auth) (:userId user))]
+              (tel/log! {:level :debug
+                         :id    ::login-succeeded
+                         :data  {:userId (:userId user)
+                                 :username (:username user)}}
+                        "Signed in to the clai daemon")
+              (json-response 200 {:authenticated true :user user}
+                             {"set-cookie" (auth/session-cookie token)}))
+            (do
+              ;; The username is logged, the password never is, so a stream of
+              ;; failures is visible without spilling credentials.
+              (tel/log! {:level :warn
+                         :id    ::login-failed
+                         :data  {:username username}}
+                        "Rejected a clai login attempt")
+              (json-response 401
+                             {:error "Invalid username or password"}))))))))
+
+(defn- session-handler
+  "Report whether the request carries a live session, and whose it is.
+
+  Answers 200 whether or not it does: the login page asks this as it loads, and
+  a 401 there would be an expected-but-noisy error in the browser console."
+  {:malli/schema [:-> #'RouteContext #'Response]}
+  [{:keys [state request]}]
+  (if-let [user (request-user state request)]
+    (json-response 200 {:authenticated true :user user})
+    (json-response 200 {:authenticated false :user nil})))
+
+(defn- logout-handler
+  "Revoke the request's session token and clear the cookie."
+  {:malli/schema [:-> #'RouteContext #'Response]}
+  [{:keys [state request]}]
+  (when-let [token (auth/request-token request)]
+    ((:revoke-token (:auth state)) token))
+  (json-response 200 {:authenticated false :user nil}
+                 {"set-cookie" (auth/cleared-session-cookie)}))
 
 ;; ---------------------------------------------------------------------------
 ;; Route handlers
@@ -873,7 +998,10 @@
   They are listed before the generated resource routes, because the templates
   that capture a path segment would otherwise swallow a literal path
   (`/api/notes/search`) or a deeper route (`/api/sessions/:sessionId/files`)."
-  [{:method :get :template "/api/health" :handler health-handler}
+  [{:method :post :template "/api/auth/login" :handler login-handler}
+   {:method :get :template "/api/auth/me" :handler session-handler}
+   {:method :post :template "/api/auth/logout" :handler logout-handler}
+   {:method :get :template "/api/health" :handler health-handler}
    {:method :get :template "/api/sessions" :handler sessions-handler}
    {:method :post :template "/api/sessions" :handler create-session-handler}
    {:method :get :template "/api/sessions/:sessionId/completions" :handler session-completions-handler}
@@ -917,28 +1045,47 @@
                                       (:request-method request) " " uri)})
       (static-response (:root state) uri))))
 
+(defn- dispatch
+  "Run the API route that matches `request`, or fall back to the static UI (or
+  the JSON 404) when no route claims the path."
+  {:malli/schema [:-> #'State :map :map]}
+  [state request]
+  (let [[route params] (find-route api-routes request)]
+    (if route
+      ((:handler route) {:state   state
+                         :request request
+                         :agent   (:agent state)
+                         :params  params
+                         :query   (query-params request)})
+      (fallback-response state request))))
+
 (defn- route
   "Dispatch one Ring request to the WebSocket, the API routing table, or the
-  static UI."
+  static UI.
+
+  The API and the WebSocket are closed by default: without a live session
+  every request there answers 401, apart from the login form's own endpoints
+  ([[public-routes]]). The React build, login page included, is served to
+  anyone, and never touches the database."
   {:malli/schema [:-> #'State :map :map]}
   [state request]
   (let [uri (request-path request)]
-    (cond
-      (and (= uri "/ws") (ws/upgrade-request? request))
-      (websocket-response state request)
+    (if-not (api-path? uri)
+      (fallback-response state request)
+      (let [public? (public-route? (:request-method request) uri)
+            user    (when-not public? (request-user state request))]
+        (cond
+          (and (not public?) (nil? user))
+          (unauthorized)
 
-      (and (= uri "/ws") (= :get (:request-method request)))
-      (json-response 400 {:error "Expected a WebSocket upgrade"})
+          (and (= uri "/ws") (ws/upgrade-request? request))
+          (websocket-response state request)
 
-      :else
-      (let [[route params] (find-route api-routes request)]
-        (if route
-          ((:handler route) {:state   state
-                             :request request
-                             :agent   (:agent state)
-                             :params  params
-                             :query   (query-params request)})
-          (fallback-response state request))))))
+          (= uri "/ws")
+          (json-response 400 {:error "Expected a WebSocket upgrade"})
+
+          :else
+          (dispatch state request))))))
 
 (defn handler
   "Build the Ring handler for `state`.
@@ -977,13 +1124,15 @@
 
   Options:
 
-    :host        interface to bind (default `127.0.0.1`; use `0.0.0.0` to
-                 expose it on the network, which is unsafe because the agent
-                 can run arbitrary commands)
+    :host        interface to bind (default `0.0.0.0`)
     :port        HTTP port (default 8080; 0 lets the OS choose)
     :root        directory containing the React build (default `web/dist`)
     :nrepl-port  port of the nREPL server the REPL tab should use
     :agent       agent map to use instead of `(agent/make-agent)`
+
+  Every request needs a session except the login form itself; see the
+  namespace docstring. The accounts live in the agent's database, and
+  `schema/schema.sql` seeds `admin`/`admin` for local use.
 
   The server does not block; pass the returned `:server` to [[stop-server!]]."
   {:malli/schema [:-> [:maybe #'StartOptions] :map]}
@@ -993,6 +1142,7 @@
          _     (when-let [postgres (:postgres agent)]
                  (plugins/load-configured! postgres))
          state {:agent       agent
+                :auth        (users/make-service (:postgres agent))
                 :root        (.getCanonicalFile (io/file root))
                 :nrepl-port  nrepl-port
                 :connections (atom #{})

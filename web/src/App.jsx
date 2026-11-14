@@ -1,204 +1,74 @@
-import { useState } from 'react'
-import { AgentConfigManager } from './components/AgentConfigManager.jsx'
-import { Chat } from './components/Chat.jsx'
-import { ErrorToasts } from './components/ErrorToasts.jsx'
-import { ExplorerPanel } from './components/ExplorerPanel.jsx'
+import { Navigate, Route, Routes } from 'react-router-dom'
+import { ClaiProvider } from './ClaiContext.jsx'
+import { AppLayout } from './components/AppLayout.jsx'
 import { GitReposPage } from './components/GitReposPage.jsx'
+import { LoginPage } from './components/LoginPage.jsx'
+import { NotFoundPage } from './components/NotFoundPage.jsx'
 import { NotesPage } from './components/NotesPage.jsx'
-import { ReplPanel } from './components/ReplPanel.jsx'
-import { SessionSidebar } from './components/SessionSidebar.jsx'
-import { useClaiSocket } from './useClaiSocket.js'
+import { SessionsPage } from './components/SessionsPage.jsx'
+import { useAuth } from './useAuth.js'
 
-const STATUS_LABELS = {
-  connected: 'connected',
-  connecting: 'connecting',
-  disconnected: 'reconnecting',
-  error: 'connection error',
-}
-
-function EmptyState({ hasSessions, onNewSession }) {
+/**
+ * The sign-in form, wired to the session state `useAuth` owns. Signing in
+ * flips that state, which is what makes `/login` redirect to the console.
+ */
+function LoginRoute({ auth }) {
   return (
-    <section className="empty">
-      <div className="empty__card">
-        <p className="empty__eyebrow">clai / web</p>
-        <h2>{hasSessions ? 'Choose a session' : 'Start a session'}</h2>
-        <p>
-          Sessions hold a conversation with the agent. Each one can use the
-          repository tools and the live Clojure runtime behind the daemon.
-        </p>
-        <button
-          className="button button--primary"
-          onClick={() => onNewSession()}
-        >
-          + New session
-        </button>
-      </div>
-    </section>
+    <div className="app">
+      <LoginPage
+        status={auth.status}
+        error={auth.error}
+        busy={auth.busy}
+        onSignIn={auth.signIn}
+        onDismissError={auth.dismissError}
+      />
+    </div>
   )
 }
 
 /**
- * The web UI shell: connection status, the session sidebar, the chat timeline,
- * and the optional Clojure REPL and explorer panels. The explorer shows either
- * the session's files or the Clojure namespaces the REPL can use. The topbar
- * switches between the session console, the git repository registry, and the
- * notes page.
+ * The guard in front of every signed-in page. While `useAuth` asks the daemon
+ * whether the cookie is still good it renders the login page's "checking"
+ * state; without a session it sends the browser to `/login`; with one it
+ * mounts the console shell and, through `ClaiProvider`, the single WebSocket
+ * every page shares.
+ */
+function RequireAuth({ auth }) {
+  if (auth.status === 'checking') return <LoginRoute auth={auth} />
+  if (auth.status !== 'authenticated') return <Navigate to="/login" replace />
+  return (
+    <ClaiProvider>
+      <AppLayout user={auth.user} onSignOut={auth.signOut} />
+    </ClaiProvider>
+  )
+}
+
+/**
+ * The web UI's routes. `/login` is the only page reachable without a session;
+ * everything else renders inside the console shell, with the sessions page as
+ * the index route.
  */
 export default function App() {
-  const clai = useClaiSocket()
-  const [view, setView] = useState('sessions')
-  const [replOpen, setReplOpen] = useState(true)
-  const [explorerOpen, setExplorerOpen] = useState(true)
-  const [explorerTab, setExplorerTab] = useState('files')
-  const [configManagerOpen, setConfigManagerOpen] = useState(false)
-  const statusLabel = STATUS_LABELS[clai.status] || clai.status
-  // The grid gains a column per open panel, so the classes have to agree with
-  // what is actually rendered.
-  const layoutClass = [
-    'layout',
-    replOpen && 'layout--with-repl',
-    explorerOpen && 'layout--with-explorer',
-  ]
-    .filter(Boolean)
-    .join(' ')
+  const auth = useAuth()
 
   return (
-    <div className="app">
-      <header className="topbar">
-        <div className="topbar__brand">
-          <span className="brand-mark" aria-hidden="true">
-            λ
-          </span>
-          <span className="brand-name">clai</span>
-          <span className="brand-tag">agent console</span>
-        </div>
-        <nav className="view-tabs" aria-label="Main views">
-          <button
-            className={`view-tab${view === 'sessions' ? ' view-tab--active' : ''}`}
-            aria-current={view === 'sessions' ? 'page' : undefined}
-            onClick={() => setView('sessions')}
-          >
-            Sessions
-          </button>
-          <button
-            className={`view-tab${view === 'git' ? ' view-tab--active' : ''}`}
-            aria-current={view === 'git' ? 'page' : undefined}
-            onClick={() => setView('git')}
-          >
-            Git repos
-          </button>
-          <button
-            className={`view-tab${view === 'notes' ? ' view-tab--active' : ''}`}
-            aria-current={view === 'notes' ? 'page' : undefined}
-            onClick={() => setView('notes')}
-          >
-            Notes
-          </button>
-        </nav>
-        <div className="topbar__meta">
-          <span className={`connection connection--${clai.status}`}>
-            <span className="connection__dot" />
-            {statusLabel}
-          </span>
-          {clai.sessionInfo.model && (
-            <span className="pill">
-              {clai.sessionInfo.provider
-                ? `${clai.sessionInfo.provider}:${clai.sessionInfo.model}`
-                : clai.sessionInfo.model}
-            </span>
-          )}
-          {clai.sessionInfo.nreplPort && (
-            <span className="pill">nREPL :{clai.sessionInfo.nreplPort}</span>
-          )}
-          {view === 'sessions' && (
-            <>
-              <button
-                className="button button--quiet"
-                onClick={() => setReplOpen((open) => !open)}
-              >
-                {replOpen ? 'Hide REPL' : 'Show REPL'}
-              </button>
-              <button
-                className="button button--quiet"
-                onClick={() => setExplorerOpen((open) => !open)}
-              >
-                {explorerOpen ? 'Hide explorer' : 'Show explorer'}
-              </button>
-            </>
-          )}
-        </div>
-      </header>
-
-      {view === 'git' ? (
-        <GitReposPage onClose={() => setView('sessions')} />
-      ) : view === 'notes' ? (
-        <NotesPage onClose={() => setView('sessions')} />
-      ) : (
-        <div className={layoutClass}>
-          <SessionSidebar
-            sessions={clai.sessions}
-            currentSession={clai.currentSession}
-            agentConfigs={clai.agentConfigs}
-            selectedConfigId={clai.selectedConfigId}
-            status={clai.status}
-            sessionInfo={clai.sessionInfo}
-            onNewSession={clai.newSession}
-            onSelectConfig={clai.selectAgentConfig}
-            onManageConfigs={() => setConfigManagerOpen(true)}
-            onRefresh={clai.refreshSessions}
-            onLoadSession={clai.loadSession}
-            onDeleteSession={clai.deleteSession}
-          />
-
-          {clai.currentSession ? (
-            <Chat
-              session={clai.currentSession}
-              updates={clai.updates}
-              promptRunning={clai.promptRunning}
-              onPrompt={clai.runPrompt}
-              onRename={clai.renameSession}
-            />
+    <Routes>
+      <Route
+        path="/login"
+        element={
+          auth.status === 'authenticated' ? (
+            <Navigate to="/" replace />
           ) : (
-            <EmptyState
-              hasSessions={clai.sessions.length > 0}
-              onNewSession={clai.newSession}
-            />
-          )}
-
-          {replOpen && (
-            <ReplPanel
-              nreplPort={clai.sessionInfo.nreplPort}
-              currentSession={clai.currentSession}
-              entries={clai.replEntries}
-              running={clai.evalRunning}
-              onEval={clai.evalForm}
-              onClear={clai.clearRepl}
-              onClose={() => setReplOpen(false)}
-            />
-          )}
-
-          {explorerOpen && (
-            <ExplorerPanel
-              tab={explorerTab}
-              onTab={setExplorerTab}
-              currentSession={clai.currentSession}
-              onClose={() => setExplorerOpen(false)}
-            />
-          )}
-        </div>
-      )}
-
-      <ErrorToasts errors={clai.errors} onDismiss={clai.dismissError} />
-
-      {configManagerOpen && (
-        <AgentConfigManager
-          configs={clai.agentConfigs}
-          plugins={clai.plugins}
-          onSave={clai.saveAgentConfig}
-          onDelete={clai.deleteAgentConfig}
-          onClose={() => setConfigManagerOpen(false)}
-        />
-      )}
-    </div>
+            <LoginRoute auth={auth} />
+          )
+        }
+      />
+      <Route element={<RequireAuth auth={auth} />}>
+        <Route index element={<SessionsPage />} />
+        <Route path="git-repos" element={<GitReposPage />} />
+        <Route path="notes" element={<NotesPage />} />
+        <Route path="*" element={<NotFoundPage />} />
+      </Route>
+    </Routes>
   )
 }

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { responseBody } from './api.js'
+import { notifyUnauthorized, responseBody } from './api.js'
+import { currentSession } from './auth.js'
 import { sessionNamespace } from './sessionNamespace.js'
 
 // Reconnect quickly at first, then back off so a daemon restart is picked up
@@ -251,18 +252,37 @@ export function useClaiSocket() {
         }
       }
 
-      socket.onclose = () => {
+      // A dropped socket is normally retried with backoff. One the daemon
+      // refused for want of a session must not be: ask once whether the cookie
+      // still signs in, and hand an expired session back to the login page
+      // instead of retrying forever.
+      const reconnect = async () => {
+        try {
+          const session = await currentSession()
+          if (closedByUs) return
+          if (!session.authenticated) {
+            notifyUnauthorized()
+            return
+          }
+        } catch {
+          // The daemon itself is down, which retrying is the right answer to.
+        }
         if (closedByUs) return
-        if (socketRef.current !== socket) return
-        setStatus('disconnected')
-        setPromptRunning(false)
-        setEvalRunning(false)
         const delay =
           RECONNECT_DELAYS[
             Math.min(reconnectAttempt.current, RECONNECT_DELAYS.length - 1)
           ]
         reconnectAttempt.current += 1
         reconnectTimer.current = window.setTimeout(connect, delay)
+      }
+
+      socket.onclose = () => {
+        if (closedByUs) return
+        if (socketRef.current !== socket) return
+        setStatus('disconnected')
+        setPromptRunning(false)
+        setEvalRunning(false)
+        reconnect()
       }
 
       socket.onerror = () => {

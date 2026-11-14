@@ -39,6 +39,26 @@ It is now table-driven:
   build (with an `index.html` fallback for client-side routes) and 404s JSON for
   unknown `/api/` paths.
 
+## Authentication guard
+
+`route` checks the session before it consults the table, in three steps:
+
+- `api-path?` decides whether the request is API/WebSocket (`/api/...`, `/ws`)
+  or the static React build. Static files skip auth entirely, because the login
+  page is part of the build and serving it must never touch the database.
+- `public-route?` matches `public-routes` (`POST /api/auth/login`,
+  `GET /api/auth/me`, `POST /api/auth/logout`). Those go straight to
+  `dispatch`; `/api/auth/me` and the logout handler resolve the token
+  themselves when they need it.
+- Everything else resolves the cookie or bearer token through
+  `request-user` (the `users/AuthService` on the daemon `State`) and 401s
+  without one. The check runs before route matching, so an anonymous caller
+  cannot tell a real `/api/` path from a made-up one.
+
+Handlers therefore trust that they are authenticated; `RouteContext` does not
+carry the user, since every account has the same reach. Details and rationale
+are in `agent-notes/auth.md`.
+
 ## Shared plumbing
 
 - `with-json-body` decodes the request body and turns a malformed or rejected

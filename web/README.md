@@ -5,6 +5,10 @@ The browser UI for clai. It is a Vite + React app that talks to
 health checks, non-streaming session access, filesystem reads, and Clojure
 namespace introspection.
 
+The pages are client-side routes (`react-router-dom`): the sessions console at
+`/`, the git repository registry at `/git-repos`, the notes at `/notes`, and
+the sign-in form at `/login`.
+
 ## Scripts
 
 ```sh
@@ -164,9 +168,23 @@ card until the status becomes `completed` or `failed`.
 
 - `src/useClaiSocket.js` owns the WebSocket, reconnects, and reduces server
   messages into app state. Agent-configuration writes go through the HTTP API
-  and update the same state.
-- `src/App.jsx` is the shell: top bar, sidebar, chat, optional REPL and
-  explorer panels, and the agent-configuration dialog.
+  and update the same state. `src/ClaiContext.jsx` mounts it once for the whole
+  signed-in app (`ClaiProvider`) and hands it to the pages (`useClai`), so
+  visiting another page does not drop the connection or the loaded
+  conversation.
+- `src/main.jsx` mounts `App` inside a `BrowserRouter`. The daemon serves
+  `index.html` for any path that is not a file, so client-side routes work on a
+  reload or a bookmark.
+- `src/App.jsx` owns the routes: `/login` for the sign-in form, then
+  `RequireAuth`, which redirects anonymous browsers to `/login` and otherwise
+  mounts `ClaiProvider` and the console shell.
+- `src/components/AppLayout.jsx` is that shell: the top bar with the page tabs
+  (`/`, `/git-repos`, `/notes`), the connection, model, and nREPL pills, the
+  signed-in user, sign-out, the routed page, and the daemon's error toasts.
+- `src/components/SessionsPage.jsx` is the console page at `/`: the session
+  sidebar, the chat timeline, the optional REPL and explorer panels (toggled
+  from the sidebar), and the agent-configuration dialog.
+- `src/components/NotFoundPage.jsx` catches any other signed-in path.
 - `src/components/AgentConfigManager.jsx` creates, edits, and deletes stored
   agent configurations, including their active-plugin list.
 - `src/components/UpdateView.jsx` renders messages, thoughts, and tool calls.

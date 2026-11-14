@@ -329,9 +329,9 @@ function NoteEditor({ note, titles, titleIdLookup, onSave, onCancel }) {
 /**
  * The notes page: list and search the stored notes, read one with its links
  * and backlinks, and create, edit, or delete notes. Served by `/api/notes` and
- * `/api/notes/search`.
+ * `/api/notes/search`, and reached from the console's "Notes" tab.
  */
-export function NotesPage({ onClose }) {
+export function NotesPage() {
   const notes = useNotes()
   const [editor, setEditor] = useState(null)
   const titles = useMemo(() => titleLookup(notes.stored), [notes.stored])
@@ -383,9 +383,6 @@ export function NotesPage({ onClose }) {
             disabled={notes.loading}
           >
             {notes.loading ? 'Loading…' : 'Refresh'}
-          </button>
-          <button className="button button--quiet" onClick={onClose}>
-            Back to sessions
           </button>
         </div>
       </header>

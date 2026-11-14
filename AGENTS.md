@@ -16,39 +16,48 @@ its nice for a user to use from the REPL.
 
 ## Functionality Locations
 
-| Functionality               | Location                                 |
-| --------------------------- | ---------------------------------------- |
-| Provider selection (model -> provider, chat turn) | ./src/clai/agent/providers.clj |
-| Ollama API client           | ./src/clai/agent/providers/ollama.clj    |
-| OpenRouter API client       | ./src/clai/agent/providers/openrouter.clj |
-| Shared provider HTTP + message normalization | ./src/clai/agent/providers/http.clj, ./src/clai/agent/providers/messages.clj |
-| Logging                     | ./src/clai/log.clj                       |
-| Plugin runtime              | ./src/clai/plugins.clj                   |
-| Today's date plugin         | ./src/clai_plugin_todays_date/plugin.clj |
-| PostgreSQL client           | ./src/clai/daemon/postgres.clj           |
-| Session storage             | ./src/clai/daemon/postgres/sessions.clj  |
-| Git repo/worktree storage   | ./src/clai/daemon/postgres/git.clj       |
-| Git repo/worktree HTTP API  | ./src/clai/daemon/http.clj               |
-| Note storage + BM25 note search | ./src/clai/daemon/postgres/notes.clj  |
-| Note HTTP API (CRUD + search) | ./src/clai/daemon/http.clj              |
-| OpenProject task/comment tools | ./src/clai/agent/tools/builtin/openproject.clj |
-| Note tools (list/search/read/update/delete) | ./src/clai/agent/tools/builtin/notes.clj |
-| `eval_clojure` tool (agent REPL) | ./src/clai/agent/tools/builtin/eval.clj |
-| Agent REPL namespace (`eval_clojure` default, `tools`/`history` helpers) | ./src/clai/home/core.clj |
-| File listing/preview (web)  | ./src/clai/daemon/files.clj              |
-| Clojure runtime introspection (web) | ./src/clai/daemon/namespaces.clj |
-| Storage DDL                 | ./schema/schema.sql                      |
-| Local dev database (compose, pg_textsearch image) | ./docker-compose.yml, ./docker/postgres/Dockerfile |
-| Web UI                      | ./web                                    |
-| Web git repository page    | ./web/src/components/GitReposPage.jsx    |
-| Web git repository state   | ./web/src/useGitRepos.js                 |
-| Web file explorer           | ./web/src/components/FileExplorer.jsx    |
-| Web namespace explorer      | ./web/src/components/ClojureExplorer.jsx |
-| Web notes page (view, search, create, edit) | ./web/src/components/NotesPage.jsx |
-| Web notes state + API calls | ./web/src/useNotes.js                    |
-| Web note form/validation helpers + tests | ./web/src/notes.js, ./web/src/notes.test.js |
-| Web `[[Title]]` link parsing + Markdown rendering | ./web/src/noteLinks.js, ./web/src/noteLinks.test.js, ./web/src/components/Markdown.jsx |
-| Web shared date formatting  | ./web/src/format.js                      |
+| Functionality                                                            | Location                                                                               |
+| ------------------------------------------------------------------------ | -------------------------------------------------------------------------------------- |
+| Provider selection (model -> provider, chat turn)                        | ./src/clai/agent/providers.clj                                                         |
+| Ollama API client                                                        | ./src/clai/agent/providers/ollama.clj                                                  |
+| OpenRouter API client                                                    | ./src/clai/agent/providers/openrouter.clj                                              |
+| Shared provider HTTP + message normalization                             | ./src/clai/agent/providers/http.clj, ./src/clai/agent/providers/messages.clj           |
+| Logging                                                                  | ./src/clai/log.clj                                                                     |
+| Plugin runtime                                                           | ./src/clai/plugins.clj                                                                 |
+| Today's date plugin                                                      | ./src/clai_plugin_todays_date/plugin.clj                                               |
+| PostgreSQL client                                                        | ./src/clai/daemon/postgres.clj                                                         |
+| Password hashing, session tokens, cookies                                | ./src/clai/auth.clj, ./test/clai/auth_test.clj                                         |
+| User accounts + login sessions (database)                                | ./src/clai/daemon/postgres/users.clj, ./test/clai/daemon/postgres/users_test.clj       |
+| API authentication (login/logout routes, 401 guard)                      | ./src/clai/daemon/http.clj                                                             |
+| Session storage                                                          | ./src/clai/daemon/postgres/sessions.clj                                                |
+| Git repo/worktree storage                                                | ./src/clai/daemon/postgres/git.clj                                                     |
+| Git repo/worktree HTTP API                                               | ./src/clai/daemon/http.clj                                                             |
+| Note storage + BM25 note search                                          | ./src/clai/daemon/postgres/notes.clj                                                   |
+| Note HTTP API (CRUD + search)                                            | ./src/clai/daemon/http.clj                                                             |
+| OpenProject task/comment tools                                           | ./src/clai/agent/tools/builtin/openproject.clj                                         |
+| Note tools (list/search/read/update/delete)                              | ./src/clai/agent/tools/builtin/notes.clj                                               |
+| `eval_clojure` tool (agent REPL)                                         | ./src/clai/agent/tools/builtin/eval.clj                                                |
+| Agent REPL namespace (`eval_clojure` default, `tools`/`history` helpers) | ./src/clai/home/core.clj                                                               |
+| File listing/preview (web)                                               | ./src/clai/daemon/files.clj                                                            |
+| Clojure runtime introspection (web)                                      | ./src/clai/daemon/namespaces.clj                                                       |
+| Storage DDL                                                              | ./schema/schema.sql                                                                    |
+| Local dev database (compose, pg_textsearch image)                        | ./docker-compose.yml, ./docker/postgres/Dockerfile                                     |
+| Web UI                                                                   | ./web                                                                                  |
+| Web routes + sign-in guard                                               | ./web/src/App.jsx, ./web/src/main.jsx                                                  |
+| Web console shell (topbar, page tabs, error toasts)                      | ./web/src/components/AppLayout.jsx                                                     |
+| Web daemon connection shared by the pages                                | ./web/src/ClaiContext.jsx, ./web/src/useClaiSocket.js                                  |
+| Web sessions page (sidebar, chat, REPL, explorer, config dialog)         | ./web/src/components/SessionsPage.jsx                                                  |
+| Web login page + session state                                           | ./web/src/components/LoginPage.jsx, ./web/src/useAuth.js                               |
+| Web credentials/validation helpers + tests                               | ./web/src/auth.js, ./web/src/auth.test.js, ./web/src/api.js                            |
+| Web git repository page                                                  | ./web/src/components/GitReposPage.jsx                                                  |
+| Web git repository state                                                 | ./web/src/useGitRepos.js                                                               |
+| Web file explorer                                                        | ./web/src/components/FileExplorer.jsx                                                  |
+| Web namespace explorer                                                   | ./web/src/components/ClojureExplorer.jsx                                               |
+| Web notes page (view, search, create, edit)                              | ./web/src/components/NotesPage.jsx                                                     |
+| Web notes state + API calls                                              | ./web/src/useNotes.js                                                                  |
+| Web note form/validation helpers + tests                                 | ./web/src/notes.js, ./web/src/notes.test.js                                            |
+| Web `[[Title]]` link parsing + Markdown rendering                        | ./web/src/noteLinks.js, ./web/src/noteLinks.test.js, ./web/src/components/Markdown.jsx |
+| Web shared date formatting                                               | ./web/src/format.js                                                                    |
 
 Make sure to maintain files like this that list major file and subdirectories and what they contain.
 

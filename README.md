@@ -49,7 +49,9 @@ reset it, run `docker compose down` and remove `./local/postgres` as root.
 
 The React app in `web/` talks to the daemon over a WebSocket (`/ws`) for chat
 streaming and for evaluating Clojure in the running JVM through nREPL. The
-daemon also exposes a small JSON API under `/api`.
+daemon also exposes a small JSON API under `/api`. Both are private: the UI
+opens on a sign-in form, and the API needs a session cookie or bearer token
+(see [Authentication](#authentication)).
 
 Besides the chat and the session sidebar, the UI has a Clojure REPL panel and
 a read-only explorer panel with two tabs: **Files** browses the selected
@@ -81,6 +83,50 @@ Vite serves the UI on http://127.0.0.1:5173 and proxies `/api` and `/ws` to
 the daemon at `http://127.0.0.1:8080`. Override the proxy target with
 `CLAI_DAEMON_URL`. `clai web` serves the built UI from `web/dist`; set
 `CLAI_WEB_ROOT` to serve a different build directory.
+
+## Authentication
+
+The daemon's JSON API and its WebSocket are closed by default. Every request
+but the login page's own calls needs a session, so the UI starts on a sign-in
+form:
+
+- `POST /api/auth/login` with `{"username": ..., "password": ...}` answers with
+  the user and an `HttpOnly` session cookie (or 401 for wrong credentials).
+- `GET /api/auth/me` reports whether the request carries a live session.
+- `POST /api/auth/logout` revokes it and clears the cookie.
+
+Anything else under `/api/`, and the `/ws` upgrade, answers
+`401 {"error": "Authentication required"}` without a valid cookie. Non-browser
+clients can send `Authorization: Bearer <token>` instead of the cookie.
+
+Accounts live in the `app_user` table and passwords are stored as salted
+PBKDF2 digests (`clai.auth/hash-password`); the plaintext is never stored.
+`schema/schema.sql` seeds one account so a fresh local database can log in:
+
+```
+admin / admin
+```
+
+Change it before the daemon is reachable by anything but you:
+
+```clojure
+;; lein repl
+(require '[clai.daemon.postgres :as pg] '[clai.daemon.postgres.users :as users])
+(def client (pg/open {}))
+(users/create-user! client {:username "you" :password "a long passphrase"})
+```
+
+Then delete the sample account:
+
+```sh
+docker compose exec postgres psql -U clai -d clai -c "DELETE FROM app_user WHERE username = 'admin'"
+```
+
+Sessions last seven days (`auth/token-ttl-seconds`) and are stored as SHA-256
+digests in `auth_token`, so a database dump cannot be replayed. `clai web`
+binds to loopback (`127.0.0.1`) for the same reason: the agent can run
+arbitrary commands, and one account name and password is not a real
+authorization boundary between users.
 
 ## Plugins
 

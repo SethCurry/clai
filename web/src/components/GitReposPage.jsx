@@ -356,9 +356,10 @@ function RepoDetail({
 /**
  * The git repository registry page: list repositories, register new ones,
  * edit or delete them, and manage the worktrees recorded for the selected
- * repository. Served by `/api/git-repos` and `/api/git-worktrees`.
+ * repository. Served by `/api/git-repos` and `/api/git-worktrees`, and reached
+ * from the console's "Git repos" tab.
  */
-export function GitReposPage({ onClose }) {
+export function GitReposPage() {
   const git = useGitRepos()
   const [selectedId, setSelectedId] = useState(null)
   const [repoEditor, setRepoEditor] = useState(null)
@@ -453,9 +454,6 @@ export function GitReposPage({ onClose }) {
             disabled={git.loading}
           >
             {git.loading ? 'Loading…' : 'Refresh'}
-          </button>
-          <button className="button button--quiet" onClick={onClose}>
-            Back to sessions
           </button>
         </div>
       </header>

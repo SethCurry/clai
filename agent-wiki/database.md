@@ -1,9 +1,10 @@
 # Local PostgreSQL database
 
 clai stores sessions, messages, agent configurations, registered git
-repositories, and [notes](notes.md) in PostgreSQL. `docker-compose.yml` starts a development database
-that already matches clai's defaults, so nothing has to be configured to get
-going.
+repositories, [notes](notes.md), and the accounts you
+[sign in](authentication.md) with in PostgreSQL. `docker-compose.yml` starts a
+development database that already matches clai's defaults, so nothing has to be
+configured to get going.
 
 ## Start the database
 

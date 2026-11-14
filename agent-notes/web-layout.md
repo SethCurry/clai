@@ -36,3 +36,15 @@ copy those rules.
 `web/src/format.js` holds `formatTimestamp` (the full timestamp a detail panel
 shows) and `formatRelativeTime` (the compact `3m ago` a list row shows); both
 pages use them.
+
+## The console shell
+
+The topbar, the page tabs, and the error toasts live in
+`web/src/components/AppLayout.jsx`; the console's panels and the session
+sidebar live in `web/src/components/SessionsPage.jsx`. Anything that belongs to
+one page stays in that page. [web-routing.md](web-routing.md) has the route
+table and explains why the WebSocket is mounted above the pages.
+
+The REPL and explorer are toggled from the `panels` row at the top of the
+sidebar (`PanelToggles` in `SessionSidebar.jsx`), reusing the topbar's
+`.view-tab` styles.

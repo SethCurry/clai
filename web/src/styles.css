@@ -132,6 +132,7 @@ pre {
   cursor: pointer;
   font-size: 0.78rem;
   font-weight: 600;
+  text-decoration: none;
 }
 
 .view-tab:hover {
@@ -337,6 +338,25 @@ pre {
 
 .sidebar__actions .button--primary {
   flex: 1;
+}
+
+/* The session page's own controls: which of the optional panes are open. They
+   reuse the topbar's `.view-tab` look, since they are the same kind of
+   button. */
+.sidebar__panels {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 12px 8px;
+}
+
+.sidebar__panels-label {
+  flex: 1;
+  color: var(--muted-2);
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
 }
 
 .sidebar__list {
@@ -1031,6 +1051,7 @@ pre {
   background: var(--panel-2);
   color: var(--text);
   cursor: pointer;
+  text-decoration: none;
   font-size: 0.79rem;
   font-weight: 550;
   white-space: nowrap;
@@ -1549,6 +1570,125 @@ pre {
   word-break: break-word;
 }
 
+/* ------------------------------------------------------------------- login */
+
+.login {
+  display: grid;
+  flex: 1;
+  place-items: center;
+  padding: 32px;
+  overflow: auto;
+}
+
+.login__card {
+  width: min(100%, 400px);
+  padding: 28px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: linear-gradient(180deg, rgba(23, 28, 38, 0.85), rgba(15, 18, 25, 0.94));
+  box-shadow: 0 24px 64px rgba(3, 6, 12, 0.55);
+}
+
+.login__brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+.login__eyebrow {
+  margin: 0;
+  color: var(--accent);
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+.login__brand h1 {
+  margin: 2px 0 0;
+  font-size: 1.45rem;
+  letter-spacing: -0.02em;
+}
+
+.login__lead,
+.login__checking {
+  margin: 0 0 20px;
+  color: var(--muted);
+  font-size: 0.85rem;
+  line-height: 1.6;
+}
+
+.login__checking {
+  font-family: var(--mono);
+  font-size: 0.8rem;
+}
+
+.login__form {
+  display: grid;
+  gap: 14px;
+}
+
+.login__field {
+  display: grid;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 0.76rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.login__field input {
+  padding: 10px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: var(--panel-3);
+  color: var(--text);
+  font-size: 0.92rem;
+  font-weight: 400;
+  letter-spacing: normal;
+  text-transform: none;
+}
+
+.login__field input:focus {
+  border-color: var(--accent-2);
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.16);
+}
+
+.login__error {
+  margin: 0;
+  padding: 9px 12px;
+  border: 1px solid rgba(248, 113, 113, 0.35);
+  border-radius: 10px;
+  background: rgba(248, 113, 113, 0.1);
+  color: var(--danger);
+  font-size: 0.8rem;
+  line-height: 1.5;
+}
+
+.login__submit {
+  width: 100%;
+  padding: 10px 14px;
+}
+
+.login__hint {
+  margin: 20px 0 0;
+  color: var(--muted-2);
+  font-size: 0.74rem;
+  line-height: 1.65;
+}
+
+.login__hint code {
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: var(--panel-2);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 0.72rem;
+}
+
 /* ------------------------------------------------------------------- empty */
 
 .empty {
@@ -1563,6 +1703,12 @@ pre {
 .empty__card {
   max-width: 52ch;
   text-align: center;
+}
+
+/* The not-found page fills the shell below the topbar. */
+.empty--page {
+  flex: 1;
+  margin: 18px;
 }
 
 .empty__eyebrow {

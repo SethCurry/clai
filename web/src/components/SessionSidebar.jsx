@@ -10,8 +10,43 @@ function folderName(cwd) {
 }
 
 /**
+ * The buttons that hide and show the optional REPL and explorer panels. They
+ * sit with the other session controls, since the panels belong to the session
+ * page rather than to the console as a whole.
+ */
+function PanelToggles({
+  replOpen,
+  explorerOpen,
+  onToggleRepl,
+  onToggleExplorer,
+}) {
+  return (
+    <div className="sidebar__panels">
+      <span className="sidebar__panels-label">panels</span>
+      <button
+        type="button"
+        className={`view-tab${replOpen ? ' view-tab--active' : ''}`}
+        aria-pressed={replOpen}
+        onClick={onToggleRepl}
+      >
+        REPL
+      </button>
+      <button
+        type="button"
+        className={`view-tab${explorerOpen ? ' view-tab--active' : ''}`}
+        aria-pressed={explorerOpen}
+        onClick={onToggleExplorer}
+      >
+        Explorer
+      </button>
+    </div>
+  )
+}
+
+/**
  * The session list, connection status, and the button that creates a fresh
- * session.
+ * session. The panels row at the top of the list hides and shows the REPL and
+ * explorer columns the page renders beside the chat.
  */
 export function SessionSidebar({
   sessions,
@@ -20,6 +55,10 @@ export function SessionSidebar({
   selectedConfigId,
   status,
   sessionInfo,
+  replOpen,
+  explorerOpen,
+  onToggleRepl,
+  onToggleExplorer,
   onNewSession,
   onSelectConfig,
   onManageConfigs,
@@ -81,6 +120,13 @@ export function SessionSidebar({
           Refresh
         </button>
       </div>
+
+      <PanelToggles
+        replOpen={replOpen}
+        explorerOpen={explorerOpen}
+        onToggleRepl={onToggleRepl}
+        onToggleExplorer={onToggleExplorer}
+      />
 
       <div className="sidebar__list" aria-label="Sessions">
         {sessions.length === 0 ? (

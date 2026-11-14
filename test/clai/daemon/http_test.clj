@@ -80,19 +80,42 @@
                   {:stopReason "end_turn"})]
     (f)))
 
+(defn- test-auth
+  "A stand-in for the daemon's `users/AuthService`, so the tests do not need a
+  database.
+
+  `admin`/`admin` signs in, `test-token` is already issued, and minted and
+  revoked tokens are tracked in an atom."
+  []
+  (let [tokens (atom #{"test-token"})]
+    {:authenticate (fn [username password]
+                     (when (and (= "admin" username) (= "admin" password))
+                       {:userId "1" :username "admin"}))
+     :issue-token  (fn [_user-id]
+                     (swap! tokens conj "issued-token")
+                     {:token "issued-token" :expiresAt "2030-01-01T00:00:00Z"})
+     :resolve-token (fn [token]
+                      (when (contains? @tokens token)
+                        {:userId "1" :username "admin"}))
+     :revoke-token (fn [token]
+                     (boolean (when (contains? @tokens token)
+                                (swap! tokens disj token)
+                                true)))}))
+
 (defn- state
   "Build daemon state around `store`, optionally with a static `root`."
   ([store] (state store (io/file ".")))
   ([store root]
    {:agent       {:model "test-model"}
+    :auth        (test-auth)
     :root        root
     :nrepl-port  nil
     :connections (atom #{})
     :prompts     (atom #{})}))
 
 (defn- request
-  "Build a minimal Ring request. `body`, when present, is encoded as JSON.
-  A `?query` suffix in `uri` is moved to `:query-string`."
+  "Build a minimal, logged-in Ring request. `body`, when present, is encoded as
+  JSON. A `?query` suffix in `uri` is moved to `:query-string`."
   ([method uri] (request method uri nil))
   ([method uri body]
    (let [[path query] (str/split uri #"\?" 2)]
@@ -100,9 +123,15 @@
       :uri            path
       :path-info      path
       :query-string   query
-      :headers        {"content-type" "application/json"}
+      :headers        {"content-type" "application/json"
+                       "cookie"       "clai_session=test-token"}
       :body           (when (some? body)
                         (java.io.StringReader. (json/generate-string body)))})))
+
+(defn- anonymous
+  "`request` as an unauthenticated browser sends it: without a session cookie."
+  [request]
+  (update request :headers dissoc "cookie"))
 
 (defn- body-text
   "Read a response body, whether it is a string or a `File` from
@@ -511,6 +540,111 @@
           (is (ws/websocket-response? (handler (upgrade "http://127.0.0.1:5173"))))
           (is (ws/websocket-response? (handler (upgrade "http://localhost:5173"))))
           (is (= 403 (:status (handler (upgrade "https://evil.example"))))))))))
+
+(deftest the-api-and-websocket-require-a-session
+  (with-fake-agent (atom {})
+    (fn []
+      (let [handler (http/handler (state (atom {})))
+            upgrade (fn [request]
+                      (-> request
+                          (assoc-in [:headers "upgrade"] "websocket")
+                          (assoc-in [:headers "connection"] "Upgrade")))]
+        (testing "an authenticated request is served"
+          (is (= 200 (:status (handler (request :get "/api/sessions"))))))
+
+        (testing "without a session the API answers 401"
+          (let [response (handler (anonymous (request :get "/api/sessions")))]
+            (is (= 401 (:status response)))
+            (is (= {:error "Authentication required"}
+                   (response-body response)))
+            (is (str/includes? (get-in response [:headers "www-authenticate"])
+                               "Bearer"))))
+
+        (testing "writes need a session too"
+          (is (= 401 (:status (handler (anonymous
+                                        (request :post "/api/sessions"
+                                                 {:cwd "/tmp"}))))))
+          (is (= 401 (:status (handler (anonymous
+                                        (request :delete "/api/notes/1")))))))
+
+        (testing "the WebSocket upgrade is refused without a session"
+          (is (= 401 (:status (handler (upgrade (anonymous
+                                                 (request :get "/ws"))))))))
+
+        (testing "a bearer token authenticates as well as a cookie"
+          (is (= 200 (:status (handler (-> (request :get "/api/sessions")
+                                           (assoc-in [:headers "cookie"] nil)
+                                           (assoc-in [:headers "authorization"]
+                                                     "Bearer test-token")))))))
+
+        (testing "the React build is served without a session"
+          (let [root (io/file (System/getProperty "java.io.tmpdir")
+                              (str "clai-login-" (UUID/randomUUID)))]
+            (try
+              (.mkdirs root)
+              (spit (io/file root "index.html") "<html>login</html>")
+              (let [handler (http/handler (state (atom {}) root))]
+                (is (= "<html>login</html>"
+                       (body-text (handler (anonymous (request :get "/")))))))
+              (finally
+                (doseq [file (reverse (file-seq root))]
+                  (.delete file))))))))))
+
+(deftest logging-in-issues-a-cookie-and-logging-out-revokes-it
+  (with-fake-agent (atom {})
+    (fn []
+      (let [handler (http/handler (state (atom {})))
+            cookie  (fn [response] (get-in response [:headers "set-cookie"]))
+            with-cookie (fn [request token]
+                          (assoc-in request [:headers "cookie"]
+                                    (str "clai_session=" token)))]
+        (testing "the login page's status probe is public"
+          (let [response (handler (anonymous (request :get "/api/auth/me")))]
+            (is (= 200 (:status response)))
+            (is (= {:authenticated false :user nil} (response-body response)))))
+
+        (testing "wrong credentials are a 401"
+          (is (= 401 (:status (handler (anonymous
+                                        (request :post "/api/auth/login"
+                                                 {:username "admin"
+                                                  :password "nope"})))))))
+
+        (testing "a missing field is a 400"
+          (is (= 400 (:status (handler (anonymous
+                                        (request :post "/api/auth/login"
+                                                 {:username "admin"})))))))
+
+        (testing "signing in returns the user and an HttpOnly cookie"
+          (let [response (handler (anonymous
+                                   (request :post "/api/auth/login"
+                                            {:username "admin"
+                                             :password "admin"})))]
+            (is (= 200 (:status response)))
+            (is (= {:authenticated true :user {:userId "1" :username "admin"}}
+                   (response-body response)))
+            (is (str/starts-with? (cookie response)
+                                  "clai_session=issued-token"))
+            (is (str/includes? (cookie response) "HttpOnly"))))
+
+        (testing "the cookie reports the session back"
+          (is (= {:authenticated true :user {:userId "1" :username "admin"}}
+                 (response-body
+                  (handler (with-cookie (request :get "/api/auth/me")
+                                        "issued-token"))))))
+
+        (testing "logging out without a session still clears the cookie"
+          (let [response (handler (anonymous (request :post "/api/auth/logout")))]
+            (is (= 200 (:status response)))
+            (is (= {:authenticated false :user nil} (response-body response)))
+            (is (str/includes? (cookie response) "Max-Age=0"))))
+
+        (testing "logging out revokes the token and clears the cookie"
+          (let [response (handler (with-cookie (request :post "/api/auth/logout")
+                                               "issued-token"))]
+            (is (= 200 (:status response)))
+            (is (str/includes? (cookie response) "Max-Age=0"))
+            (is (= 401 (:status (handler (with-cookie (request :get "/api/sessions")
+                                                      "issued-token")))))))))))
 
 (deftest unknown-api-routes-are-404s
   (with-fake-agent (atom {})

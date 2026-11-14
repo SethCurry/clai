@@ -1,5 +1,9 @@
 # clai user wiki
 
+- [Signing in](authentication.md): the login page, the `admin`/`admin` sample
+  account, changing it, and calling the API with a cookie or bearer token.
+- [The web console](web-console.md): the pages and their URLs, the session
+  page's layout, and how to hide and show the REPL and explorer panes.
 - [Models and providers](providers.md): configure Ollama and OpenRouter at the
   same time and pick a provider by naming its model.
 - [Local database](database.md): start the development PostgreSQL
