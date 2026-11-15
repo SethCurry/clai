@@ -301,7 +301,7 @@
 
 (defn- throw-response-error
   "Throw for an error OpenRouter reported inside a 200 response."
-  [client error]
+  [error]
   (let [message (or (:message error) (str error))]
     (tel/log! {:level :error
                :id    ::api-error
@@ -332,7 +332,7 @@
                             (assoc req :stream false)
                             {:headers (client-headers client)})]
      (if-let [error (:error body)]
-       (throw-response-error client error)
+       (throw-response-error error)
        body))))
 
 ;; ---------------------------------------------------------------------------

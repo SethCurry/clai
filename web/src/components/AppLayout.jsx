@@ -18,6 +18,7 @@ const TABS = [
   { to: '/', label: 'Sessions', end: true },
   { to: '/git-repos', label: 'Git repos' },
   { to: '/notes', label: 'Notes' },
+  { to: '/plugins', label: 'Plugins' },
 ]
 
 /**

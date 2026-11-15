@@ -331,14 +331,23 @@
               "Listed agent configurations")
     {:configs configs}))
 
-(defn- plugin-summary
-  "Shape one installed plugin row for the plugin picker."
-  [plugin]
-  (select-keys plugin [:pluginId :name :enabled :priority]))
+;; ---------------------------------------------------------------------------
+;; Plugins
+;; ---------------------------------------------------------------------------
+
+(defn- reload-plugins!
+  "Re-register the enabled plugins stored in PostgreSQL, so a write to the
+  plugin table takes effect without restarting the daemon.
+
+  `clai.plugins/load-configured!` logs load failures instead of throwing them,
+  so a plugin that cannot load never fails the write that installed it."
+  [agent]
+  (plugins/load-configured! (:postgres agent)))
 
 (defn list-plugins!
-  "List the plugins installed in PostgreSQL so a client can choose which ones
-  an agent configuration activates. Returns `{:plugins [summary ...]}`."
+  "List the plugins installed in PostgreSQL, each with whether the running
+  daemon loaded it and which hooks it registered. Returns
+  `{:plugins [plugin ...]}`."
   {:malli/schema [:-> :map [:map] :map]}
   [agent _opts]
   (let [installed (if-let [postgres (:postgres agent)]
@@ -348,7 +357,88 @@
                :id    ::plugin-list
                :data  {:count (count installed)}}
               "Listed installed plugins")
-    {:plugins (mapv plugin-summary installed)}))
+    {:plugins (mapv plugins/describe-plugin installed)}))
+
+(defn load-plugin!
+  "Load the installed plugin named by `opts`'s `:pluginId` or `:name` with the
+  runtime status of its hooks, or nil when no such plugin is stored."
+  {:malli/schema [:-> :map [:map
+                            [:pluginId {:optional true}
+                             [:maybe [:or :string :int]]]
+                            [:name {:optional true} [:maybe :string]]]
+                  [:maybe #'plugins/PluginDetail]]}
+  [agent {:keys [pluginId name]}]
+  (let [postgres (:postgres agent)
+        stored   (cond
+                   (nil? postgres)
+                   nil
+
+                   (not (str/blank? (str pluginId)))
+                   (plugins-store/load-plugin postgres (str pluginId))
+
+                   (not (str/blank? (str name)))
+                   (plugins-store/select-plugin postgres (str name)))]
+    (some-> stored plugins/describe-plugin)))
+
+(defn create-plugin!
+  "Install a plugin and return it with its runtime status, reloading the
+  daemon's plugin registry so its hooks take effect immediately.
+
+  `plugin` holds a unique `:name`, the `:jarPath` of the jar that contains it,
+  and its `:entryNamespace`; `:config`, `:enabled`, and the hook `:priority`
+  are optional."
+  {:malli/schema [:-> :map #'plugins-store/PluginInput #'plugins/PluginDetail]}
+  [agent plugin]
+  (let [installed (plugins-store/create-plugin (:postgres agent) plugin)]
+    (tel/log! {:level :info
+               :id    ::plugin-created
+               :data  {:pluginId (:pluginId installed)
+                       :name     (:name installed)}}
+              "Installed plugin")
+    (reload-plugins! agent)
+    (plugins/describe-plugin installed)))
+
+(defn update-plugin!
+  "Replace the installed plugin named by `opts`'s `:pluginId` and return it
+  with its runtime status, or nil when no such plugin is stored. The daemon's
+  registry is reloaded so the change takes effect immediately."
+  {:malli/schema [:-> :map [:map
+                            [:pluginId {:optional true}
+                             [:maybe [:or :string :int]]]
+                            [:name :string]
+                            [:jarPath :string]
+                            [:entryNamespace :string]]
+                  [:maybe #'plugins/PluginDetail]]}
+  [agent {:keys [pluginId] :as plugin}]
+  (when-not (str/blank? (str pluginId))
+    (when-let [updated (plugins-store/update-plugin (:postgres agent)
+                                                    (str pluginId)
+                                                    (dissoc plugin :pluginId))]
+      (tel/log! {:level :info
+                 :id    ::plugin-updated
+                 :data  {:pluginId (:pluginId updated)
+                         :name     (:name updated)}}
+                "Updated plugin")
+      (reload-plugins! agent)
+      (plugins/describe-plugin updated))))
+
+(defn delete-plugin!
+  "Delete the plugin named by `opts`'s `:pluginId` and reload the daemon's
+  registry so its hooks stop running. Returns true when a plugin was deleted."
+  {:malli/schema [:-> :map [:map
+                            [:pluginId {:optional true}
+                             [:maybe [:or :string :int]]]]
+                  boolean?]}
+  [agent {:keys [pluginId]}]
+  (let [deleted? (and (not (str/blank? (str pluginId)))
+                      (plugins-store/delete-plugin (:postgres agent)
+                                                   (str pluginId)))]
+    (when deleted? (reload-plugins! agent))
+    (tel/log! {:level (if deleted? :info :warn)
+               :id    ::plugin-deleted
+               :data  {:pluginId pluginId :deleted? deleted?}}
+              "Deleted plugin")
+    (boolean deleted?)))
 
 (defn load-agent-config!
   "Load one stored agent configuration by `:configId` or `:name`, returning
@@ -1254,7 +1344,7 @@
                     `:plugins`; an empty vector disables plugins.
 
   Sessions are compacted when their history is estimated to be over the
-  token budget `cfg`'s `:compact-after-tokens` names (60000 by default, 0 to
+  token budget `cfg`'s `:compact-after-tokens` names (250000 by default, 0 to
   disable); see `clai.agent.compaction`. A stored agent configuration can
   override that budget per session.
 

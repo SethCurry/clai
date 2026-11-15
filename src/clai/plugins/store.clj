@@ -20,9 +20,9 @@
 
       (def client (pg/make-client))
       (store/create-plugin client
-                           {:name            \"example\"
-                            :jar-path        \"/opt/clai/example.jar\"
-                            :entry-namespace \"example.plugin\"})
+                           {:name           \"example\"
+                            :jarPath        \"/opt/clai/example.jar\"
+                            :entryNamespace \"example.plugin\"})
       (store/list-enabled client)"
   (:require [clai.daemon.postgres :as postgres]
             [clojure.string :as str]
@@ -39,12 +39,14 @@
 (def PluginInput
   "A plugin configuration accepted by [[create-plugin]] and [[update-plugin]].
 
-  `:config` is passed to the plugin's constructor. `:enabled` defaults to
-  true and `:priority` defaults to 100; lower priorities run first."
+  The keys are the same ones [[Plugin]] returns, so a stored plugin can be
+  edited and written back unchanged. `:config` is passed to the plugin's
+  constructor. `:enabled` defaults to true and `:priority` defaults to 100;
+  lower priorities run first."
   [:map
    [:name non-empty-string]
-   [:jar-path non-empty-string]
-   [:entry-namespace non-empty-string]
+   [:jarPath non-empty-string]
+   [:entryNamespace non-empty-string]
    [:config {:optional true} [:maybe [:map]]]
    [:enabled {:optional true} [:maybe boolean?]]
    [:priority {:optional true} [:maybe int?]]])
@@ -101,11 +103,11 @@
                      (contains? plugin :name)
                      (update :name blank->nil)
 
-                     (contains? plugin :jar-path)
-                     (update :jar-path blank->nil)
+                     (contains? plugin :jarPath)
+                     (update :jarPath blank->nil)
 
-                     (contains? plugin :entry-namespace)
-                     (update :entry-namespace blank->nil)
+                     (contains? plugin :entryNamespace)
+                     (update :entryNamespace blank->nil)
 
                      true
                      (update :config #(or % {}))
@@ -121,8 +123,8 @@
   "The SQL parameters shared by [[create-plugin]] and [[update-plugin]]."
   [plugin]
   [(:name plugin)
-   (:jar-path plugin)
-   (:entry-namespace plugin)
+   (:jarPath plugin)
+   (:entryNamespace plugin)
    (postgres/->json (or (:config plugin) {}) "Plugin config")
    (:enabled plugin)
    (:priority plugin)])

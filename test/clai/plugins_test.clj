@@ -108,6 +108,16 @@
     (is (false? (plugins/unregister! "alpha")))
     (is (empty? (plugins/active-plugins)))))
 
+(deftest describe-plugin-reports-what-the-registry-loaded
+  (let [row (plugin-row "alpha")]
+    (is (= (assoc row :loaded false :hooks [])
+           (plugins/describe-plugin row))
+        "a stored plugin the daemon has not loaded contributes no hooks")
+
+    (plugins/register! row {:hooks {:system-prompt (fn [_ctx next] (next {}))}})
+    (is (= (assoc row :loaded true :hooks [:system-prompt])
+           (plugins/describe-plugin row)))))
+
 ;; ---------------------------------------------------------------------------
 ;; Hook composition
 ;; ---------------------------------------------------------------------------

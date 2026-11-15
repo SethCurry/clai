@@ -23,8 +23,8 @@
           plugin (store/create-plugin
                   client
                   {:name            name
-                   :jar-path        "/tmp/first.jar"
-                   :entry-namespace "example.first"
+                   :jarPath        "/tmp/first.jar"
+                   :entryNamespace "example.first"
                    :config          {:mode "one"}
                    :priority        30})
           id     (:pluginId plugin)]
@@ -46,8 +46,8 @@
                        client
                        id
                        {:name            name
-                        :jar-path        "/tmp/second.jar"
-                        :entry-namespace "example.second"
+                        :jarPath        "/tmp/second.jar"
+                        :entryNamespace "example.second"
                         :config          {:mode "two"}
                         :enabled         false
                         :priority        5})]

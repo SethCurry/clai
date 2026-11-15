@@ -97,6 +97,23 @@
   "A plugin row accepted by [[load-plugin!]]."
   store/Plugin)
 
+(def PluginDetail
+  "A stored plugin row together with what the running daemon knows about it:
+  whether any of its hooks are registered (`:loaded`) and which hook names
+  those are (`:hooks`). This is the shape the plugins UI shows."
+  [:map
+   [:pluginId non-empty-string]
+   [:name non-empty-string]
+   [:jarPath non-empty-string]
+   [:entryNamespace non-empty-string]
+   [:config [:map]]
+   [:enabled boolean?]
+   [:priority int?]
+   [:createdAt {:optional true} [:maybe :string]]
+   [:updatedAt {:optional true} [:maybe :string]]
+   [:loaded boolean?]
+   [:hooks [:vector HookName]]])
+
 (def Registration
   "A plugin accepted by [[register!]]. Only `:name` is required; the other
   fields are optional so callers can register hooks directly from a REPL."
@@ -168,6 +185,18 @@
                 :priority priority
                 :config   config
                 :hooks    (vec (sort (keys hooks)))}))))
+
+(defn describe-plugin
+  "Add the runtime status of the installed plugin `plugin` to its row: whether
+  the running daemon registered any of its hooks (`:loaded`) and which hook
+  names those are (`:hooks`)."
+  {:malli/schema [:-> :map #'PluginDetail]}
+  [plugin]
+  (let [registered (some #(when (= (:name plugin) (:name %)) %)
+                         (active-plugins))]
+    (assoc plugin
+           :loaded (some? registered)
+           :hooks (vec (:hooks registered)))))
 
 (defn register!
   "Register `plugin` with `descriptor`, replacing any plugin with the same

@@ -29,6 +29,18 @@
              (map #(message (if (even? %) "user" "assistant") 396)
                   (range count)))))
 
+(defn- tool-round
+  "One assistant tool call followed by `results` tool result messages, all
+  roughly 100 estimated tokens, as a round of a tool-using turn leaves them in
+  a session's history."
+  [id results]
+  (cons {:role    "assistant"
+         :content ""
+         :tool_calls [{:id id
+                       :function {:name "read_file" :arguments {:path "a.txt"}}}]}
+        (map (fn [_] (assoc (message "tool" 396) :tool_call_id id))
+             (range results))))
+
 (def ^:private stub-agent
   "The slice of an agent map that [[compaction/compact-history]] reads."
   {:client {:provider :ollama} :model "stub-model" :compact-after-tokens 1000})
@@ -126,20 +138,35 @@
         "the plan partitions the history without reordering it")))
 
 (deftest plan-keeps-a-tool-call-with-its-results
-  (let [full [{:role "system" :content "sys"}
-              (message "user" 396)
-              {:role "assistant"
-               :content ""
-               :tool_calls [{:id "c1"
-                             :function {:name "read_file"
-                                        :arguments {:path "a.txt"}}}]}
-              (assoc (message "tool" 396) :tool_call_id "c1")
-              (assoc (message "tool" 396) :tool_call_id "c1")
-              {:role "assistant" :content "done"}]
-        plan (compaction/plan full 400)]
-    (is (= ["assistant" "tool" "tool" "assistant"]
+  (let [full (vec (concat [{:role "system" :content "sys"}
+                           (message "user" 396)]
+                          (tool-round "c1" 2)
+                          [{:role "assistant" :content "done one"}
+                           {:role "user" :content "and two"}
+                           {:role "assistant" :content "done two"}]))
+        plan (compaction/plan full 440)]
+    (is (= ["assistant" "tool" "tool" "assistant" "user" "assistant"]
            (mapv :role (:recent plan)))
-        "a kept tail never starts with a result whose call was summarized")))
+        "a kept tail never starts with a result whose call was summarized")
+    (is (seq (:tool_calls (first (:recent plan))))
+        "the call the kept results answer travels with them")))
+
+(deftest plan-keeps-the-turn-in-progress-whole
+  (let [full  (vec (concat [{:role "system" :content "You are clai."}]
+                           (rest (history 4))
+                           [{:role "user" :content "fix the build"}]
+                           (mapcat #(tool-round (str "c" %) 1) (range 10))))
+        plan  (compaction/plan full 1000)
+        turn  (drop-while (fn [m] (not= "fix the build" (:content m))) full)]
+    (is (some? plan) "the older turn is compacted")
+    (is (= (vec turn) (vec (take-last (count turn) (:recent plan))))
+        "everything from the turn's prompt on is kept verbatim")
+    (is (= "fix the build" (:content (first (:recent plan))))
+        "the prompt the agent is answering opens the kept tail")
+    (is (not-any? #(= "fix the build" (:content %)) (:older plan))
+        "and is never summarized away")
+    (is (= (vec (concat (:system plan) (:older plan) (:recent plan))) full)
+        "the plan still partitions the history without reordering it")))
 
 (deftest plan-folds-an-earlier-summary-into-the-next-one
   (let [summary (compaction/summary-message "Earlier: the user fixed the build.")
@@ -240,14 +267,31 @@
        (is (= (:recent (compaction/plan full 1000)) (vec (drop 2 compact)))
            "the most recent messages are kept verbatim")))))
 
+(deftest compact-history-keeps-the-turn-in-progress
+  (stub-summaries
+   (fn [_requests]
+     (let [prompt  {:role "user" :content "fix the build"}
+           rounds  (vec (mapcat #(tool-round (str "c" %) 1) (range 6)))
+           full    (vec (concat [{:role "system" :content "You are clai."}]
+                                (rest (history 4))
+                                [prompt]
+                                rounds))
+           compact (:history (compaction/compact-history stub-agent full))]
+       (is (some? compact) "the older turn is summarized")
+       (is (= (vec (cons prompt rounds)) (vec (drop 2 compact)))
+           "the turn the agent is working on survives the compaction whole")
+       (is (= ["system" "system" "user"] (mapv :role (take 3 compact)))
+           "the system prompt, the summary, then the turn that was compacted
+            around")))))
+
 (deftest compact-history-does-not-repeat-what-it-already-summarized
   (stub-summaries
    (fn [requests]
-     (let [first-pass    (:history (compaction/compact-history stub-agent
-                                                              (history 20)))
+     (let [first-pass      (:history (compaction/compact-history stub-agent
+                                                               (history 20)))
            requests-so-far (count @requests)
-           grown         (conj (vec first-pass) (message "user" 3000))
-           second-pass   (compaction/compact-history stub-agent grown)]
+           grown           (conj (vec first-pass) (message "user" 3000))
+           second-pass     (compaction/compact-history stub-agent grown)]
        (is (pos? requests-so-far))
        (is (some? second-pass) "a session that grew again compacts again")
        (is (= 1 (- (count @requests) requests-so-far))

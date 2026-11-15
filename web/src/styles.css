@@ -2246,14 +2246,16 @@ pre {
 }
 
 .git-repo-list,
-.note-list {
+.note-list,
+.plugin-list {
   display: flex;
   flex-direction: column;
   gap: 6px;
 }
 
 .git-repo-card,
-.note-card {
+.note-card,
+.plugin-card {
   display: flex;
   flex-direction: column;
   gap: 3px;
@@ -2268,23 +2270,27 @@ pre {
 }
 
 .git-repo-card:hover,
-.note-card:hover {
+.note-card:hover,
+.plugin-card:hover {
   border-color: var(--border);
   background: rgba(255, 255, 255, 0.025);
 }
 
 .git-repo-card--active,
-.note-card--active {
+.note-card--active,
+.plugin-card--active {
   border-color: rgba(56, 189, 248, 0.4);
   background: rgba(56, 189, 248, 0.08);
 }
 
-.git-repo-card__name {
+.git-repo-card__name,
+.plugin-card__name {
   font-size: 0.82rem;
   font-weight: 650;
 }
 
-.git-repo-card__url {
+.git-repo-card__url,
+.plugin-card__namespace {
   overflow: hidden;
   color: var(--muted);
   font-family: var(--mono);
@@ -2293,7 +2299,8 @@ pre {
   white-space: nowrap;
 }
 
-.git-repo-card__meta {
+.git-repo-card__meta,
+.plugin-card__meta {
   color: var(--muted-2);
   font-size: 0.66rem;
 }
@@ -2325,29 +2332,34 @@ pre {
 }
 
 .git-repo__head,
-.note-detail__head {
+.note-detail__head,
+.plugin__head {
   flex-direction: row;
   align-items: flex-start;
   justify-content: space-between;
   gap: 18px;
 }
 
-.git-repo__identity {
+.git-repo__identity,
+.plugin__identity {
   min-width: 0;
 }
 
-.git-repo__url {
+.git-repo__url,
+.plugin__path {
   overflow-wrap: anywhere;
   font-family: var(--mono);
 }
 
-.git-repo__actions {
+.git-repo__actions,
+.plugin__actions {
   display: flex;
   flex: 0 0 auto;
   gap: 8px;
 }
 
-.git-repo__meta {
+.git-repo__meta,
+.plugin__meta {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 10px;
@@ -2357,7 +2369,8 @@ pre {
   border-bottom: 1px solid var(--border);
 }
 
-.git-repo__meta dt {
+.git-repo__meta dt,
+.plugin__meta dt {
   color: var(--muted-2);
   font-size: 0.64rem;
   font-weight: 700;
@@ -2365,7 +2378,8 @@ pre {
   text-transform: uppercase;
 }
 
-.git-repo__meta dd {
+.git-repo__meta dd,
+.plugin__meta dd {
   margin: 3px 0 0;
   color: var(--text);
   font-size: 0.78rem;
@@ -2460,6 +2474,54 @@ pre {
   gap: 4px;
 }
 
+
+.plugin__namespace {
+  overflow-wrap: anywhere;
+  font-family: var(--mono);
+  font-size: 0.72rem;
+}
+
+.plugin-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.plugin-section h4 {
+  margin: 0;
+  font-size: 0.9rem;
+}
+
+.plugin-hooks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.plugin-hook {
+  padding: 3px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--panel-3);
+  font-family: var(--mono);
+  font-size: 0.7rem;
+}
+
+.plugin-config {
+  max-height: 220px;
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel-3);
+  font-family: var(--mono);
+  font-size: 0.74rem;
+  line-height: 1.5;
+  overflow: auto;
+}
 
 /* ------------------------------------------------------------------- notes */
 

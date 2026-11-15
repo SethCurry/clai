@@ -13,7 +13,7 @@
        :provider       :ollama               ; provider for unprefixed models
        :system-prompt  \"You are a ...\"     ; optional system message
        :max-tool-rounds 8                    ; per-prompt tool-call round cap
-       :compact-after-tokens 60000           ; compact a session's history
+       :compact-after-tokens 250000          ; compact a session's history
                                              ; once it is estimated to be
                                              ; this many tokens; 0 disables
        :think          false                 ; request model reasoning

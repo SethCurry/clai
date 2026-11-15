@@ -65,7 +65,12 @@
   `:on-output` is an optional `(fn [output] ...)` a long-running tool may call
   with the output it has produced so far; the agent loop relays each call to
   the client as a `tool_call_update`. It is absent when nothing is listening
-  (a sub-agent's child tools), so tools must treat it as optional."
+  (a sub-agent's child tools), so tools must treat it as optional.
+
+  `:lsp` is optional `clojure-lsp` configuration for the code-navigation tools:
+  `{:executable \"/path/to/clojure-lsp\" :root \"/path/to/project\"}`. Both keys are
+  optional; the executable also comes from `CLOJURE_LSP_BIN`, and the project
+  root defaults to the session's `:cwd` (searched upwards for a project file)."
   [:map
    [:cwd {:optional true} [:maybe :string]]
    [:session-id {:optional true} [:maybe :string]]
@@ -80,7 +85,8 @@
    [:max-rounds {:optional true} [:maybe pos-int?]]
    [:agent-depth {:optional true} [:maybe :int]]
    [:openproject {:optional true} [:maybe [:map]]]
-   [:on-output {:optional true} [:maybe fn?]]])
+   [:on-output {:optional true} [:maybe fn?]]
+   [:lsp {:optional true} [:maybe [:map]]]])
 
 (def tool-result
   "The string result of a tool function (fed back to the model as the content

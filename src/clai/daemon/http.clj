@@ -822,12 +822,6 @@
         (json-response 200 file)
         (not-found "No such file")))))
 
-(defn- plugins-handler
-  "List the installed plugins for the UI's plugin picker."
-  {:malli/schema [:-> #'RouteContext #'Response]}
-  [{:keys [agent]}]
-  (json-response 200 {:plugins (list-plugins agent)}))
-
 (defn- note-search-handler
   "Search notes by BM25 relevance using the `q` and `limit` query parameters."
   {:malli/schema [:-> #'RouteContext #'Response]}
@@ -967,6 +961,21 @@
    :delete (fn [agent config-id]
              (agent/delete-agent-config! agent {:configId config-id}))})
 
+(def ^:private plugin-spec
+  "How the API installs plugins. Every write reloads the daemon's plugin
+  registry, so a stored change takes effect immediately."
+  {:path   "/api/plugins"
+   :id     :pluginId
+   :label  "plugin"
+   :list   (fn [agent _query] (agent/list-plugins! agent {}))
+   :load   (fn [agent plugin-id]
+             (agent/load-plugin! agent {:pluginId plugin-id}))
+   :create (fn [agent plugin] (agent/create-plugin! agent plugin))
+   :update (fn [agent plugin-id plugin]
+             (agent/update-plugin! agent (assoc plugin :pluginId plugin-id)))
+   :delete (fn [agent plugin-id]
+             (agent/delete-plugin! agent {:pluginId plugin-id}))})
+
 (def ^:private git-repo-spec
   "How the API stores git repositories."
   {:path   "/api/git-repos"
@@ -1025,7 +1034,6 @@
    {:method :get :template "/api/sessions/:sessionId/file" :handler session-file-handler}
    {:method :get :template "/api/sessions/:sessionId" :handler load-session-handler}
    {:method :delete :template "/api/sessions/:sessionId" :handler delete-session-handler}
-   {:method :get :template "/api/plugins" :handler plugins-handler}
    {:method :get :template "/api/notes/search" :handler note-search-handler}
    {:method :get :template "/api/namespaces" :handler namespaces-handler}
    {:method :get :template "/api/namespaces/:namespace/vars" :handler namespace-vars-handler}
@@ -1037,6 +1045,7 @@
   (into (mapv compile-route special-routes)
         (comp (mapcat crud-routes) (map compile-route))
         [agent-config-spec
+         plugin-spec
          git-repo-spec
          git-worktree-spec
          note-spec]))

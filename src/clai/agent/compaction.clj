@@ -10,6 +10,14 @@
   verbatim, so the model keeps its instructions and the thread it is working
   on.
 
+  A compaction never summarizes the messages of the turn in progress. The
+  prompt the agent is answering has to travel with the tool calls and results
+  it produced (see [[keep-current-turn]]), or the next request has no user
+  turn at all: providers reject it and models answer it by stopping instead of
+  carrying on. So a compaction ends the conversation's older turns and leaves
+  the current one whole, which is what lets an agent keep working after its
+  history was compacted mid-turn.
+
   Token counts are estimated from character counts ([[chars-per-token]]
   characters per token), because tokenizers are model-specific and a budget
   only needs to be a good guess. Summarizing costs as few model calls as
@@ -46,7 +54,7 @@
   neither the config file (`:compact-after-tokens`), the
   `CLAI_COMPACT_AFTER_TOKENS` environment variable, nor a session's stored
   agent configuration names one."
-  60000)
+  250000)
 
 (def chars-per-token
   "How many characters one token is estimated to cover. Four is the usual rule
@@ -185,6 +193,29 @@
       (recur (dec start))
       start)))
 
+(defn- turn-start
+  "The index of the message that began the turn in progress: the last `user`
+  message in `history`. Returns nil when the history holds no user message, so
+  a caller can tell \"nothing in progress\" from \"began at the first\"."
+  [history]
+  (last (keep-indexed (fn [index message]
+                        (when (= "user" (:role message)) index))
+                      history)))
+
+(defn- keep-current-turn
+  "Move `start` back to the prompt the turn in progress is answering, when a
+  compaction would otherwise replace it.
+
+  The tool calls and results the agent produced since are part of that turn:
+  summarizing the prompt away leaves the next chat request with no user turn
+  at all, which providers reject and models answer by stopping instead of
+  carrying on. Keeping the whole turn verbatim means compaction ends the older
+  conversation rather than interrupting the one in progress."
+  [history start]
+  (if-let [turn (turn-start history)]
+    (min start turn)
+    start))
+
 (defn- leading-system
   "The number of messages opening `history` that are system messages other than
   a compaction summary -- a session's instructions."
@@ -201,16 +232,19 @@
     :system    the session's opening system prompt, kept verbatim
     :previous  the summary of an earlier compaction, when the history has one
     :older     the messages the new summary replaces
-    :recent    the most recent messages, kept verbatim (at most
-               [[tail-budget]] estimated tokens)
+    :recent    the messages kept verbatim: the turn in progress (see
+               [[keep-current-turn]]) plus as much recent history as
+               [[tail-budget]] allows
 
   Returns nil when there is nothing to compact: the history already fits the
-  budget, or only its system prompt and a few recent messages are left."
+  budget, or everything left is the system prompt, the earlier summary, and
+  the turn in progress."
   {:malli/schema [:-> [:sequential :map] [:int {:min 1}] [:maybe :map]]}
   [history after-tokens]
   (let [full    (vec history)
         start   (->> (suffix-start full (tail-budget after-tokens))
-                     (widen-for-tool-results full))
+                     (widen-for-tool-results full)
+                     (keep-current-turn full))
         prefix  (subvec full 0 start)
         systems (subvec prefix 0 (leading-system prefix))
         rest    (subvec prefix (count systems))
@@ -328,7 +362,8 @@
   budget itself; a missing, nil, or zero budget leaves the history alone. On
   success returns `{:history <compacted history> :update <session_compaction
   update>}`, where the history is the session's system prompt, the summary of
-  everything compacted away so far, and the messages that stayed verbatim.
+  everything compacted away so far, and the messages that stayed verbatim --
+  the turn in progress always among them, so the agent can carry on with it.
 
   Returns nil when nothing was compacted -- because the history fits, because
   there is nothing worth summarizing, or because the summary request failed. A

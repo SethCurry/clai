@@ -191,7 +191,7 @@
   stored agent configuration."
   {:malli/schema [:-> Clients [:maybe :string] [:maybe Provider] ResolvedModel]}
   [clients model default-provider]
-  (let [{:keys [provider model] :as spec} (model-spec model default-provider)]
+  (let [{:keys [provider] :as spec} (model-spec model default-provider)]
     (assoc spec :client (client-for clients provider))))
 
 ;; ---------------------------------------------------------------------------

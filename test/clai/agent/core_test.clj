@@ -11,6 +11,7 @@
             [clai.daemon.postgres.sessions :as sessions]
             [clai.events.schema :as events]
             [clai.plugins :as plugins]
+            [clai.plugins.store :as plugins-store]
             [clai.test-support :refer [quiet-logs instrument memory-session-store]]
             [clojure.string :as str]
             [clojure.test :refer :all]
@@ -244,6 +245,67 @@
              "the compacted history replaces the stored one, and the reply is
               appended to it"))))))
 
+(deftest prompt-continues-after-compacting-in-the-middle-of-a-turn
+  (let [requests  (atom [])
+        summaries (atom [])
+        echo      {:id      "echo"
+                   :handler (fn [_args _ctx] (apply str (repeat 2000 "z")))
+                   :spec    {:type "function"
+                             :function {:name "echo"
+                                        :parameters {:type "object"}}}}]
+    (with-redefs [ollama/chat
+                  (fn [_client req]
+                    (cond
+                      ;; A summarization request: the instruction opens it and
+                      ;; it offers the model no tools.
+                      (str/includes? (str (-> req :messages first :content))
+                                     compaction/summarize-instruction)
+                      (do (swap! summaries conj req)
+                          {:message {:role "assistant"
+                                     :content "The user asked for echoes."}})
+
+                      ;; The untitled session's title request.
+                      (not (contains? req :tools))
+                      {:message {:role "assistant" :content "stub title"}}
+
+                      :else
+                      (let [n (count (swap! requests conj req))]
+                        (if (= 3 n)
+                          {:message {:role "assistant"
+                                     :content ""
+                                     :tool_calls
+                                     [{:id "call-1"
+                                       :function
+                                       {:name "echo"
+                                        :arguments "{\"text\":\"hi\"}"}}]}}
+                          {:message {:role "assistant" :content "done"}}))))]
+      (let [handler (agent/make-agent {:cfg           {:compact-after-tokens 1000}
+                                       :client        test-client
+                                       :model         "stub-model"
+                                       :tool-registry [echo]})
+            {:keys [sessionId]} (agent/new-session! handler {:cwd "/tmp"})
+            updates (atom [])
+            prompt3 (str "please echo this: " (apply str (repeat 5000 "y")))]
+        (prompt! handler sessionId (apply str (repeat 5000 "x")) updates)
+        (prompt! handler sessionId "and again" updates)
+        (reset! updates [])
+        (reset! summaries [])
+        (is (= {:stopReason "end_turn"}
+               (prompt! handler sessionId prompt3 updates))
+            "the turn completes: compacting mid-turn does not end it")
+        (is (= 1 (count @summaries))
+            "the older turns are summarized once; the turn in progress is
+             never summarized on top of them")
+        (let [messages (:messages (last @requests))]
+          (is (= [prompt3] (mapv :content (filter #(= "user" (:role %))
+                                                  messages)))
+              "the only user turn sent is the prompt being answered, so the
+               model has the instruction the tool results answer")
+          (is (= "tool" (:role (last messages)))
+              "and the tool result the model is answering is still sent"))
+        (is (= "done" (events/content->text (:content (last @updates))))
+            "the agent's reply reaches the caller after the compaction")))))
+
 (deftest a-session-configuration-can-turn-compaction-off
   (with-redefs [agent-configs/load-config
                 (fn [_ id]
@@ -424,6 +486,44 @@
                                                      :name     "missing"})))
       (is (true? (agent/delete-agent-config! handler {:configId "10"})))
       (is (false? (agent/delete-agent-config! handler {:configId "99"}))))))
+
+(deftest plugin-writes-reload-the-running-registry
+  (let [handler {:postgres ::postgres}
+        row     {:pluginId       "7"
+                 :name           "audit"
+                 :jarPath        "/opt/clai/audit.jar"
+                 :entryNamespace "example.audit"
+                 :config         {}
+                 :enabled        true
+                 :priority       100}
+        reloads (atom [])]
+    (with-redefs [plugins-store/create-plugin (fn [client plugin]
+                                                (is (= ::postgres client))
+                                                (assoc plugin :pluginId "7"))
+                  plugins-store/update-plugin (fn [_ plugin-id plugin]
+                                                (when (= "7" plugin-id)
+                                                  row))
+                  plugins-store/delete-plugin (fn [_ plugin-id]
+                                                (= "7" plugin-id))
+                  plugins/load-configured!   (fn [client]
+                                               (swap! reloads conj client)
+                                               {:loaded ["audit"] :failed []})]
+      (let [created (agent/create-plugin! handler
+                                          (dissoc row :pluginId))]
+        (is (= "7" (:pluginId created)))
+        (is (false? (:loaded created))
+            "the plugin is not registered until the loader runs")
+        (is (= [::postgres] @reloads)))
+
+      (is (= "audit" (:name (agent/update-plugin! handler row))))
+      (is (true? (agent/delete-plugin! handler {:pluginId "7"})))
+      (is (nil? (agent/update-plugin! handler {:pluginId "99"
+                                               :name     "missing"
+                                               :jarPath  "/tmp/x.jar"
+                                               :entryNamespace "x.y"})))
+      (is (false? (agent/delete-plugin! handler {:pluginId "99"})))
+      (is (= [::postgres ::postgres ::postgres] @reloads)
+          "creates, updates, and deletes reload; failed lookups do not"))))
 
 (deftest new-session-appends-agents-md-to-system-prompt
   (let [dir    (temp-dir)

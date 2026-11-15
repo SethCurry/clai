@@ -50,10 +50,10 @@ This repository includes a complete example in
 ```clojure
 (store/create-plugin
  client
- {:name            "todays-date"
-  :jar-path        "/absolute/path/to/clai/target/plugin/clai-plugin-todays-date.jar"
-  :entry-namespace "clai-plugin-todays-date.plugin"
-  :config          {:date-format "EEEE, MMMM d, yyyy"}})
+ {:name           "todays-date"
+  :jarPath        "/absolute/path/to/clai/target/plugin/clai-plugin-todays-date.jar"
+  :entryNamespace "clai-plugin-todays-date.plugin"
+  :config         {:date-format "EEEE, MMMM d, yyyy"}})
 ```
 
 ## Hooks
@@ -101,12 +101,12 @@ Store an enabled row in PostgreSQL:
 
 (store/create-plugin
  client
- {:name            "example"
-  :jar-path        "/opt/clai/plugins/example.jar"
-  :entry-namespace "example.plugin"
-  :config          {:suffix "Be concise."}
-  :priority        100
-  :enabled         true})
+ {:name           "example"
+  :jarPath        "/opt/clai/plugins/example.jar"
+  :entryNamespace "example.plugin"
+  :config         {:suffix "Be concise."}
+  :priority       100
+  :enabled        true})
 ```
 
 The `plugin` table is declared in `schema/schema.sql` and is created by
@@ -114,6 +114,12 @@ The `plugin` table is declared in `schema/schema.sql` and is created by
 `store/list-enabled`, `store/select-plugin`, `store/load-plugin`,
 `store/update-plugin`, and `store/delete-plugin` provide the rest of the CRUD
 API.
+
+The same rows can be managed from the web UI's **Plugins** page, which lists
+the installed plugins with the hooks each one registered, and creates, edits,
+and deletes them through `/api/plugins`. Every write made there reloads the
+daemon's registry, so a plugin installed or disabled in the browser applies to
+the next prompt without restarting anything.
 
 ## Choosing active plugins
 

@@ -32,11 +32,13 @@
 
  ;; Token budget for a session's history. Once the history is estimated to be
  ;; over this many tokens, the agent summarizes the older messages so the
- ;; conversation keeps fitting the model's context window; the newest messages
- ;; and the system prompt are kept as they are. 0 disables compaction, and
+ ;; conversation keeps fitting the model's context window; the system prompt,
+ ;; the newest messages, and the turn in progress (the prompt the agent is
+ ;; answering and the tool calls since) are kept as they are, so compacting
+ ;; mid-turn never interrupts the work. 0 disables compaction, and
  ;; $CLAI_COMPACT_AFTER_TOKENS sets a budget without editing this file. A
  ;; session's stored agent configuration can override it.
- :compact-after-tokens 60000
+ :compact-after-tokens 250000
 
  ;; Provider-neutral chat options. Ollama forwards them to /api/chat verbatim;
  ;; OpenRouter keeps the OpenAI-compatible ones (:temperature, :top_p,

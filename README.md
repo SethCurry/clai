@@ -132,8 +132,10 @@ authorization boundary between users.
 
 Plugins are Clojure jars configured in PostgreSQL. They can change session
 namespace creation, system-prompt assembly, and the handling of user prompts
-and agent messages. Each agent configuration chooses its active plugins with
-the `plugins` list (the web UI exposes it in the configuration dialog); see
+and agent messages. Install, edit, and remove them from the web UI's
+**Plugins** page, or with the functions in `clai.plugins.store`. Each agent
+configuration chooses its active plugins with the `plugins` list (the web UI
+exposes it in the configuration dialog); see
 [doc/plugins.md](doc/plugins.md) for the hook contract, the `plugin` table, and
 a complete example.
 

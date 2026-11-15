@@ -24,14 +24,15 @@ its nice for a user to use from the REPL.
 | Shared provider HTTP + message normalization                             | ./src/clai/agent/providers/http.clj, ./src/clai/agent/providers/messages.clj           |
 | Logging                                                                  | ./src/clai/log.clj                                                                     |
 | Plugin runtime                                                           | ./src/clai/plugins.clj                                                                 |
+| Plugin storage                                                           | ./src/clai/plugins/store.clj                                                           |
 | Today's date plugin                                                      | ./src/clai_plugin_todays_date/plugin.clj                                               |
 | PostgreSQL client                                                        | ./src/clai/daemon/postgres.clj                                                         |
 | Password hashing, session tokens, cookies                                | ./src/clai/auth.clj, ./test/clai/auth_test.clj                                         |
 | User accounts + login sessions (database)                                | ./src/clai/daemon/postgres/users.clj, ./test/clai/daemon/postgres/users_test.clj       |
 | API authentication (login/logout routes, 401 guard)                      | ./src/clai/daemon/http.clj                                                             |
 | Session storage                                                          | ./src/clai/daemon/postgres/sessions.clj                                                |
-| Session titles (auto-naming a session from its first message)            | ./src/clai/agent/titles.clj, ./test/clai/agent/titles_test.clj                        |
-| Session compaction (summarizing older messages at a token budget)        | ./src/clai/agent/compaction.clj, ./test/clai/agent/compaction_test.clj                |
+| Session titles (auto-naming a session from its first message)            | ./src/clai/agent/titles.clj, ./test/clai/agent/titles_test.clj                         |
+| Session compaction (summarizing older messages at a token budget)        | ./src/clai/agent/compaction.clj, ./test/clai/agent/compaction_test.clj                 |
 | Git repo/worktree storage                                                | ./src/clai/daemon/postgres/git.clj                                                     |
 | Git repo/worktree HTTP API                                               | ./src/clai/daemon/http.clj                                                             |
 | Note storage + BM25 note search                                          | ./src/clai/daemon/postgres/notes.clj                                                   |
@@ -40,6 +41,8 @@ its nice for a user to use from the REPL.
 | Note tools (list/search/read/update/delete)                              | ./src/clai/agent/tools/builtin/notes.clj                                               |
 | `eval_clojure` tool (agent REPL)                                         | ./src/clai/agent/tools/builtin/eval.clj                                                |
 | Agent REPL namespace (`eval_clojure` default, `tools`/`history` helpers) | ./src/clai/home/core.clj                                                               |
+| `clojure-lsp` client (servers, JSON-RPC, queries, diagnostics)           | ./src/clai/lsp.clj, ./test/clai/lsp_test.clj                                           |
+| Code navigation tools (`lsp_definition`, `lsp_symbols`, ...)             | ./src/clai/agent/tools/builtin/lsp.clj, ./test/clai/agent/tools/builtin/lsp_test.clj   |
 | File listing/preview (web)                                               | ./src/clai/daemon/files.clj                                                            |
 | Clojure runtime introspection (web)                                      | ./src/clai/daemon/namespaces.clj                                                       |
 | Storage DDL                                                              | ./schema/schema.sql                                                                    |
@@ -56,23 +59,12 @@ its nice for a user to use from the REPL.
 | Web file explorer                                                        | ./web/src/components/FileExplorer.jsx                                                  |
 | Web namespace explorer                                                   | ./web/src/components/ClojureExplorer.jsx                                               |
 | Web notes page (view, search, create, edit)                              | ./web/src/components/NotesPage.jsx                                                     |
+| Web plugins page (view, install, edit, delete)                           | ./web/src/components/PluginsPage.jsx                                                   |
+| Web plugins state + API calls                                            | ./web/src/usePlugins.js                                                                |
+| Web plugin form/validation helpers + tests                               | ./web/src/plugins.js, ./web/src/plugins.test.js                                        |
 | Web notes state + API calls                                              | ./web/src/useNotes.js                                                                  |
 | Web note form/validation helpers + tests                                 | ./web/src/notes.js, ./web/src/notes.test.js                                            |
 | Web `[[Title]]` link parsing + Markdown rendering                        | ./web/src/noteLinks.js, ./web/src/noteLinks.test.js, ./web/src/components/Markdown.jsx |
 | Web shared date formatting                                               | ./web/src/format.js                                                                    |
 
 Make sure to maintain files like this that list major file and subdirectories and what they contain.
-
-## Wiki
-
-Maintain a user wiki in ./agent-wiki. It should contain everything a user
-would need to install clai, create sessions in both the CLI REPL and the UI,
-create plugins, and anything else you think would be applicable.
-
-Write it in Markdown, and make sure to link between pages where appropriate.
-
-## Notes
-
-Maintain a set of notes for yourself in ./agent-notes. Make sure to record
-important decisions, why they were made, where relevant files are, etc.
-Make sure to update them if you see something in them you know is incorrect.

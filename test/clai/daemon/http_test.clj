@@ -314,6 +314,125 @@
                   :plugins plugins}
                  (first @sent))))))))
 
+(deftest plugins-can-be-installed-edited-and-removed
+  (with-fake-agent (atom {})
+    (fn []
+      (let [installed (atom {"1" {:pluginId       "1"
+                                  :name           "todays-date"
+                                  :jarPath        "/opt/clai/todays-date.jar"
+                                  :entryNamespace "clai-plugin-todays-date.plugin"
+                                  :config         {:date-format "yyyy"}
+                                  :enabled        true
+                                  :priority       100
+                                  :loaded         true
+                                  :hooks          [:system-prompt]}})
+            reloads   (atom 0)
+            status    (fn [plugin]
+                        (assoc plugin
+                               :loaded (boolean (seq (:hooks plugin)))
+                               :hooks (vec (:hooks plugin))))
+            save      (fn [plugin-id plugin]
+                        (let [saved (status (assoc plugin
+                                                   :pluginId plugin-id
+                                                   :hooks []
+                                                   :config (or (:config plugin) {})))]
+                          (swap! installed assoc plugin-id saved)
+                          saved))]
+        (with-redefs [agent/list-plugins!
+                      (fn [_ _] {:plugins (vec (vals @installed))})
+
+                      agent/load-plugin!
+                      (fn [_ {:keys [pluginId]}]
+                        (get @installed (str pluginId)))
+
+                      agent/create-plugin!
+                      (fn [_ plugin]
+                        (if (str/blank? (str (:name plugin)))
+                          (throw (ex-info "Invalid plugin configuration" {}))
+                          (do
+                            (swap! reloads inc)
+                            (save "2" plugin))))
+
+                      agent/update-plugin!
+                      (fn [_ {:keys [pluginId] :as plugin}]
+                        (when (contains? @installed (str pluginId))
+                          (swap! reloads inc)
+                          (save (str pluginId) (dissoc plugin :pluginId))))
+
+                      agent/delete-plugin!
+                      (fn [_ {:keys [pluginId]}]
+                        (when (contains? @installed (str pluginId))
+                          (swap! reloads inc)
+                          (swap! installed dissoc (str pluginId))
+                          true))]
+          (let [handler (http/handler (state (atom {})))]
+            (testing "the installed plugins are listed with their runtime state"
+              (is (= [{:pluginId       "1"
+                       :name           "todays-date"
+                       :jarPath        "/opt/clai/todays-date.jar"
+                       :entryNamespace "clai-plugin-todays-date.plugin"
+                       :config         {:date-format "yyyy"}
+                       :enabled        true
+                       :priority       100
+                       :loaded         true
+                       :hooks          ["system-prompt"]}]
+                     (:plugins (response-body
+                                (handler (request :get "/api/plugins")))))))
+
+            (is (= "todays-date"
+                   (:name (response-body
+                           (handler (request :get "/api/plugins/1"))))))
+            (is (= 404 (:status (handler (request :get "/api/plugins/99")))))
+
+            (testing "a new plugin is installed and the registry reloaded"
+              (let [created (handler (request :post "/api/plugins"
+                                              {:name           "audit"
+                                               :jarPath        "/opt/clai/audit.jar"
+                                               :entryNamespace "example.audit"
+                                               :config         {:mode "strict"}
+                                               :enabled        false
+                                               :priority       5}))]
+                (is (= 201 (:status created)))
+                (is (= {:pluginId       "2"
+                        :name           "audit"
+                        :jarPath        "/opt/clai/audit.jar"
+                        :entryNamespace "example.audit"
+                        :config         {:mode "strict"}
+                        :enabled        false
+                        :priority       5
+                        :loaded         false
+                        :hooks          []}
+                       (response-body created)))
+                (is (= 1 @reloads))))
+
+            (testing "an invalid plugin is a bad request"
+              (is (= 400 (:status (handler (request :post "/api/plugins"
+                                                    {:name "  "}))))))
+
+            (testing "a plugin is edited in place"
+              (let [updated (handler (request :put "/api/plugins/1"
+                                              {:name           "todays-date"
+                                               :jarPath        "/opt/clai/new.jar"
+                                               :entryNamespace "clai-plugin-todays-date.plugin"
+                                               :enabled        true
+                                               :priority       20}))]
+                (is (= 200 (:status updated)))
+                (is (= "/opt/clai/new.jar" (:jarPath (response-body updated))))
+                (is (= 20 (:priority (response-body updated))))
+                (is (= 2 @reloads))))
+
+            (is (= 404 (:status (handler (request :put "/api/plugins/99"
+                                                  {:name           "missing"
+                                                   :jarPath        "/tmp/x.jar"
+                                                   :entryNamespace "x.y"})))))
+
+            (testing "a plugin is removed"
+              (let [deleted (handler (request :delete "/api/plugins/2"))]
+                (is (= 200 (:status deleted)))
+                (is (= "2" (:deleted (response-body deleted))))
+                (is (= 3 @reloads))))
+            (is (= 404 (:status (handler (request :delete "/api/plugins/2")))))))))))
+
 (deftest agent-configurations-can-be-created-updated-and-deleted
   (with-fake-agent (atom {})
     (fn []
