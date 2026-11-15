@@ -2,6 +2,7 @@
   "Shared helpers for the test suite."
   (:require [clai.daemon.postgres :as pg]
             [clai.daemon.postgres.sessions :as sessions]
+            [clai.events.compaction :as event-compaction]
             [clai.instrument :as instrument]
             [clai.log]
             [clojure.string :as str]
@@ -179,6 +180,19 @@
   [store _client session-id history]
   (memory-mutate store session-id #(assoc % :history (vec history))))
 
+(defn- memory-append-compaction
+  "Record a compaction the way `append-compaction` does: the summary takes the
+  place of everything before it, except the session's system messages (which it
+  is appended to) and the last `keep` messages."
+  [store _client session-id summary keep]
+  (memory-mutate store session-id
+                 (fn [{:keys [history] :as session}]
+                   (let [[systems messages] (split-with #(= "system" (:role %))
+                                                        (vec history))]
+                     (assoc session :history
+                            (into (event-compaction/append-summary systems summary)
+                                  (take-last keep messages)))))))
+
 (defn- memory-clear-history
   [store _client session-id]
   (memory-mutate store session-id #(assoc % :history [])))
@@ -203,5 +217,6 @@
                   sessions/session-history        (bind memory-session-history)
                   sessions/rename-session         (bind memory-rename-session)
                   sessions/replace-history        (bind memory-replace-history)
+                  sessions/append-compaction      (bind memory-append-compaction)
                   sessions/clear-history          (bind memory-clear-history)]
       (f))))

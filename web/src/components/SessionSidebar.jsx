@@ -1,3 +1,5 @@
+import { NavLink } from 'react-router-dom'
+
 function shortId(id) {
   const value = String(id ?? '')
   return value.length > 12 ? `${value.slice(0, 8)}…` : value
@@ -61,7 +63,6 @@ export function SessionSidebar({
   onToggleExplorer,
   onNewSession,
   onSelectConfig,
-  onManageConfigs,
   onRefresh,
   onLoadSession,
   onDeleteSession,
@@ -83,13 +84,9 @@ export function SessionSidebar({
       <div className="sidebar__config">
         <div className="sidebar__config-head">
           <label htmlFor="agent-config">Agent config</label>
-          <button
-            type="button"
-            className="sidebar__config-manage"
-            onClick={onManageConfigs}
-          >
+          <NavLink className="sidebar__config-manage" to="/agent-configs">
             Manage
-          </button>
+          </NavLink>
         </div>
         <select
           id="agent-config"

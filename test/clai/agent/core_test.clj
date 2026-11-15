@@ -9,6 +9,7 @@
             [clai.agent.providers.openrouter :as openrouter]
             [clai.daemon.postgres.git :as git]
             [clai.daemon.postgres.sessions :as sessions]
+            [clai.events.compaction :as event-compaction]
             [clai.events.schema :as events]
             [clai.plugins :as plugins]
             [clai.plugins.store :as plugins-store]
@@ -221,8 +222,9 @@
 
        (let [request  (last @requests)
              messages (:messages request)
-             summary  (compaction/summary-message "The user asked for pongs.")]
-         (is (= (:content summary) (:content (first messages)))
+             summary  (event-compaction/append-summary
+                       [] "The user asked for pongs.")]
+         (is (= (:content (first summary)) (:content (first messages)))
              "the chat turn sends the summary in place of the older messages")
          (is (not-any? #(> (count (str (:content %))) 1000) messages)
              "the oversized first prompt is no longer sent")

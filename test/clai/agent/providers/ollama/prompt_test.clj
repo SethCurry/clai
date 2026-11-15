@@ -1,7 +1,7 @@
 (ns clai.agent.providers.ollama.prompt-test
   "Tests for prompt normalization and history replay in
   `clai.agent.providers.ollama.prompt`."
-  (:require [clai.agent.compaction :as compaction]
+  (:require [clai.events.compaction :as event-compaction]
             [clai.agent.providers.ollama.prompt :as ollama-prompt]
             [clai.events.schema :as events]
             [clai.test-support :refer [quiet-logs]]
@@ -134,12 +134,13 @@
     (is (= ["user_prompt" "agent_message"] (mapv :type updates)))))
 
 (deftest history-replays-a-compaction-summary-as-a-compaction
-  (let [updates (ollama-prompt/history->updates
-                 [{:role "system" :content "the internal prompt"}
-                  (compaction/summary-message "The user fixed the build.")
-                  {:role "user" :content "carry on"}])]
+  (let [history (into (event-compaction/append-summary
+                       [{:role "system" :content "the internal prompt"}]
+                       "The user fixed the build.")
+                      [{:role "user" :content "carry on"}])
+        updates (ollama-prompt/history->updates history)]
     (is (= ["session_compaction" "user_prompt"] (mapv :type updates))
-        "only a compaction summary survives from the system messages")
+        "the summary is replayed instead of the system prompt it sits in")
     (is (= "The user fixed the build."
            (events/content->text (:content (first updates)))))))
 

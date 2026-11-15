@@ -16,6 +16,7 @@ const STATUS_LABELS = {
  */
 const TABS = [
   { to: '/', label: 'Sessions', end: true },
+  { to: '/agent-configs', label: 'Agent configs' },
   { to: '/git-repos', label: 'Git repos' },
   { to: '/notes', label: 'Notes' },
   { to: '/plugins', label: 'Plugins' },

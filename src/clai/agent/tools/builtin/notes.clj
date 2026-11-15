@@ -83,18 +83,6 @@
                       {:value value})))
     id))
 
-(defn- positive-int
-  "Coerce `value` to a positive integer, or nil when it is missing or not one.
-  JSON numbers arrive as numbers and JSON strings as strings, so both are
-  accepted."
-  {:malli/schema [:-> :any [:maybe pos-int?]]}
-  [value]
-  (let [n (cond
-            (number? value) (long value)
-            (string? value) (parse-long (str/trim value))
-            :else nil)]
-    (when (and n (pos? n)) n)))
-
 ;; ---------------------------------------------------------------------------
 ;; Formatting
 ;; ---------------------------------------------------------------------------
@@ -180,7 +168,7 @@
   (let [q (str/trim (str query))]
     (when (str/blank? q)
       (throw (ex-info "Searching notes requires a `query`." {:query query})))
-    (let [n     (min max-search-limit (or (positive-int limit)
+    (let [n     (min max-search-limit (or (common/positive-int limit)
                                          default-search-limit))
           found (notes/search-notes (notes-client ctx) {:q q :limit n})]
       (if (empty? found)

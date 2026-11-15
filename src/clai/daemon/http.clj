@@ -218,6 +218,11 @@
   [agent]
   (:plugins (agent/list-plugins! agent {})))
 
+(defn- list-tools
+  "List the tools a session can enable, for the UI's tool picker."
+  [agent]
+  (:tools (agent/list-tools! agent {})))
+
 (defn- completions
   "Resolve `request`'s `path` and `limit` query parameters into the path
   completion entries the composer offers, relative to `cwd`."
@@ -395,6 +400,7 @@
       {\"type\": \"load_agent_config\", \"configId\": \"3\"}
       {\"type\": \"load_agent_config\", \"name\": \"fast\"}
       {\"type\": \"list_plugins\"}
+      {\"type\": \"list_tools\"}
       {\"type\": \"prompt\", \"sessionId\": \"12\", \"prompt\": \"...\"}
       {\"type\": \"eval\", \"code\": \"(+ 1 1)\", \"ns\": \"user\"}
 
@@ -424,6 +430,11 @@
         (send! conn {:type      "plugins"
                      :requestId requestId
                      :plugins   (list-plugins (:agent state))})
+
+        "list_tools"
+        (send! conn {:type      "tools"
+                     :requestId requestId
+                     :tools     (list-tools (:agent state))})
 
         "load_agent_config"
         (if-let [config (agent/load-agent-config! (:agent state)

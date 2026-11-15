@@ -10,9 +10,9 @@
   `clai.agent.providers.messages`); each provider converts them into its own
   wire format when a chat turn is sent (`clai.agent.providers/chat-request`).
   The namespace keeps its `ollama` name because the shape is Ollama's."
-  (:require [clai.agent.compaction :as compaction]
-            [clai.agent.providers.messages :as messages]
+  (:require [clai.agent.providers.messages :as messages]
             [clai.agent.resources :as resources]
+            [clai.events.compaction :as event-compaction]
             [clai.events.schema :as events]
             [clojure.string :as str]))
 
@@ -171,8 +171,8 @@
   are dropped, and `tool` results are not updates of their own:
   [[tool-result-texts]] folds each one into the tool call it answers."
   [results message]
-  (if-let [summary (compaction/summary-text message)]
-    [(compaction/compaction-update summary)]
+  (if-let [summary (event-compaction/summary-text message)]
+    [(event-compaction/compaction-update summary)]
     (case (name->str (:role message))
       "user"                [(events/text-event "user_prompt"
                                                 (events/content->text

@@ -314,6 +314,25 @@
                   :plugins plugins}
                  (first @sent))))))))
 
+(deftest the-tools-a-session-can-enable-can-be-listed
+  (let [store (atom {})
+        sent  (atom [])
+        conn  {:send           #(swap! sent conj %)
+               :nrepl          (atom nil)
+               :prompt-running (atom false)}
+        tools [{:id "read_file" :description "Read a file."}
+               {:id "run_command" :description "Run a command."}]]
+    (with-fake-agent store
+      (fn []
+        (with-redefs [agent/list-tools! (fn [_ _] {:tools tools})]
+          (http/handle-message! (state store) conn
+                                (json/generate-string
+                                 {:type "list_tools" :requestId "r-tools"}))
+          (is (= {:type "tools"
+                  :requestId "r-tools"
+                  :tools tools}
+                 (first @sent))))))))
+
 (deftest plugins-can-be-installed-edited-and-removed
   (with-fake-agent (atom {})
     (fn []

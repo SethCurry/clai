@@ -6,13 +6,14 @@
   payload persisted for that event type. These types are also the vocabulary
   the agent and REPL use for prompts, replies, thoughts, and tool activity, so
   values can move between the chat loop and the event log without a second
-  representation."
+  representation. A `compaction` event carries no message: see
+  `clai.events.compaction` for how its summary is rendered."
   (:require [clojure.string :as str]))
 
 ;; Every value allowed by the `agent_session_event_type_t` PostgreSQL enum.
 (def EventTypeName
   [:enum "user_prompt" "agent_message" "agent_thought" "tool_call"
-   "clojure_form"])
+   "clojure_form" "compaction"])
 
 ;; Event types whose payload is a plain text/message content list.
 (def TextEventType
@@ -89,6 +90,19 @@
 (def ClojureFormEvent
   (create-agent-session-event "clojure_form" :map))
 
+;; The payload of a compaction event: the summary that stands in for every
+;; earlier event of the session, and how many of the messages before it the
+;; summary leaves out (see `clai.events.compaction`).
+(def CompactionContent
+  [:map
+   [:summary :string]
+   [:keep [:int {:min 0}]]])
+
+;; A compaction of the session's history. It carries no message of its own:
+;; a reader uses it to ignore the events before it.
+(def CompactionEvent
+  (create-agent-session-event "compaction" #'CompactionContent))
+
 ;; Any row that can appear in `agent_session_event`.
 (def AgentSessionEvent
   [:or
@@ -96,7 +110,8 @@
    #'AgentThoughtEvent
    #'AgentMessageEvent
    #'ToolCallEvent
-   #'ClojureFormEvent])
+   #'ClojureFormEvent
+   #'CompactionEvent])
 
 (defn text-content
   "Build a `TextContent` block for `text`."

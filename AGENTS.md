@@ -31,14 +31,17 @@ its nice for a user to use from the REPL.
 | User accounts + login sessions (database)                                | ./src/clai/daemon/postgres/users.clj, ./test/clai/daemon/postgres/users_test.clj       |
 | API authentication (login/logout routes, 401 guard)                      | ./src/clai/daemon/http.clj                                                             |
 | Session storage                                                          | ./src/clai/daemon/postgres/sessions.clj                                                |
+| Agent configurations (storage, selection)                                | ./src/clai/agent/configs.clj, ./test/clai/agent/configs_test.clj                      |
 | Session titles (auto-naming a session from its first message)            | ./src/clai/agent/titles.clj, ./test/clai/agent/titles_test.clj                         |
-| Session compaction (summarizing older messages at a token budget)        | ./src/clai/agent/compaction.clj, ./test/clai/agent/compaction_test.clj                 |
+| Session compaction (summarizing the conversation at a token budget)      | ./src/clai/agent/compaction.clj, ./test/clai/agent/compaction_test.clj                 |
+| Compaction event + summary in the session's system prompt                | ./src/clai/events/compaction.clj, ./test/clai/events/compaction_test.clj               |
 | Git repo/worktree storage                                                | ./src/clai/daemon/postgres/git.clj                                                     |
 | Git repo/worktree HTTP API                                               | ./src/clai/daemon/http.clj                                                             |
 | Note storage + BM25 note search                                          | ./src/clai/daemon/postgres/notes.clj                                                   |
 | Note HTTP API (CRUD + search)                                            | ./src/clai/daemon/http.clj                                                             |
 | OpenProject task/comment tools                                           | ./src/clai/agent/tools/builtin/openproject.clj                                         |
 | Note tools (list/search/read/update/delete)                              | ./src/clai/agent/tools/builtin/notes.clj                                               |
+| File tools (`read_file`, `write_file`, `list_directory`)                 | ./src/clai/agent/tools/builtin/files.clj, ./test/clai/agent/tools/builtin/files_test.clj |
 | `eval_clojure` tool (agent REPL)                                         | ./src/clai/agent/tools/builtin/eval.clj                                                |
 | Agent REPL namespace (`eval_clojure` default, `tools`/`history` helpers) | ./src/clai/home/core.clj                                                               |
 | `clojure-lsp` client (servers, JSON-RPC, queries, diagnostics)           | ./src/clai/lsp.clj, ./test/clai/lsp_test.clj                                           |
@@ -51,7 +54,9 @@ its nice for a user to use from the REPL.
 | Web routes + sign-in guard                                               | ./web/src/App.jsx, ./web/src/main.jsx                                                  |
 | Web console shell (topbar, page tabs, error toasts)                      | ./web/src/components/AppLayout.jsx                                                     |
 | Web daemon connection shared by the pages                                | ./web/src/ClaiContext.jsx, ./web/src/useClaiSocket.js                                  |
-| Web sessions page (sidebar, chat, REPL, explorer, config dialog)         | ./web/src/components/SessionsPage.jsx                                                  |
+| Web sessions page (sidebar, chat, REPL, explorer)                        | ./web/src/components/SessionsPage.jsx                                                  |
+| Web agent configurations page (model, prompt, tools, plugins)            | ./web/src/components/AgentConfigsPage.jsx                                              |
+| Web agent configuration form/validation helpers + tests                  | ./web/src/agentConfigs.js, ./web/src/agentConfigs.test.js                              |
 | Web login page + session state                                           | ./web/src/components/LoginPage.jsx, ./web/src/useAuth.js                               |
 | Web credentials/validation helpers + tests                               | ./web/src/auth.js, ./web/src/auth.test.js, ./web/src/api.js                            |
 | Web git repository page                                                  | ./web/src/components/GitReposPage.jsx                                                  |

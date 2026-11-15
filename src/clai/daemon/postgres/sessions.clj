@@ -33,6 +33,18 @@
   `event_type` makes the log queryable. `clojure_form` is reserved for
   recording evaluated Clojure forms as events of their own.
 
+  ## Compaction
+
+  A session that outgrows its token budget is compacted
+  (`clai.agent.compaction`), and a compaction never rewrites the log:
+  [[append-compaction]] appends one `compaction` event whose payload is the
+  summary and how many messages it leaves verbatim. Reading the history
+  applies it -- the events before a compaction event are ignored, the summary
+  is appended to the session's system prompt, and the messages the event keeps
+  follow it -- so the log stays a complete audit trail while
+  [[session-history]] returns only what the model is sent. See
+  `clai.events.compaction`.
+
   ## Example
 
       (require '[clai.daemon.postgres :as pg]
@@ -48,6 +60,7 @@
                                {:role \"user\" :content \"hello\"})
       (sessions/load-session client (:sessionId session))"
   (:require [clai.daemon.postgres :as postgres]
+            [clai.events.compaction :as event-compaction]
             [clojure.java.io :as io]
             [clojure.string :as str]
             [next.jdbc :as jdbc]
@@ -138,10 +151,43 @@
   [row history]
   (assoc (row->summary row) :history history))
 
-(defn- row->message
-  "The chat message stored in an `agent_session_event` row."
+(defn- row->event
+  "One `agent_session_event` row as `{:id .. :type .. :content ..}`, where
+  `:content` is the parsed JSONB payload: a chat message, or a compaction's
+  `{:summary .. :keep ..}`."
   [row]
-  (or (postgres/parse-json (:content row) nil) {}))
+  {:id      (:id row)
+   :type    (:event-type row)
+   :content (or (postgres/parse-json (:content row) nil) {})})
+
+(defn- compaction-event?
+  "True when `event` is a compaction event, which holds no message."
+  [event]
+  (= "compaction" (:type event)))
+
+(defn- system-message?
+  "True when `message` is one of the system messages that open a session."
+  [message]
+  (= "system" (:role message)))
+
+(defn- apply-compaction
+  "Fold compaction `event` into the `history` read so far: the summary takes
+  the place of everything before it, except the session's system messages
+  (which it is appended to) and the last `:keep` messages."
+  [history {:keys [summary keep]}]
+  (let [[systems messages] (split-with system-message? history)]
+    (into (event-compaction/append-summary systems summary)
+          (take-last (long (or keep 0)) messages))))
+
+(defn- events->history
+  "Fold an ordered `events` list into the session history the model is sent."
+  [events]
+  (reduce (fn [history event]
+            (if (compaction-event? event)
+              (apply-compaction history (:content event))
+              (conj history (:content event))))
+          []
+          events))
 
 (defn ^:no-doc session-key
   "`id` as the `agent_session.id` key it names, or nil when it does not name a
@@ -200,7 +246,7 @@
     WHERE id = ?")
 
 (def ^:private select-history-sql
-  "SELECT content::text AS content
+  "SELECT id, event_type::text AS event_type, content::text AS content
      FROM agent_session_event
     WHERE agent_session_id = ?
     ORDER BY id")
@@ -224,10 +270,12 @@
     :else                (str (.getCanonicalFile (io/file ".")))))
 
 (defn- history-from
-  "Read a session's full message history from `connectable`."
+  "Read the history `id`'s model is sent from `connectable`: its event log
+  with the session's compactions applied."
   [connectable id]
-  (mapv row->message
-        (postgres/exec! connectable ::load-history select-history-sql [id])))
+  (events->history
+   (map row->event
+        (postgres/exec! connectable ::load-history select-history-sql [id]))))
 
 (defn- insert-event!
   "Append `message` to session `id`'s event log."
@@ -236,6 +284,16 @@
                       [id
                        (message->event-type message)
                        (postgres/->json message "Session message")]))
+
+(defn- insert-compaction!
+  "Append a `compaction` event to session `id`'s event log: everything before
+  it is summarized by `summary`, except the last `keep` messages."
+  [connectable id summary keep]
+  (postgres/exec! connectable ::insert-compaction insert-event-sql
+                  [id
+                   "compaction"
+                   (postgres/->json {:summary summary :keep keep}
+                                    "Session compaction")]))
 
 (defn- replace-history!
   "Replace session `id`'s event log with `history`."
@@ -442,19 +500,21 @@
   (let [datasource (:datasource (postgres/ready client))
         rows       (postgres/exec! datasource ::list-sessions
                                    list-sessions-sql [])
-        events     (postgres/exec! datasource ::list-messages
-                                   "SELECT agent_session_id, content::text AS content
+        events     (postgres/exec! datasource ::list-events
+                                   "SELECT agent_session_id, id,
+                                           event_type::text AS event_type,
+                                           content::text AS content
                                       FROM agent_session_event
                                      ORDER BY agent_session_id, id"
                                    [])
         by-session (reduce (fn [m row]
                              (update m (:agent-session-id row)
                                      (fnil conj [])
-                                     (row->message row)))
+                                     (row->event row)))
                            {}
                            events)]
     (mapv (fn [row]
-            (row->session row (get by-session (:id row) [])))
+            (row->session row (events->history (get by-session (:id row) []))))
           rows)))
 
 (defn list-session-summaries
@@ -471,8 +531,11 @@
 ;; ---------------------------------------------------------------------------
 
 (defn session-history
-  "Return the message history vector for `session-id`, or `[]` when the
-  session is unknown or has no events."
+  "Return `session-id`'s history as the model is sent it: the messages its
+  event log records, with the session's compactions applied (see
+  [[append-compaction]]).
+
+  Returns `[]` when the session is unknown or has no events."
   {:malli/schema [:-> #'postgres/client-schema #'non-empty-string
                   [:vector #'message]]}
   [client session-id]
@@ -507,13 +570,46 @@
         (warn-unknown-session ::append-history session-id)
         nil))))
 
+(defn append-compaction
+  "Record that `session-id`'s log is summarized from here on by `summary`, with
+  the last `keep` messages left verbatim.
+
+  Appends one `compaction` event and returns the updated session state map
+  (whose `:history` is what the model is sent from now on), or nil when the
+  session is unknown. Nothing is rewritten or deleted: the earlier events stay
+  in the log, and the compaction event is what [[session-history]] uses to
+  ignore them (see `clai.events.compaction`)."
+  {:malli/schema [:-> #'postgres/client-schema #'non-empty-string :string
+                  [:int {:min 0}] [:maybe #'session]]}
+  [client session-id summary keep]
+  (let [client (postgres/ready client)
+        keep   (long keep)]
+    (if-let [id (session-key session-id)]
+      (jdbc/with-transaction [tx (:datasource client)]
+        (if-let [row (postgres/exec-one! tx ::load-session
+                                         select-session-sql [id])]
+          (do
+            (insert-compaction! tx id (str summary) keep)
+            (tel/log! {:level :info
+                       :id    ::history-compacted
+                       :data  {:sessionId session-id :keep keep}}
+                      "Recorded a session compaction")
+            (row->session row (history-from tx id)))
+          (do
+            (warn-unknown-session ::append-compaction session-id)
+            nil)))
+      (do
+        (warn-unknown-session ::append-compaction session-id)
+        nil))))
+
 (defn replace-history
   "Replace `session-id`'s event log with `history`, returning the updated
   session state map, or nil when the session is unknown.
 
   Everything happens in one transaction, so a reader never sees the session
-  half-emptied. `clai.agent.compaction` uses this to store a history whose
-  older messages have been replaced by a summary."
+  half-emptied. Compaction does not use this -- it appends a compaction event
+  instead (see [[append-compaction]]) -- so only callers that really mean to
+  discard the log should use this."
   {:malli/schema [:-> #'postgres/client-schema #'non-empty-string
                   [:vector #'message] [:maybe #'session]]}
   [client session-id history]

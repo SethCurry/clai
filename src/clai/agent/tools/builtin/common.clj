@@ -7,6 +7,10 @@
   "Cap on the number of bytes read into a tool result, to keep history small."
   (* 64 1024))
 
+;; ---------------------------------------------------------------------------
+;; Arguments
+;; ---------------------------------------------------------------------------
+
 (defn resolve-path
   "Resolve `path` against the session `cwd`. Absolute paths are returned
   unchanged. Returns a `java.io.File`."
@@ -15,6 +19,23 @@
     (if (.isAbsolute f)
       f
       (io/file (or (:cwd ctx) ".") path))))
+
+(defn positive-int
+  "Coerce `value` to a positive integer, or nil when it is missing or not one.
+
+  JSON numbers arrive as numbers and JSON strings as strings, so both are
+  accepted; a string is trimmed first, so `\" 3 \"` is 3."
+  {:malli/schema [:-> :any [:maybe pos-int?]]}
+  [value]
+  (let [n (cond
+            (number? value) (long value)
+            (string? value) (parse-long (str/trim value))
+            :else           nil)]
+    (when (and n (pos? n)) n)))
+
+;; ---------------------------------------------------------------------------
+;; Formatting
+;; ---------------------------------------------------------------------------
 
 (defn format-timestamp
   "Render an ISO-8601 timestamp as `YYYY-MM-DD HH:MM UTC`, or nil when `value`

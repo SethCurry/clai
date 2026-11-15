@@ -80,6 +80,9 @@ ALTER TABLE agent_config
     ADD COLUMN IF NOT EXISTS compact_after_tokens INT;
 
 -- PostgreSQL has no `CREATE TYPE IF NOT EXISTS`, so guard the enum by hand.
+-- A type that predates the `compaction` event gains it through `ALTER TYPE`;
+-- adding an enum value is transactional from PostgreSQL 12 on, which is what
+-- lets `ensure-schema!` apply this whole file in one transaction.
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1
@@ -91,11 +94,25 @@ BEGIN
                                                         'agent_message',
                                                         'agent_thought',
                                                         'tool_call',
-                                                        'clojure_form');
+                                                        'clojure_form',
+                                                        'compaction');
+    ELSE
+        ALTER TYPE agent_session_event_type_t
+            ADD VALUE IF NOT EXISTS 'compaction';
     END IF;
 END
 $$;
 
+-- The append-only log of a session. Every event but `compaction` holds one
+-- chat message in `content`.
+--
+-- A `compaction` event is not a message: it records that every earlier event
+-- of the session is summarized by its `content.summary`, so a reader ignores
+-- those earlier messages, appends the summary to the session's system prompt,
+-- and keeps only the last `content.keep` messages verbatim (the turn that was
+-- in progress when the session was compacted). Compacting a session therefore
+-- never rewrites or deletes the log; see `clai.events.compaction` for the
+-- payload and `clai.daemon.postgres.sessions` for the read that applies it.
 CREATE TABLE IF NOT EXISTS agent_session_event (
     id SERIAL PRIMARY KEY,
     event_type agent_session_event_type_t NOT NULL,

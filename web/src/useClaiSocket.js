@@ -69,6 +69,7 @@ export function useClaiSocket() {
   const [sessions, setSessions] = useState([])
   const [agentConfigs, setAgentConfigs] = useState([])
   const [plugins, setPlugins] = useState([])
+  const [tools, setTools] = useState([])
   const [selectedConfigId, setSelectedConfigId] = useState('')
   const [currentSession, setCurrentSession] = useState(null)
   const [updates, setUpdates] = useState([])
@@ -125,6 +126,7 @@ export function useClaiSocket() {
         send({ type: 'list_sessions' })
         send({ type: 'list_agent_configs' })
         send({ type: 'list_plugins' })
+        send({ type: 'list_tools' })
         // After a reconnect, replay the active conversation. The prompt may
         // have finished while the socket was down.
         if (activeSession.current) {
@@ -160,6 +162,10 @@ export function useClaiSocket() {
 
           case 'plugins':
             setPlugins(message.plugins ?? [])
+            break
+
+          case 'tools':
+            setTools(message.tools ?? [])
             break
 
           case 'agent_config':
@@ -322,6 +328,15 @@ export function useClaiSocket() {
     [send],
   )
 
+  // The agent-configuration page reads the stored configurations, the tools a
+  // session can enable, and the installed plugins; asking again picks up
+  // anything another tab or the REPL changed.
+  const refreshAgentSetup = useCallback(() => {
+    send({ type: 'list_agent_configs' })
+    send({ type: 'list_tools' })
+    send({ type: 'list_plugins' })
+  }, [send])
+
   const loadSession = useCallback(
     (sessionId) => send({ type: 'load_session', sessionId }),
     [send],
@@ -363,7 +378,6 @@ export function useClaiSocket() {
             body,
           ]),
         )
-        if (!configId) setSelectedConfigId(body.configId)
         return body
       } catch (failure) {
         pushError(failure.message || String(failure))
@@ -459,6 +473,7 @@ export function useClaiSocket() {
     sessions,
     agentConfigs,
     plugins,
+    tools,
     selectedConfigId,
     currentSession,
     updates,
@@ -469,6 +484,7 @@ export function useClaiSocket() {
     newSession,
     selectAgentConfig,
     refreshSessions,
+    refreshAgentSetup,
     loadSession,
     deleteSession,
     renameSession,

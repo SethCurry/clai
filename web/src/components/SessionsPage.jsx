@@ -1,6 +1,5 @@
 import { useState } from 'react'
 import { useClai } from '../ClaiContext.jsx'
-import { AgentConfigManager } from './AgentConfigManager.jsx'
 import { Chat } from './Chat.jsx'
 import { ExplorerPanel } from './ExplorerPanel.jsx'
 import { ReplPanel } from './ReplPanel.jsx'
@@ -32,17 +31,17 @@ function EmptyState({ hasSessions, onNewSession }) {
  * The sessions page, which is the console itself: the session sidebar, the
  * chat timeline, and the optional Clojure REPL and explorer panels beside them.
  *
- * The panels and the agent-configuration dialog are page state, so they go
- * back to their defaults when the user visits another page and returns. The
+ * The open panels and the explorer's tab are page state, so they go back to
+ * their defaults when the user visits another page and returns. The
  * conversation, the session list, and the connection are not: they live in
- * `useClai`, which outlives this page.
+ * `useClai`, which outlives this page. Agent configurations have their own
+ * page, reached from the sidebar's Manage link.
  */
 export function SessionsPage() {
   const clai = useClai()
   const [replOpen, setReplOpen] = useState(true)
   const [explorerOpen, setExplorerOpen] = useState(true)
   const [explorerTab, setExplorerTab] = useState('files')
-  const [configManagerOpen, setConfigManagerOpen] = useState(false)
 
   // The grid gains a column per open panel, so the classes have to agree with
   // what is actually rendered.
@@ -55,73 +54,60 @@ export function SessionsPage() {
     .join(' ')
 
   return (
-    <>
-      <div className={layoutClass}>
-        <SessionSidebar
-          sessions={clai.sessions}
-          currentSession={clai.currentSession}
-          agentConfigs={clai.agentConfigs}
-          selectedConfigId={clai.selectedConfigId}
-          status={clai.status}
-          sessionInfo={clai.sessionInfo}
-          replOpen={replOpen}
-          explorerOpen={explorerOpen}
-          onToggleRepl={() => setReplOpen((open) => !open)}
-          onToggleExplorer={() => setExplorerOpen((open) => !open)}
-          onNewSession={clai.newSession}
-          onSelectConfig={clai.selectAgentConfig}
-          onManageConfigs={() => setConfigManagerOpen(true)}
-          onRefresh={clai.refreshSessions}
-          onLoadSession={clai.loadSession}
-          onDeleteSession={clai.deleteSession}
+    <div className={layoutClass}>
+      <SessionSidebar
+        sessions={clai.sessions}
+        currentSession={clai.currentSession}
+        agentConfigs={clai.agentConfigs}
+        selectedConfigId={clai.selectedConfigId}
+        status={clai.status}
+        sessionInfo={clai.sessionInfo}
+        replOpen={replOpen}
+        explorerOpen={explorerOpen}
+        onToggleRepl={() => setReplOpen((open) => !open)}
+        onToggleExplorer={() => setExplorerOpen((open) => !open)}
+        onNewSession={clai.newSession}
+        onSelectConfig={clai.selectAgentConfig}
+        onRefresh={clai.refreshSessions}
+        onLoadSession={clai.loadSession}
+        onDeleteSession={clai.deleteSession}
+      />
+
+      {clai.currentSession ? (
+        <Chat
+          session={clai.currentSession}
+          updates={clai.updates}
+          promptRunning={clai.promptRunning}
+          onPrompt={clai.runPrompt}
+          onRename={clai.renameSession}
         />
-
-        {clai.currentSession ? (
-          <Chat
-            session={clai.currentSession}
-            updates={clai.updates}
-            promptRunning={clai.promptRunning}
-            onPrompt={clai.runPrompt}
-            onRename={clai.renameSession}
-          />
-        ) : (
-          <EmptyState
-            hasSessions={clai.sessions.length > 0}
-            onNewSession={clai.newSession}
-          />
-        )}
-
-        {replOpen && (
-          <ReplPanel
-            nreplPort={clai.sessionInfo.nreplPort}
-            currentSession={clai.currentSession}
-            entries={clai.replEntries}
-            running={clai.evalRunning}
-            onEval={clai.evalForm}
-            onClear={clai.clearRepl}
-            onClose={() => setReplOpen(false)}
-          />
-        )}
-
-        {explorerOpen && (
-          <ExplorerPanel
-            tab={explorerTab}
-            onTab={setExplorerTab}
-            currentSession={clai.currentSession}
-            onClose={() => setExplorerOpen(false)}
-          />
-        )}
-      </div>
-
-      {configManagerOpen && (
-        <AgentConfigManager
-          configs={clai.agentConfigs}
-          plugins={clai.plugins}
-          onSave={clai.saveAgentConfig}
-          onDelete={clai.deleteAgentConfig}
-          onClose={() => setConfigManagerOpen(false)}
+      ) : (
+        <EmptyState
+          hasSessions={clai.sessions.length > 0}
+          onNewSession={clai.newSession}
         />
       )}
-    </>
+
+      {replOpen && (
+        <ReplPanel
+          nreplPort={clai.sessionInfo.nreplPort}
+          currentSession={clai.currentSession}
+          entries={clai.replEntries}
+          running={clai.evalRunning}
+          onEval={clai.evalForm}
+          onClear={clai.clearRepl}
+          onClose={() => setReplOpen(false)}
+        />
+      )}
+
+      {explorerOpen && (
+        <ExplorerPanel
+          tab={explorerTab}
+          onTab={setExplorerTab}
+          currentSession={clai.currentSession}
+          onClose={() => setExplorerOpen(false)}
+        />
+      )}
+    </div>
   )
 }

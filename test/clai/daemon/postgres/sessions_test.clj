@@ -2,6 +2,7 @@
   (:require [clojure.test :refer :all]
             [clai.daemon.postgres :as pg]
             [clai.daemon.postgres.sessions :as sessions]
+            [clai.events.compaction :as event-compaction]
             [clai.test-support :refer [quiet-logs]]))
 
 ;; ---------------------------------------------------------------------------
@@ -81,7 +82,34 @@
           (doseq [msg [assistant call result]]
             (is (= msg (sessions/append-history client id msg))))
           (is (= [{:role "user" :content "hello"} assistant call result]
-                 (sessions/session-history client id))))
+                 (sessions/session-history client id)))
+
+          ;; Compaction appends an event instead of rewriting the log: reading
+          ;; the session back ignores the messages the summary stands in for
+          ;; and keeps the last ones verbatim.
+          (let [compacted (sessions/append-compaction client id
+                                                      "The user said hello." 2)]
+            (is (= [(first (event-compaction/append-summary
+                            [] "The user said hello."))
+                    call
+                    result]
+                   (:history compacted)))
+            (is (= (:history compacted) (sessions/session-history client id))
+                "session-history applies the compaction event")
+            (is (= (:history compacted)
+                   (->> (sessions/list-sessions client)
+                        (filter #(= id (:sessionId %)))
+                        first
+                        :history))
+                "listing sessions applies it too"))
+
+          ;; A later compaction replaces the summary of the earlier one.
+          (let [compacted (sessions/append-compaction
+                           client id "The user said hello, twice." 0)]
+            (is (= 1 (count (:history compacted))))
+            (is (= "The user said hello, twice."
+                   (event-compaction/summary-text
+                    (first (:history compacted)))))))
 
         (is (= id (:sessionId (sessions/lookup-session client id))))
         (is (sessions/session-exists? client id))

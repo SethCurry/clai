@@ -66,3 +66,14 @@
                               :arguments "{\"text\":\"hi\"}"}}]]
     (is (= [{:role "tool" :content "ok" :name "echo" :tool_call_id "1"}]
            (invoke/execute-calls registry calls {})))))
+
+(deftest summaries-collapse-spec-descriptions-to-one-line
+  (let [registry (registry/make-registry
+                  [(assoc-in (tool "b" "B")
+                             [:spec :function :description]
+                             "Do the b thing.\n    It takes a while.")
+                   (tool "a" "A")])]
+    (is (= [{:id "a" :description nil}
+            {:id "b" :description "Do the b thing. It takes a while."}]
+           (registry/summaries registry))
+        "summaries are sorted by id and flatten multi-line descriptions")))

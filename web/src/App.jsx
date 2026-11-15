@@ -1,5 +1,6 @@
 import { Navigate, Route, Routes } from 'react-router-dom'
 import { ClaiProvider } from './ClaiContext.jsx'
+import { AgentConfigsPage } from './components/AgentConfigsPage.jsx'
 import { AppLayout } from './components/AppLayout.jsx'
 import { GitReposPage } from './components/GitReposPage.jsx'
 import { LoginPage } from './components/LoginPage.jsx'
@@ -66,6 +67,7 @@ export default function App() {
       />
       <Route element={<RequireAuth auth={auth} />}>
         <Route index element={<SessionsPage />} />
+        <Route path="agent-configs" element={<AgentConfigsPage />} />
         <Route path="git-repos" element={<GitReposPage />} />
         <Route path="notes" element={<NotesPage />} />
         <Route path="plugins" element={<PluginsPage />} />

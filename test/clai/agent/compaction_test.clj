@@ -4,6 +4,7 @@
   own model."
   (:require [clai.agent.compaction :as compaction]
             [clai.agent.providers :as providers]
+            [clai.events.compaction :as event-compaction]
             [clai.test-support :refer [instrument quiet-logs]]
             [clojure.string :as str]
             [clojure.test :refer :all]))
@@ -57,6 +58,15 @@
                      :content (str "summary-" (count @requests))})]
       (f requests))))
 
+(defn- compacted
+  "The history a session reads back after `result`: the summary appended to
+  the session's system prompt, then the messages the compaction kept verbatim
+  (which is what `clai.daemon.postgres.sessions` reconstructs)."
+  [history result]
+  (let [[systems messages] (split-with #(= "system" (:role %)) history)]
+    (into (event-compaction/append-summary systems (:summary result))
+          (take-last (:keep result) messages))))
+
 ;; ---------------------------------------------------------------------------
 ;; Token accounting
 ;; ---------------------------------------------------------------------------
@@ -89,29 +99,6 @@
             (compaction/message-tokens {:role "assistant" :content "abcd"}))
          (compaction/history-tokens [{:role "user" :content "abcd"}
                                      {:role "assistant" :content "abcd"}]))))
-
-;; ---------------------------------------------------------------------------
-;; Summary messages
-;; ---------------------------------------------------------------------------
-
-(deftest summary-messages-round-trip
-  (let [summary (compaction/summary-message "  The user fixed the build.  ")]
-    (is (= "system" (:role summary)))
-    (is (str/starts-with? (:content summary) compaction/summary-marker))
-    (is (compaction/summary? summary))
-    (is (= "The user fixed the build." (compaction/summary-text summary)))))
-
-(deftest other-system-messages-are-not-summaries
-  (are [message] (nil? (compaction/summary-text message))
-    nil
-    {:role "system" :content "You are clai."}
-    {:role "user" :content compaction/summary-marker}
-    {:role "assistant" :content ""}))
-
-(deftest compaction-update-carries-the-summary-as-text
-  (is (= {:type "session_compaction"
-          :content [{:type "text" :content "The user fixed the build."}]}
-         (compaction/compaction-update "The user fixed the build."))))
 
 ;; ---------------------------------------------------------------------------
 ;; What a compaction keeps
@@ -164,67 +151,60 @@
     (is (= "fix the build" (:content (first (:recent plan))))
         "the prompt the agent is answering opens the kept tail")
     (is (not-any? #(= "fix the build" (:content %)) (:older plan))
-        "and is never summarized away")
-    (is (= (vec (concat (:system plan) (:older plan) (:recent plan))) full)
-        "the plan still partitions the history without reordering it")))
+        "and is never summarized away")))
 
 (deftest plan-folds-an-earlier-summary-into-the-next-one
-  (let [summary (compaction/summary-message "Earlier: the user fixed the build.")
-        full    (vec (cons {:role "system" :content "You are clai."}
-                           (cons summary (rest (history 10)))))
+  (let [prompt  {:role "system" :content "You are clai."}
+        merged  (first (event-compaction/append-summary
+                        [prompt] "Earlier: the user fixed the build."))
+        full    (vec (cons merged (rest (history 10))))
         plan    (compaction/plan full 1000)]
     (is (= "Earlier: the user fixed the build." (:previous plan)))
-    (is (not-any? compaction/summary? (:older plan))
-        "the earlier summary is replaced rather than summarized again")
-    (is (= (vec (concat (:system plan) (:older plan) (:recent plan)))
-           (vec (remove #{summary} full)))
-        "the plan no longer contains the message it folds in")))
+    (is (= [prompt] (:system plan))
+        "the earlier summary is dropped from the system prompt the new one
+         replaces")
+    (is (not-any? event-compaction/summary? (:older plan))
+        "and is never summarized as if it were a message")))
 
 ;; ---------------------------------------------------------------------------
 ;; Summarizing
 ;; ---------------------------------------------------------------------------
 
-(deftest chunks-split-by-budget-without-losing-a-message
-  (let [messages (mapv (fn [_] (message "user" 396)) (range 5))
-        chunks   (compaction/chunks messages 250)]
-    (is (= messages (vec (apply concat chunks))))
-    (is (< 1 (count chunks)))
-    (is (every? #(<= (compaction/history-tokens %) 250) (butlast chunks))
-        "every chunk but the last stays inside the budget")))
-
-(deftest summarize-carries-the-previous-summary-forward
+(deftest summarize-sends-the-whole-conversation-in-one-request
   (stub-summaries
    (fn [requests]
      (let [plan (compaction/plan (history 20) 1000)
-           text (compaction/summarize stub-agent plan 1000)]
-       (is (< 1 (count @requests))
-           "a long history costs more than one summary request")
-       (is (= (str "summary-" (count @requests)) text)
-           "the last answer is the summary")
-       (is (every? #(= "stub-model" (:model %)) @requests))
-       (is (nil? (:tools (first @requests)))
-           "summarizing never offers the model tools")
+           text (compaction/summarize stub-agent plan)
+           spec (first @requests)]
+       (is (= 1 (count @requests))
+           "the older messages are summarized in one request, not one per chunk")
+       (is (= "summary-1" text))
+       (is (= "stub-model" (:model spec)))
+       (is (nil? (:tools spec)) "summarizing never offers the model tools")
        (is (= compaction/summarize-instruction
-              (-> @requests first :history first :content)))
+              (-> spec :history first :content)))
        (is (not-any? #(str/includes? % "Summary so far")
-                     (-> @requests first :history (->> (map :content))))
+                     (map :content (:history spec)))
            "the first request has no summary to fold in yet")
-       (is (str/includes? (-> @requests second :history second :content)
-                          "Summary so far:")
-           "later requests fold the earlier summary forward")))))
+       (is (str/includes? (-> spec :history last :content)
+                          (:content (first (:older plan))))
+           "the conversation is quoted from its first message")
+       (is (str/includes? (-> spec :history last :content)
+                          (:content (last (:older plan))))
+           "... through its last")))))
 
 (deftest summarize-reuses-an-earlier-summary
   (stub-summaries
    (fn [requests]
-     (compaction/summarize stub-agent {:previous "Earlier work" :older (history 3)}
-                           100000)
+     (compaction/summarize stub-agent {:previous "Earlier work"
+                                       :older    (history 3)})
      (is (= 1 (count @requests)))
      (is (str/includes? (-> @requests first :history second :content)
                         "Earlier work")))))
 
 (deftest summarize-returns-nothing-for-an-empty-reply
   (with-redefs [providers/complete (fn [_ _] {:role "assistant" :content "   "})]
-    (is (nil? (compaction/summarize stub-agent {:older (history 2)} 100000)))))
+    (is (nil? (compaction/summarize stub-agent {:older (history 2)})))))
 
 ;; ---------------------------------------------------------------------------
 ;; Compaction
@@ -247,56 +227,68 @@
                                           (history 40))))
      (is (empty? @requests)))))
 
-(deftest compact-history-replaces-the-older-messages-with-a-summary
+(deftest compact-history-records-a-summary-of-the-whole-conversation
   (stub-summaries
-   (fn [_requests]
+   (fn [requests]
      (let [full   (history 20)
            result (compaction/compact-history stub-agent full)
-           compact (:history result)]
+           read   (compacted full result)]
+       (is (= 1 (count @requests))
+           "one request summarizes the whole conversation")
        (is (= {:type "session_compaction"}
               (select-keys (:update result) [:type])))
-       (is (= ["system" "system"] (mapv :role (take 2 compact)))
-           "the system prompt is kept and the summary follows it")
-       (is (compaction/summary? (second compact)))
-       (is (< (compaction/history-tokens compact)
+       (is (= "summary-1" (:summary result)))
+       (is (event-compaction/summary? (first read))
+           "the summary is appended to the session's system prompt")
+       (is (= [{:role "system" :content "You are clai."}]
+              (event-compaction/without-summaries [(first read)]))
+           "and keeps the prompt the session was given")
+       (is (< (compaction/history-tokens read)
               (compaction/history-tokens full))
            "compaction leaves a smaller history than it found")
-       (is (<= (compaction/history-tokens compact)
+       (is (<= (compaction/history-tokens read)
                (compaction/tail-budget (:compact-after-tokens stub-agent)))
            "and leaves headroom, so the next turn does not compact again")
-       (is (= (:recent (compaction/plan full 1000)) (vec (drop 2 compact)))
+       (is (= (:recent (compaction/plan full 1000)) (vec (drop 1 read)))
            "the most recent messages are kept verbatim")))))
 
 (deftest compact-history-keeps-the-turn-in-progress
   (stub-summaries
    (fn [_requests]
-     (let [prompt  {:role "user" :content "fix the build"}
-           rounds  (vec (mapcat #(tool-round (str "c" %) 1) (range 6)))
-           full    (vec (concat [{:role "system" :content "You are clai."}]
-                                (rest (history 4))
-                                [prompt]
-                                rounds))
-           compact (:history (compaction/compact-history stub-agent full))]
-       (is (some? compact) "the older turn is summarized")
-       (is (= (vec (cons prompt rounds)) (vec (drop 2 compact)))
-           "the turn the agent is working on survives the compaction whole")
-       (is (= ["system" "system" "user"] (mapv :role (take 3 compact)))
-           "the system prompt, the summary, then the turn that was compacted
-            around")))))
+     (let [prompt {:role "user" :content "fix the build"}
+           rounds (vec (mapcat #(tool-round (str "c" %) 1) (range 6)))
+           full   (vec (concat [{:role "system" :content "You are clai."}]
+                               (rest (history 4))
+                               [prompt]
+                               rounds))
+           result (compaction/compact-history stub-agent full)
+           read   (compacted full result)]
+       (is (some? result) "the older turn is summarized")
+       (is (= (vec (cons prompt rounds)) (vec (drop 1 read)))
+           "everything from the turn's prompt on survives the compaction whole")
+       (is (= ["system" "user"]
+              (mapv :role (take 2 read)))
+           "the summary is appended to the system prompt, then the turn
+            the agent is working on")))))
 
-(deftest compact-history-does-not-repeat-what-it-already-summarized
+(deftest compact-history-folds-what-it-already-summarized
   (stub-summaries
    (fn [requests]
-     (let [first-pass      (:history (compaction/compact-history stub-agent
-                                                               (history 20)))
-           requests-so-far (count @requests)
-           grown           (conj (vec first-pass) (message "user" 3000))
-           second-pass     (compaction/compact-history stub-agent grown)]
-       (is (pos? requests-so-far))
-       (is (some? second-pass) "a session that grew again compacts again")
-       (is (= 1 (- (count @requests) requests-so-far))
-           "the earlier summary is reused, not summarized from scratch")
-       (is (= 1 (count (filter compaction/summary? (:history second-pass))))
+     (let [full     (history 20)
+           first-r  (compaction/compact-history stub-agent full)
+           first-h  (compacted full first-r)
+           so-far   (count @requests)
+           grown    (conj first-h (message "user" 3000))
+           second-r (compaction/compact-history stub-agent grown)]
+       (is (pos? so-far))
+       (is (some? second-r) "a session that grew again compacts again")
+       (is (= 1 (- (count @requests) so-far))
+           "one request summarizes the grown conversation")
+       (is (str/includes? (-> @requests last :history second :content)
+                          "Summary so far:")
+           "the earlier summary is folded into the new one")
+       (is (= 1 (count (filter event-compaction/summary?
+                               (compacted grown second-r))))
            "a session keeps exactly one summary")))))
 
 (deftest compact-history-keeps-a-summary-that-would-not-shrink-the-history

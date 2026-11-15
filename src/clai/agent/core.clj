@@ -29,8 +29,8 @@
     * `clai.agent.titles`                  -- automatic titles for new
                                               sessions, from their first
                                               message.
-    * `clai.agent.compaction`              -- summarizing a session's older
-                                              messages once its history
+    * `clai.agent.compaction`              -- summarizing a session's
+                                              conversation once its history
                                               outgrows a token budget.
     * `clai.agent.resources`               -- resource blocks rendered as text
                                               for the model.
@@ -233,6 +233,23 @@
   [base-registry cfg]
   (cond-> base-registry
     (contains? cfg :tools) (tools-registry/select-tools (:tools cfg))))
+
+(defn- available-registry
+  "The full tool registry an agent's sessions pick from: the registry the agent
+  was built with, before `cfg`'s `:tools` narrowed it, falling back to the
+  built-ins."
+  [agent]
+  (or (:base-tool-registry agent)
+      (:tool-registry agent)
+      (tools-builtin/built-in-registry)))
+
+(defn list-tools!
+  "List the tools a session can enable, each with a one-line description.
+  Returns `{:tools [{:id \"read_file\" :description \"...\"} ...]}`,
+  sorted by id."
+  {:malli/schema [:-> :map [:map] [:map [:tools [:vector #'tools-registry/ToolSummary]]]]}
+  [agent _opts]
+  {:tools (tools-registry/summaries (available-registry agent))})
 
 ;; ---------------------------------------------------------------------------
 ;; Session operations
@@ -1083,10 +1100,11 @@
 (defn- chat-history
   "The history to send for the next chat turn.
 
-  Compacts the session first when its stored history has grown past the
-  agent's token budget (see `clai.agent.compaction`): the compacted history
-  replaces the stored one and a `session_compaction` update is relayed to the
-  caller, so a client can show what the older messages became."
+  Compacts the session first when its history has grown past the agent's token
+  budget (see `clai.agent.compaction`): the summary is recorded as a compaction
+  event -- the session's log is left intact, so reading it back ignores the
+  messages the summary stands in for -- and a `session_compaction` update is
+  relayed to the caller, so a client can show what they became."
   {:malli/schema [:-> :string [:map
                                [:postgres :any]
                                [:client :map]
@@ -1095,11 +1113,13 @@
                   [:vector :map]]}
   [session-id {:keys [postgres on-update] :as agent}]
   (let [history (sessions/session-history postgres session-id)]
-    (if-let [result (compaction/compact-history agent history)]
-      (let [compacted (:history result)]
-        (sessions/replace-history postgres session-id compacted)
-        (emit! on-update (:update result))
-        compacted)
+    (if-let [{:keys [summary keep update]} (compaction/compact-history agent
+                                                                      history)]
+      (if-let [session (sessions/append-compaction postgres session-id
+                                                   summary keep)]
+        (do (emit! on-update update)
+            (:history session))
+        history)
       history)))
 
 (defn- run-agent-loop

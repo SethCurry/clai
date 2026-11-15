@@ -6,7 +6,18 @@
   maps; the remaining functions return updated registries instead of mutating
   anything, so two agents can offer different tool sets in the same process."
   (:require [clai.agent.tools.schema :as schema]
+            [clojure.string :as str]
             [taoensso.telemere :as tel]))
+
+;; ---------------------------------------------------------------------------
+;; Schemas
+;; ---------------------------------------------------------------------------
+
+(def ToolSummary
+  "One tool as a picker lists it: its id and its one-line description."
+  [:map
+   [:id #'schema/tool-id]
+   [:description [:maybe :string]]])
 
 ;; ---------------------------------------------------------------------------
 ;; Registry construction
@@ -107,3 +118,21 @@
                   [:vector #'schema/tool-spec]]}
   [tool-registry ids]
   (vec (keep #(spec tool-registry %) ids)))
+
+(defn summaries
+  "Return one [[ToolSummary]] per tool in `tool-registry`, sorted by id.
+
+  A tool's spec description is written for a model, so it spans several lines
+  and indented continuations; this collapses it to a single line so a picker
+  can show it beside the id."
+  {:malli/schema [:-> #'schema/ToolRegistry [:vector #'ToolSummary]]}
+  [tool-registry]
+  (->> tool-registry
+       vals
+       (mapv (fn [{:keys [id spec]}]
+               {:id          id
+                :description (some-> (get-in spec [:function :description])
+                                     str/trim
+                                     (str/replace #"\s+" " "))}))
+       (sort-by :id)
+       vec))

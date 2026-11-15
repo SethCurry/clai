@@ -135,8 +135,8 @@ database ids) that are active for sessions selecting that configuration:
 
 The config file's `:plugins` key sets the agent-wide default in the same way.
 A session's stored agent configuration overrides that default. The web UI's
-**Manage** dialog exposes the same setting as **Plugins** when creating or
-editing an agent configuration.
+**Agent configs** page exposes the same setting as radio buttons plus a
+checkbox per installed plugin: all enabled plugins, none, or a chosen set.
 
 Only the hook functions from active plugins are called. System-prompt hooks
 receive the selection when a session starts, and message hooks receive it on
