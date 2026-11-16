@@ -3,7 +3,7 @@
   (:require [clai.daemon.postgres :as postgres]
             [clai.events.schema :as events]
             [clai.plugins :as plugins]
-            [clai.plugins.store :as store]
+            [clai.daemon.postgres.plugins :as plugins-store]
             [clai.test-support :refer [instrument quiet-logs]]
             [clojure.java.io :as io]
             [clojure.string :as str]
@@ -295,7 +295,7 @@
                       :jarPath (str jar ".missing")
                       :entryNamespace "example.missing")]
     (try
-      (with-redefs [store/list-enabled (fn [_] [bad good])]
+      (with-redefs [plugins-store/list-enabled (fn [_] [bad good])]
         (is (= {:loaded ["good"] :failed ["bad"]}
                (plugins/load-configured! (postgres/make-client)))))
       (is (= ["good"] (map :name (plugins/active-plugins))))

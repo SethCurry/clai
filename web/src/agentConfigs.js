@@ -5,7 +5,7 @@
  *
  * A configuration row comes back with camelCase ids and kebab-case setting
  * names (`configId`, `system-prompt`, `max-tool-rounds`), matching what
- * `clai.agent.configs/AgentConfigInput` accepts. `tools` and `plugins` are
+ * `clai.daemon.postgres.configs/AgentConfigInput` accepts. `tools` and `plugins` are
  * either absent (the daemon's own defaults), an empty list (none at all), or
  * the names to enable -- the three states the page shows as radio buttons.
  */

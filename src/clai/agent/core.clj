@@ -17,7 +17,7 @@
 
   Supporting pieces live in sibling namespaces under `clai.agent.*`:
 
-    * `clai.agent.configs`                 -- stored per-session agent
+    * `clai.daemon.postgres.configs`        -- stored per-session agent
                                               configurations.
     * `clai.agent.providers`               -- provider selection and the
                                               provider-neutral chat turn.
@@ -44,7 +44,6 @@
                                               agent's model, clients, tools, and
                                               chat options."
   (:require [clai.agent.compaction :as compaction]
-            [clai.agent.configs :as agent-configs]
             [clai.agent.providers :as providers]
             [clai.agent.providers.ollama.prompt :as ollama-prompt]
             [clai.agent.titles :as titles]
@@ -52,6 +51,7 @@
             [clai.agent.tools.invoke :as tool-invoke]
             [clai.agent.tools.registry :as tools-registry]
             [clai.config :as config]
+            [clai.daemon.postgres.configs :as agent-configs]
             [clai.daemon.postgres.git :as git]
             [clai.daemon.postgres.notes :as notes]
             [clai.daemon.postgres.sessions :as sessions]
@@ -59,7 +59,7 @@
             [clai.events.schema :as events]
             [clai.log]
             [clai.plugins :as plugins]
-            [clai.plugins.store :as plugins-store]
+            [clai.daemon.postgres.plugins :as plugins-store]
             [clai.util :as util]
             [clojure.java.io :as io]
             [clojure.string :as str]

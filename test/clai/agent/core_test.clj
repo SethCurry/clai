@@ -3,16 +3,16 @@
   prompt actually reaches the model and that streamed updates validate against
   the canonical session event schema."
   (:require [clai.agent.compaction :as compaction]
-            [clai.agent.configs :as agent-configs]
             [clai.agent.core :as agent]
             [clai.agent.providers.ollama :as ollama]
             [clai.agent.providers.openrouter :as openrouter]
+            [clai.daemon.postgres.configs :as agent-configs]
             [clai.daemon.postgres.git :as git]
             [clai.daemon.postgres.sessions :as sessions]
             [clai.events.compaction :as event-compaction]
             [clai.events.schema :as events]
             [clai.plugins :as plugins]
-            [clai.plugins.store :as plugins-store]
+            [clai.daemon.postgres.plugins :as plugins-store]
             [clai.test-support :refer [quiet-logs instrument memory-session-store]]
             [clojure.string :as str]
             [clojure.test :refer :all]

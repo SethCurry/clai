@@ -1,9 +1,9 @@
-(ns clai.agent.configs-test
-  "Tests for the pure parts of `clai.agent.configs`: configuration inputs are
-  normalized before storage and database rows become public configuration maps
-  that only contain the overrides they name."
-  (:require [clai.agent.configs :as configs]
-            [clai.daemon.postgres :as pg]
+(ns clai.daemon.postgres.configs-test
+  "Tests for the pure parts of `clai.daemon.postgres.configs`: configuration
+  inputs are normalized before storage and database rows become public
+  configuration maps that only contain the overrides they name."
+  (:require [clai.daemon.postgres :as pg]
+            [clai.daemon.postgres.configs :as configs]
             [clai.test-support :refer [quiet-logs]]
             [clojure.test :refer :all]))
 
@@ -83,7 +83,7 @@
 ;; database. Run them with, for example:
 ;;
 ;;   CLAI_TEST_POSTGRES_URL=jdbc:postgresql://localhost:5432/clai \
-;;     lein test clai.agent.configs-test
+;;     lein test clai.daemon.postgres.configs-test
 
 (deftest configuration-round-trip
   (if-let [url (System/getenv "CLAI_TEST_POSTGRES_URL")]

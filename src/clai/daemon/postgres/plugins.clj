@@ -1,4 +1,4 @@
-(ns clai.plugins.store
+(ns clai.daemon.postgres.plugins
   "PostgreSQL storage for installed `clai` plugins.
 
   Each row in the `plugin` table (declared in `schema/schema.sql`) names:
@@ -11,19 +11,19 @@
 
   Functions take a `clai.daemon.postgres/Client` as their first argument and
   ensure the storage schema exists on first use, like
-  `clai.agent.configs` and `clai.daemon.postgres.sessions`.
+  `clai.daemon.postgres.configs` and `clai.daemon.postgres.sessions`.
 
   ## Example
 
       (require '[clai.daemon.postgres :as pg]
-               '[clai.plugins.store :as store])
+               '[clai.daemon.postgres.plugins :as plugins-store])
 
       (def client (pg/make-client))
-      (store/create-plugin client
-                           {:name           \"example\"
-                            :jarPath        \"/opt/clai/example.jar\"
-                            :entryNamespace \"example.plugin\"})
-      (store/list-enabled client)"
+      (plugins-store/create-plugin client
+                                   {:name           \"example\"
+                                    :jarPath        \"/opt/clai/example.jar\"
+                                    :entryNamespace \"example.plugin\"})
+      (plugins-store/list-enabled client)"
   (:require [clai.daemon.postgres :as postgres]
             [clojure.string :as str]
             [taoensso.telemere :as tel]))

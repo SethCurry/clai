@@ -27,7 +27,7 @@
             [clai.home.core]
             [clai.log]
             [clai.plugins]
-            [clai.plugins.store]
+            [clai.daemon.postgres.plugins]
             [clai.util]
             [clojure.string :as str]
             [malli.instrument :as mi]

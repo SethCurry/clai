@@ -51,47 +51,6 @@
             [clai.log]
             [taoensso.telemere :as tel]))
 
-;; ---------------------------------------------------------------------------
-;; Schemas (re-exported from `clai.agent.providers.ollama.schemas`)
-;; ---------------------------------------------------------------------------
-
-(def non-empty-string schemas/non-empty-string)
-(def image-source schemas/image-source)
-(def TextContent schemas/TextContent)
-(def ContentList schemas/ContentList)
-(def ToolCallContent schemas/ToolCallContent)
-(def UserPromptEvent schemas/UserPromptEvent)
-(def AgentThoughtEvent schemas/AgentThoughtEvent)
-(def AgentMessageEvent schemas/AgentMessageEvent)
-(def ToolCallEvent schemas/ToolCallEvent)
-(def ClojureFormEvent schemas/ClojureFormEvent)
-(def AgentSessionEvent schemas/AgentSessionEvent)
-(def AgentSession schemas/AgentSession)
-(def client-opts schemas/client-opts)
-(def client-schema schemas/client-schema)
-(def generate-request schemas/generate-request)
-(def ChatContent schemas/ChatContent)
-(def chat-message schemas/chat-message)
-(def chat-request schemas/chat-request)
-(def embed-request schemas/embed-request)
-(def systemone-request schemas/systemone-request)
-(def show-request schemas/show-request)
-(def create-model-request schemas/create-model-request)
-(def copy-model-request schemas/copy-model-request)
-(def pull-push-request schemas/pull-push-request)
-(def delete-model-request schemas/delete-model-request)
-(def model-entry schemas/model-entry)
-(def list-models-response schemas/list-models-response)
-(def version-response schemas/version-response)
-(def balance-response schemas/balance-response)
-(def cloud-usage-query schemas/cloud-usage-query)
-(def cloud-usage-response schemas/cloud-usage-response)
-(def digest schemas/digest)
-(def blob-content schemas/blob-content)
-(def stream-response schemas/stream-response)
-(def chat-response schemas/chat-response)
-(def assistant-message-schema schemas/assistant-message-schema)
-(def tool-call schemas/tool-call)
 
 ;; ---------------------------------------------------------------------------
 ;; Defaults

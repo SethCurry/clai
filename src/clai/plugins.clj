@@ -12,7 +12,8 @@
          {:system-prompt (fn [ctx next]
                            (str (next ctx) \"\\n\\nBe concise.\"))}})
 
-  Installed plugins are configured in PostgreSQL by `clai.plugins.store`;
+  Installed plugins are configured in PostgreSQL by
+  `clai.daemon.postgres.plugins`;
   [[load-configured!]] reads the enabled rows, adds each plugin jar to a
   class loader, requires its entry namespace, and registers its hooks.
 
@@ -60,7 +61,7 @@
   own namespaces from the jar as well as `clai` namespaces from the parent
   class path."
   (:require [clai.daemon.postgres :as postgres]
-            [clai.plugins.store :as store]
+            [clai.daemon.postgres.plugins :as plugins-store]
             [clojure.java.io :as io]
             [taoensso.telemere :as tel])
   (:import [java.net URL URLClassLoader]))
@@ -95,7 +96,7 @@
 
 (def Plugin
   "A plugin row accepted by [[load-plugin!]]."
-  store/Plugin)
+  plugins-store/Plugin)
 
 (def PluginDetail
   "A stored plugin row together with what the running daemon knows about it:
@@ -517,7 +518,7 @@
   (if-not client
     {:loaded [] :failed []}
     (try
-      (let [plugins (store/list-enabled client)]
+      (let [plugins (plugins-store/list-enabled client)]
         (clear!)
         (reduce (fn [result plugin]
                   (try

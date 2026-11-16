@@ -48,7 +48,7 @@ This repository includes a complete example in
 `clai-plugin-todays-date.plugin`:
 
 ```clojure
-(store/create-plugin
+(plugins-store/create-plugin
  client
  {:name           "todays-date"
   :jarPath        "/absolute/path/to/clai/target/plugin/clai-plugin-todays-date.jar"
@@ -95,11 +95,11 @@ Store an enabled row in PostgreSQL:
 
 ```clojure
 (require '[clai.daemon.postgres :as pg]
-         '[clai.plugins.store :as store])
+         '[clai.daemon.postgres.plugins :as plugins-store])
 
 (def client (pg/make-client))
 
-(store/create-plugin
+(plugins-store/create-plugin
  client
  {:name           "example"
   :jarPath        "/opt/clai/plugins/example.jar"
@@ -110,9 +110,10 @@ Store an enabled row in PostgreSQL:
 ```
 
 The `plugin` table is declared in `schema/schema.sql` and is created by
-`clai.daemon.postgres/ensure-schema!`. `store/list-plugins`,
-`store/list-enabled`, `store/select-plugin`, `store/load-plugin`,
-`store/update-plugin`, and `store/delete-plugin` provide the rest of the CRUD
+`clai.daemon.postgres/ensure-schema!`. `plugins-store/list-plugins`,
+`plugins-store/list-enabled`, `plugins-store/select-plugin`,
+`plugins-store/load-plugin`, `plugins-store/update-plugin`, and
+`plugins-store/delete-plugin` provide the rest of the CRUD
 API.
 
 The same rows can be managed from the web UI's **Plugins** page, which lists

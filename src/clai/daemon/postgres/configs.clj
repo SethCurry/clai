@@ -1,4 +1,4 @@
-(ns clai.agent.configs
+(ns clai.daemon.postgres.configs
   "Persisted agent configurations for `clai`.
 
   An agent configuration is one `agent_config` row (see `schema/schema.sql`).
@@ -12,8 +12,8 @@
 
   ## Example
 
-      (require '[clai.agent.configs :as configs]
-               '[clai.daemon.postgres :as pg])
+      (require '[clai.daemon.postgres :as pg]
+               '[clai.daemon.postgres.configs :as configs])
 
       (def client (pg/make-client {:host \"localhost\"}))
       (configs/list-configs client)
