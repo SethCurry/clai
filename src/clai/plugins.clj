@@ -83,10 +83,6 @@
   "One hook function, or a sequence of them run in order."
   [:or fn? [:sequential fn?]])
 
-(def non-empty-string
-  "A string of at least one character."
-  postgres/non-empty-string)
-
 (def PluginDescriptor
   "The map returned by a plugin's `plugin` Var (or constructor function)."
   [:map
@@ -103,10 +99,10 @@
   whether any of its hooks are registered (`:loaded`) and which hook names
   those are (`:hooks`). This is the shape the plugins UI shows."
   [:map
-   [:pluginId non-empty-string]
-   [:name non-empty-string]
-   [:jarPath non-empty-string]
-   [:entryNamespace non-empty-string]
+   [:pluginId postgres/non-empty-string]
+   [:name postgres/non-empty-string]
+   [:jarPath postgres/non-empty-string]
+   [:entryNamespace postgres/non-empty-string]
    [:config [:map]]
    [:enabled boolean?]
    [:priority int?]
@@ -119,7 +115,7 @@
   "A plugin accepted by [[register!]]. Only `:name` is required; the other
   fields are optional so callers can register hooks directly from a REPL."
   [:map
-   [:name non-empty-string]
+   [:name postgres/non-empty-string]
    [:pluginId {:optional true} [:maybe [:or :string :int]]]
    [:jarPath {:optional true} [:maybe :string]]
    [:entryNamespace {:optional true} [:maybe :string]]
