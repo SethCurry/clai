@@ -55,6 +55,7 @@
             [clai.daemon.postgres.git :as git]
             [clai.daemon.postgres.notes :as notes]
             [clai.daemon.postgres.sessions :as sessions]
+            [clai.daemon.postgres.stats :as stats]
             [clai.events.schema :as events]
             [clai.log]
             [clai.plugins :as plugins]
@@ -792,6 +793,21 @@
                :data  {:q (str q) :count (count found)}}
               "Searched notes")
     {:notes found}))
+
+;; ---------------------------------------------------------------------------
+;; Usage statistics
+;; ---------------------------------------------------------------------------
+
+(defn usage-stats!
+  "Return usage statistics about the daemon's sessions and its tools.
+
+  `opts` is unused; the statistics cover the whole database, not one session.
+  The result holds `:overview` totals and averages, one `:tools` row per tool
+  (call count, average characters returned, sessions that used it), and one
+  `:sessions` row per session; see `clai.daemon.postgres.stats`."
+  {:malli/schema [:-> :map [:map] #'stats/Stats]}
+  [agent _opts]
+  (stats/usage-stats (:postgres agent)))
 
 ;; ---------------------------------------------------------------------------
 ;; Session configuration

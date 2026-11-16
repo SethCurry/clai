@@ -1187,3 +1187,40 @@
               (is (= 200 (:status deleted)))
               (is (= "2" (:deleted (response-body deleted)))))
             (is (= 404 (:status (handler (request :delete "/api/notes/2")))))))))))
+
+(deftest usage-statistics-are-served-per-section
+  (let [stats {:overview {:sessionCount 2
+                          :toolCount     1
+                          :toolCallCount 5
+                          :avgToolCallsPerSession 2.5}
+               :tools    [{:toolName "read_file" :callCount 5 :avgOutputChars 120}]
+               :sessions [{:sessionId "1" :toolCallCount 3}
+                          {:sessionId "2" :toolCallCount 2}]}]
+    (with-fake-agent (atom {})
+      (fn []
+        (with-redefs [agent/usage-stats! (fn [_ _] stats)]
+          (let [handler (http/handler (state (atom {})))]
+            (testing "the overview carries the totals and averages"
+              (let [response (handler (request :get "/api/stats/overview"))]
+                (is (= 200 (:status response)))
+                (is (= {:sessionCount 2
+                        :toolCount 1
+                        :toolCallCount 5
+                        :avgToolCallsPerSession 2.5}
+                       (response-body response)))))
+
+            (testing "the tools endpoint wraps one row per tool"
+              (is (= {:tools [{:toolName "read_file"
+                               :callCount 5
+                               :avgOutputChars 120}]}
+                     (response-body (handler (request :get "/api/stats/tools"))))))
+
+            (testing "the sessions endpoint wraps one row per session"
+              (is (= {:sessions [{:sessionId "1" :toolCallCount 3}
+                                 {:sessionId "2" :toolCallCount 2}]}
+                     (response-body (handler (request :get "/api/stats/sessions"))))))
+
+            (testing "statistics need a session like the rest of the API"
+              (is (= 401 (:status (handler (anonymous
+                                            (request :get
+                                                     "/api/stats/overview")))))))))))))

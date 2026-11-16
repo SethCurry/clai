@@ -59,6 +59,12 @@ session's working directory, and **Namespaces** browses the loaded Clojure
 namespaces, their Vars, docstrings, and source, starting from the session's own
 namespace. Each panel can be hidden from the top bar.
 
+The **Stats** page graphs what the sessions and the agent did, straight from the
+session event log in PostgreSQL: how often each tool is called, how many
+characters it returns on average, how many tool calls a session takes, and
+which tools the agent leans on. It is fed by `/api/stats/overview`,
+`/api/stats/tools`, and `/api/stats/sessions`.
+
 Build the UI and start everything with:
 
 ```sh

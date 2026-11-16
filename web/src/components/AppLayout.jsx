@@ -19,6 +19,7 @@ const TABS = [
   { to: '/agent-configs', label: 'Agent configs' },
   { to: '/git-repos', label: 'Git repos' },
   { to: '/notes', label: 'Notes' },
+  { to: '/stats', label: 'Stats' },
   { to: '/plugins', label: 'Plugins' },
 ]
 

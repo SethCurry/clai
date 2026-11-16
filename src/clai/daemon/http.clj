@@ -6,13 +6,15 @@
 
     * a JSON HTTP API for sessions, agent configurations, plugins, the
       registered git repositories and worktrees, notes, session-scoped
-      filesystem reads, and introspection of this JVM's Clojure namespaces
+      filesystem reads, usage statistics about the sessions and their tool
+      calls, and introspection of this JVM's Clojure namespaces
       (`/api/sessions`, `/api/agent-configs`, `/api/plugins`,
       `/api/git-repos`, `/api/git-worktrees`, `/api/notes`,
       `/api/notes/search`, `/api/sessions/<id>/completions`,
       `/api/sessions/<id>/files`, `/api/sessions/<id>/file`,
       `/api/namespaces`, `/api/namespaces/<ns>/vars`,
-      `/api/namespaces/<ns>/var`, `/api/health`),
+      `/api/namespaces/<ns>/var`, `/api/stats/overview`, `/api/stats/tools`,
+      `/api/stats/sessions`, `/api/health`),
       and
     * a WebSocket at `/ws` that streams agent updates and forwards Clojure
       evaluations to the running nREPL server.
@@ -868,6 +870,26 @@
         (json-response 200 detail)
         (not-found (str "No var " namespace-name "/" var-name))))))
 
+(defn- stats-overview-handler
+  "Report the daemon's totals and averages across every session and tool."
+  {:malli/schema [:-> #'RouteContext #'Response]}
+  [{:keys [agent]}]
+  (json-response 200 (:overview (agent/usage-stats! agent {}))))
+
+(defn- stats-tools-handler
+  "Report per-tool usage: call counts, sessions reached, and character
+  averages."
+  {:malli/schema [:-> #'RouteContext #'Response]}
+  [{:keys [agent]}]
+  (json-response 200 (select-keys (agent/usage-stats! agent {}) [:tools])))
+
+(defn- stats-sessions-handler
+  "Report per-session activity: prompts, replies, tool calls, and the
+  characters each produced."
+  {:malli/schema [:-> #'RouteContext #'Response]}
+  [{:keys [agent]}]
+  (json-response 200 (select-keys (agent/usage-stats! agent {}) [:sessions])))
+
 ;; ---------------------------------------------------------------------------
 ;; Route construction
 ;; ---------------------------------------------------------------------------
@@ -1046,6 +1068,9 @@
    {:method :get :template "/api/sessions/:sessionId" :handler load-session-handler}
    {:method :delete :template "/api/sessions/:sessionId" :handler delete-session-handler}
    {:method :get :template "/api/notes/search" :handler note-search-handler}
+   {:method :get :template "/api/stats/overview" :handler stats-overview-handler}
+   {:method :get :template "/api/stats/tools" :handler stats-tools-handler}
+   {:method :get :template "/api/stats/sessions" :handler stats-sessions-handler}
    {:method :get :template "/api/namespaces" :handler namespaces-handler}
    {:method :get :template "/api/namespaces/:namespace/vars" :handler namespace-vars-handler}
    {:method :get :template "/api/namespaces/:namespace/var" :handler namespace-var-handler}])

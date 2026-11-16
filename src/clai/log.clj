@@ -7,25 +7,19 @@
   is not validated here; `init!` ignores levels Telemere rejects."
   {:malli/schema [:-> [:maybe :keyword]]}
   []
-  (some-> (System/getenv "CLAI_LOG_LEVEL")
+  (if-let [log-level (some-> (System/getenv "CLAI_LOG_LEVEL")
           (str/trim)
           (not-empty)
           (str/lower-case)
-          (keyword)))
+          (keyword))]
+  log-level
+  :debug))
 
 (defn init!
   "Install the stderr console handler and apply `CLAI_LOG_LEVEL`, if set.
   Idempotent; called automatically when this namespace loads."
   {:malli/schema [:-> :nil]}
   []
-  ;; Telemere's default console handler writes non-error signals to *out*.
-  ;; Stdout is reserved for the REPL conversation, so replace it with a
-  ;; handler that always writes to stderr.
-  (tel/remove-handler! :default/console)
-  (tel/add-handler! :clai/console
-    (tel/handler:console {:stream :err})
-    {:async nil})
-
   (when-let [level (env-log-level)]
     (try
       (tel/set-min-level! level)

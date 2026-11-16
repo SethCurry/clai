@@ -8,6 +8,7 @@ import { NotFoundPage } from './components/NotFoundPage.jsx'
 import { NotesPage } from './components/NotesPage.jsx'
 import { PluginsPage } from './components/PluginsPage.jsx'
 import { SessionsPage } from './components/SessionsPage.jsx'
+import { StatsPage } from './components/StatsPage.jsx'
 import { useAuth } from './useAuth.js'
 
 /**
@@ -70,6 +71,7 @@ export default function App() {
         <Route path="agent-configs" element={<AgentConfigsPage />} />
         <Route path="git-repos" element={<GitReposPage />} />
         <Route path="notes" element={<NotesPage />} />
+        <Route path="stats" element={<StatsPage />} />
         <Route path="plugins" element={<PluginsPage />} />
         <Route path="*" element={<NotFoundPage />} />
       </Route>

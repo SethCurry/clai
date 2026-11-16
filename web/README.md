@@ -6,8 +6,8 @@ health checks, non-streaming session access, filesystem reads, and Clojure
 namespace introspection.
 
 The pages are client-side routes (`react-router-dom`): the sessions console at
-`/`, the git repository registry at `/git-repos`, the notes at `/notes`, and
-the sign-in form at `/login`.
+`/`, the git repository registry at `/git-repos`, the notes at `/notes`, the
+usage statistics dashboard at `/stats`, and the sign-in form at `/login`.
 
 ## Scripts
 
@@ -73,7 +73,47 @@ GET    /api/notes/:id
 POST   /api/notes
 PUT    /api/notes/:id
 DELETE /api/notes/:id
+GET    /api/stats/overview
+GET    /api/stats/tools
+GET    /api/stats/sessions
 ```
+
+The stats endpoints read the whole session event log stored in PostgreSQL and
+return usage aggregates; they take no parameters. `/overview` holds the totals
+and averages (session, prompt, and tool-call counts, average characters per
+call, average tool calls per session):
+
+```json
+{"sessionCount":12,"toolCount":7,"promptCount":340,"agentMessageCount":330,
+ "thoughtCount":41,"toolCallCount":1210,"completedToolCallCount":1204,
+ "avgPromptsPerSession":28.33,"avgToolCallsPerSession":100.83,
+ "totalPromptChars":412000,"avgPromptChars":1212,"totalReplyChars":512000,
+ "avgReplyChars":1551,"totalToolOutputChars":9123456,"avgToolOutputChars":7580,
+ "maxToolOutputChars":64000,"avgToolOutputCharsPerSession":760288}
+```
+
+`/tools` wraps one row per tool, most-called first, and `/sessions` wraps one
+row per session, oldest first:
+
+```json
+{"tools":[{"toolName":"read_file","callCount":420,"completedCount":418,
+           "sessionCount":11,"totalInputChars":21000,"avgInputChars":50,
+           "totalOutputChars":4210000,"avgOutputChars":10072,
+           "maxOutputChars":64000}]}
+```
+
+```json
+{"sessions":[{"sessionId":"1","title":"Fix the build","cwd":"/tmp/project",
+              "createdAt":"2024-01-02T03:04:05Z","promptCount":28,
+              "promptChars":12000,"avgPromptChars":429,"agentMessageCount":27,
+              "replyChars":30000,"avgReplyChars":1111,"thoughtCount":4,
+              "toolCallCount":120,"toolOutputChars":900000,
+              "avgToolOutputChars":7500,"distinctToolCount":6}]}
+```
+
+Averages that have no data to average are `null`. The character counts are
+measured on the JSON stored in the event log: a tool call's arguments and the
+result it returned.
 
 The notes endpoints are what the Notes page uses: list and search responses
 wrap their results in a `notes` key, single-note responses are the note itself
@@ -216,6 +256,12 @@ card until the status becomes `completed` or `failed`.
   editor for the title, content, and outgoing links. `src/useNotes.js` owns its
   data -- the full list, the debounced search results, and the selected note --
   and `src/notes.js` holds the pure form and link helpers.
+- `src/components/StatsPage.jsx` is the usage dashboard at `/stats`: KPI
+  cards for the overview, four Chart.js charts (calls per tool, average output
+  per tool, tool calls per session, and the share of calls each tool takes),
+  and a per-tool table. `src/useStats.js` fetches the three stats endpoints
+  together, and `src/stats.js` holds the pure formatting and chart-series
+  helpers.
 - `src/api.js` holds the shared `fetch` body reader, and `src/format.js` the
   shared timestamp formatting both list pages use.
 - `src/sessionNamespace.js` derives that namespace from a session id, matching
