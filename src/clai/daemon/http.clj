@@ -27,9 +27,9 @@
   Everything but the login form's own three calls is authenticated.
   `POST /api/auth/login` checks a username and password against the `app_user`
   table (`clai.daemon.postgres.users`) and answers with an `HttpOnly` session
-  cookie; `GET /api/auth/me` reports whether the request carries a live
-  session, and `POST /api/auth/logout` revokes it. Every other `/api/` route,
-  and the `/ws` upgrade, answers 401
+  cookie (`clai.daemon.http.cookies`); `GET /api/auth/me` reports whether the
+  request carries a live session, and `POST /api/auth/logout` revokes it. Every
+  other `/api/` route, and the `/ws` upgrade, answers 401
   `{\"error\": \"Authentication required\"}` without one. The React build itself
   is served unauthenticated, since the login page lives in it.
 
@@ -39,8 +39,8 @@
   (:require [cheshire.core :as json]
             [clai.agent.core :as agent]
             [clai.agent.providers.ollama.prompt :as ollama-prompt]
-            [clai.auth :as auth]
             [clai.daemon.files :as files]
+            [clai.daemon.http.cookies :as cookies]
             [clai.daemon.namespaces :as namespaces]
             [clai.daemon.nrepl :as nrepl-bridge]
             [clai.daemon.postgres.users :as users]
@@ -668,11 +668,12 @@
   session.
 
   The token is the session cookie a browser sends back, or an
-  `Authorization: Bearer <token>` header (see `clai.auth/request-token`); it is
-  checked against the `auth_token` table."
+  `Authorization: Bearer <token>` header; both are read by
+  `clai.daemon.http.cookies/request-token`. It is checked against the
+  `auth_token` table."
   {:malli/schema [:-> #'State :map [:maybe #'users/User]]}
   [state request]
-  (when-let [token (auth/request-token request)]
+  (when-let [token (cookies/request-token request)]
     ((:resolve-token (:auth state)) token)))
 
 (defn- unauthorized
@@ -711,7 +712,7 @@
                                  :username (:username user)}}
                         "Signed in to the clai daemon")
               (json-response 200 {:authenticated true :user user}
-                             {"set-cookie" (auth/session-cookie token)}))
+                             {"set-cookie" (cookies/session-cookie token)}))
             (do
               ;; The username is logged, the password never is, so a stream of
               ;; failures is visible without spilling credentials.
@@ -737,10 +738,10 @@
   "Revoke the request's session token and clear the cookie."
   {:malli/schema [:-> #'RouteContext #'Response]}
   [{:keys [state request]}]
-  (when-let [token (auth/request-token request)]
+  (when-let [token (cookies/request-token request)]
     ((:revoke-token (:auth state)) token))
   (json-response 200 {:authenticated false :user nil}
-                 {"set-cookie" (auth/cleared-session-cookie)}))
+                 {"set-cookie" (cookies/cleared-session-cookie)}))
 
 ;; ---------------------------------------------------------------------------
 ;; Route handlers

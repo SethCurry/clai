@@ -508,9 +508,10 @@ own three calls are open. The UI starts on a sign-in form, and every other
 - Non-browser clients can send `Authorization: Bearer <token>` instead.
 
 Accounts live in `app_user`; passwords are salted PBKDF2 digests
-(`clai.auth/hash-password`) and the plaintext is never stored. Login sessions
-last seven days and are stored as SHA-256 digests in `auth_token`, so a
-database dump cannot be replayed. Change the seeded account before exposing the daemon:
+(`clai.daemon.auth/hash-password`) and the plaintext is never stored. Login
+sessions last seven days and are stored as SHA-256 digests in `auth_token`, so
+a database dump cannot be replayed. Change the seeded account before exposing
+the daemon:
 
 ```clojure
 ;; lein repl

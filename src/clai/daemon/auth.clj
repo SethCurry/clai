@@ -1,9 +1,10 @@
-(ns clai.auth
-  "Password hashing, bearer tokens, and session cookies for `clai`'s daemon.
+(ns clai.daemon.auth
+  "Password hashing and session tokens for `clai`'s daemon.
 
-  This namespace is pure cryptography and header parsing: it never talks to
-  the database. `clai.daemon.postgres.users` stores the values produced here,
-  and `clai.daemon.http` turns them into cookies and `401` responses.
+  This namespace is pure cryptography: it never talks to the database and
+  never touches HTTP. `clai.daemon.postgres.users` stores the values produced
+  here, and `clai.daemon.http.cookies` puts a token into a cookie and reads it
+  back off a request.
 
   ## Passwords
 
@@ -19,22 +20,23 @@
 
   ## Session tokens
 
-  A logged-in browser holds a random [[new-token]] in an `HttpOnly` cookie.
-  The database stores only [[token-hash]] of it (a SHA-256 digest), so a
-  database dump does not hand out working sessions.
+  A logged-in client holds a random [[new-token]]. The database stores only
+  [[token-hash]] of it (a SHA-256 digest), so a database dump does not hand out
+  working sessions. [[token-ttl-seconds]] is how long an issued token is
+  accepted.
 
   ## Example
 
-      (require '[clai.auth :as auth])
+      (require '[clai.daemon.auth :as auth])
 
       (def encoded (auth/hash-password \"correct horse\"))
 
       (auth/verify-password \"correct horse\" encoded) ; => true
       (auth/verify-password \"wrong\" encoded)         ; => false
 
-      (auth/request-token {:headers {\"cookie\" \"clai_session=abc\"}})
-      ; => \"abc\""
-  (:require [clojure.string :as str])
+      (auth/token-hash (auth/new-token))              ; => \"9f2c...\""
+  (:require [clai.util :as util]
+            [clojure.string :as str])
   (:import [java.nio.charset StandardCharsets]
            [java.security MessageDigest SecureRandom]
            [java.util Base64]
@@ -45,22 +47,14 @@
 ;; Schemas
 ;; ---------------------------------------------------------------------------
 
-(def non-empty-string
-  "A string of at least one character."
-  [:string {:min 1}])
-
 (def PasswordHash
   "A password digest as written by [[hash-password]] and read by
   [[verify-password]]."
-  non-empty-string)
+  util/non-empty-string)
 
 (def Token
   "A session token as minted by [[new-token]]."
-  non-empty-string)
-
-(def CookieMap
-  "A request's cookies, decoded into a `{\"name\" \"value\"}` map."
-  [:map-of :string :string])
+  util/non-empty-string)
 
 ;; ---------------------------------------------------------------------------
 ;; Password hashing
@@ -140,7 +134,7 @@
 (defn hash-password
   "Derive a salted digest of `password`, in the encoded form described in the
   namespace docstring."
-  {:malli/schema [:-> non-empty-string #'PasswordHash]}
+  {:malli/schema [:-> util/non-empty-string #'PasswordHash]}
   [password]
   (let [salt   (random-bytes salt-bytes)
         digest (derive-key password salt iterations)]
@@ -153,7 +147,8 @@
   {:malli/schema [:-> :any [:maybe [:tuple pos-int? :any :any]]]}
   [encoded]
   (when (string? encoded)
-    (let [[prefix rounds salt digest :as parts] (str/split encoded #"\$")]
+    (let [[prefix rounds salt digest :as parts]
+          (str/split encoded #"\$")]
       (when (and (= 4 (count parts)) (= prefix hash-prefix))
         (when-let [rounds (parse-long rounds)]
           (when (pos? rounds)
@@ -178,6 +173,10 @@
 ;; Session tokens
 ;; ---------------------------------------------------------------------------
 
+(def token-ttl-seconds
+  "How long an issued session token stays valid, in seconds (seven days)."
+  (* 7 24 60 60))
+
 (defn new-token
   "A fresh random session token: 32 bytes, base64url-encoded without padding."
   {:malli/schema [:-> #'Token]}
@@ -187,78 +186,8 @@
 (defn token-hash
   "The SHA-256 digest of `token`, hex-encoded. This is what the database
   stores, so a leaked table cannot be replayed as sessions."
-  {:malli/schema [:-> #'Token #'non-empty-string]}
+  {:malli/schema [:-> #'Token util/non-empty-string]}
   [token]
   (let [digest (.digest (MessageDigest/getInstance "SHA-256")
                         (.getBytes ^String token StandardCharsets/UTF_8))]
     (apply str (map #(format "%02x" %) digest))))
-
-;; ---------------------------------------------------------------------------
-;; Cookies and request headers
-;; ---------------------------------------------------------------------------
-
-(def cookie-name
-  "The name of the cookie the daemon stores a session token in."
-  "clai_session")
-
-(def token-ttl-seconds
-  "How long an issued session token stays valid, in seconds (seven days)."
-  (* 7 24 60 60))
-
-(defn parse-cookies
-  "Decode a request's `cookie` header into a `{\"name\" \"value\"}` map.
-
-  Pairs without an `=` are dropped rather than treated as an error, so a
-  malformed cookie from something else on the origin cannot break a request."
-  {:malli/schema [:-> [:maybe :string] #'CookieMap]}
-  [header]
-  (if (str/blank? header)
-    {}
-    (into {}
-          (keep (fn [pair]
-                  (let [[name value] (str/split (str/trim pair) #"=" 2)]
-                    (when (and (some? value) (not (str/blank? name)))
-                      [(str/trim name) (str/trim value)]))))
-          (str/split (str header) #";"))))
-
-(defn request-token
-  "The session token `request` carries, or nil when it carries none.
-
-  The browser sends it back in the session cookie; other clients (curl, tests,
-  scripts) can use an `Authorization: Bearer <token>` header instead."
-  {:malli/schema [:-> :map [:maybe #'Token]]}
-  [request]
-  (let [header (get-in request [:headers "authorization"])
-        bearer (when (string? header)
-                 (second (re-find #"(?i)^bearer\s+(\S+)$" (str/trim header))))]
-    (or (not-empty (str bearer))
-        (let [token (get (parse-cookies (get-in request [:headers "cookie"]))
-                         cookie-name)]
-          (when-not (str/blank? (str token))
-            token)))))
-
-(defn session-cookie
-  "The `Set-Cookie` value that stores `token` as the session cookie.
-
-  `HttpOnly` keeps the token away from page scripts and `SameSite=Lax` keeps
-  it off cross-site form posts. `Secure` is deliberately not set: the daemon
-  serves plain HTTP on loopback, and browsers would then drop the cookie. Add
-  it (in [[session-cookie]] and [[cleared-session-cookie]]) if you serve clai
-  over TLS."
-  {:malli/schema [:function
-                  [:=> [:cat #'Token] :string]
-                  [:=> [:cat #'Token [:maybe pos-int?]] :string]]}
-  ([token] (session-cookie token token-ttl-seconds))
-  ([token max-age]
-   (str/join "; "
-             (cond-> [(str cookie-name "=" token)
-                      "Path=/"
-                      "HttpOnly"
-                      "SameSite=Lax"]
-               max-age (conj (str "Max-Age=" max-age))))))
-
-(defn cleared-session-cookie
-  "The `Set-Cookie` value that makes the browser drop the session cookie."
-  {:malli/schema [:-> :string]}
-  []
-  (str cookie-name "=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0"))

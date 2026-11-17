@@ -157,9 +157,10 @@ CREATE TABLE IF NOT EXISTS git_worktree (
 -- `/api/auth/me` must carry a session token from these tables.
 --
 -- `password_hash` is the self-describing PBKDF2 digest that
--- `clai.auth/hash-password` writes (`pbkdf2-sha256$<rounds>$<salt>$<digest>`);
--- the plaintext password is never stored. Users are compared by their trimmed,
--- lower-cased name, so `Admin` and `admin` are the same account.
+-- `clai.daemon.auth/hash-password` writes
+-- (`pbkdf2-sha256$<rounds>$<salt>$<digest>`); the plaintext password is never
+-- stored. Users are compared by their trimmed, lower-cased name, so `Admin`
+-- and `admin` are the same account.
 CREATE TABLE IF NOT EXISTS app_user (
     id BIGSERIAL PRIMARY KEY,
     username TEXT NOT NULL,
@@ -190,12 +191,13 @@ CREATE INDEX IF NOT EXISTS auth_token_expires_at_idx ON auth_token (expires_at);
 -- change the password (or delete the account) before exposing the daemon to
 -- anything but localhost:
 --
---     UPDATE app_user SET password_hash = '<clai.auth/hash-password output>'
+--     UPDATE app_user
+--        SET password_hash = '<clai.daemon.auth/hash-password output>'
 --      WHERE username = 'admin';
 --
--- The digest below was produced by `(clai.auth/hash-password "admin")`, so it
--- only validates the password `admin`. `ON CONFLICT DO NOTHING` keeps the seed
--- from resetting a password that has already been changed.
+-- The digest below was produced by `(clai.daemon.auth/hash-password "admin")`,
+-- so it only validates the password `admin`. `ON CONFLICT DO NOTHING` keeps
+-- the seed from resetting a password that has already been changed.
 INSERT INTO app_user (username, password_hash)
 VALUES ('admin',
         'pbkdf2-sha256$210000$iiN3WkQoUFI4vZTDCu753g==$nqtCj4O3gyqW22WS1bW9yag+bMktTfTstUKnl9MP5Lk=')

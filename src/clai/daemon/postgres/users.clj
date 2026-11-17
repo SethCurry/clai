@@ -12,11 +12,11 @@
   exposing the daemon to anything but your own machine.
 
   A login is checked with [[authenticate]] against the salted PBKDF2 digest
-  `clai.auth/hash-password` wrote. A successful login mints a random token with
-  [[issue-token]]; only its SHA-256 digest is stored, so the token exists in
-  the browser's cookie and nowhere else. [[resolve-token]] turns a presented
-  token back into a user while the row is unexpired, and [[revoke-token]] logs
-  the session out.
+  `clai.daemon.auth/hash-password` wrote. A successful login mints a random
+  token with [[issue-token]]; only its SHA-256 digest is stored, so the token
+  exists in the browser's cookie and nowhere else. [[resolve-token]] turns a
+  presented token back into a user while the row is unexpired, and
+  [[revoke-token]] logs the session out.
 
   ## Example
 
@@ -29,7 +29,7 @@
       (def session (users/issue-token client \"1\"))
       (users/resolve-token client (:token session))   ; => {:userId \"1\" :username \"admin\"}
       (users/revoke-token client (:token session))    ; => true"
-  (:require [clai.auth :as auth]
+  (:require [clai.daemon.auth :as auth]
             [clai.daemon.postgres :as postgres]
             [clojure.string :as str]
             [taoensso.telemere :as tel]))
@@ -240,8 +240,8 @@
   "Mint a session token for the user `user-id` and store its digest.
 
   The token is returned once, in `:token`; `:expiresAt` is the expiry the
-  database recorded ([[auth/token-ttl-seconds]] from now). Expired tokens are
-  deleted along the way."
+  database recorded (`clai.daemon.auth/token-ttl-seconds` from now). Expired
+  tokens are deleted along the way."
   {:malli/schema [:-> #'postgres/client-schema non-empty-string #'IssuedToken]}
   [client user-id]
   (let [datasource (:datasource (postgres/ready client))
