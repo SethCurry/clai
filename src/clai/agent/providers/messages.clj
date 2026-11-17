@@ -57,6 +57,20 @@
 ;; Assistant messages and tool calls
 ;; ---------------------------------------------------------------------------
 
+(defn tool-definitions
+  "Return `tool-specs` as tool definitions a provider accepts, or nil when
+  there are none.
+
+  The tool registry produces the `{:type \"function\" :function {:name ...
+  :parameters ...}}` shape that both the Ollama and the OpenAI-compatible
+  wire formats use, so this only fills in a missing `:type`. An empty or
+  nil `tool-specs` yields nil, which is how callers know to leave the
+  `:tools` key out of a request altogether."
+  {:malli/schema [:-> [:maybe [:sequential :map]] [:maybe [:sequential :map]]]}
+  [tool-specs]
+  (when (seq tool-specs)
+    (mapv #(cond-> % (nil? (:type %)) (assoc :type "function")) tool-specs)))
+
 (defn assistant-message
   "Return the assistant `:message` map from a chat response, normalized to at
   least a map with role `assistant` and empty content."

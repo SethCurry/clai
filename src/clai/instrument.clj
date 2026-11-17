@@ -15,6 +15,7 @@
             [clai.agent.providers.ollama]
             [clai.agent.providers.ollama.image]
             [clai.agent.providers.openrouter]
+            [clai.agent.providers.protocol]
             [clai.agent.tools.builtin]
             [clai.agent.tools.invoke]
             [clai.agent.tools.registry]

@@ -100,7 +100,6 @@
       (is (= {:model    "gemma3"
               :messages [{:role "user" :content "ping"}]
               :stream   false
-              :tools    []
               :options  {:temperature 0.5}}
              (first @requests))))))
 
@@ -154,7 +153,7 @@
                                                       {:model "a/b" :history []}))))))
 
 (deftest unknown-clients-are-rejected
-  (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Unknown provider client"
+  (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Not a provider client"
                         (providers/chat {:provider :gemini} {:model "x"
                                                              :messages []}))))
 
@@ -172,3 +171,84 @@
     (is (= "echo {:text \"hi\"}" (providers/tool-call-title call)))
     (is (= "failed" (providers/tool-result-status "Error: nope")))
     (is (= "completed" (providers/tool-result-status "ok")))))
+
+;; ---------------------------------------------------------------------------
+;; The provider interface
+;; ---------------------------------------------------------------------------
+
+(deftest clients-answer-the-provider-interface
+  (doseq [[provider client] clients]
+    (is (= provider (:provider (providers/capabilities client)))
+        "a client reports the provider it belongs to")
+    (is (providers/supports-tools? client))
+    (is (providers/supports-usage? client))
+    (is (map? (providers/chat-request client {:model   "m"
+                                              :history [{:role "user"
+                                                         :content "hi"}]})))
+    (is (map? (providers/assistant-message client {})))))
+
+(deftest unsupported-features-are-declared-not-faked
+  (is (false? (get-in (providers/capabilities (:ollama clients))
+                      [:usage :cost?]))
+      "Ollama reports timings, not money")
+  (is (true? (get-in (providers/capabilities (:openrouter clients))
+                     [:usage :cost?]))
+      "OpenRouter prices every request"))
+
+(deftest tools-are-offered-in-the-providers-dialect
+  (let [spec {:function {:name "echo" :parameters {:type "object"}}}
+        want [{:type     "function"
+               :function {:name "echo" :parameters {:type "object"}}}]]
+    (is (= want (providers/tools (:ollama clients) [spec])))
+    (is (= want (providers/tools (:openrouter clients) [spec])))
+    (is (nil? (providers/tools (:ollama clients) []))
+        "no tools means no :tools key, not an empty one")))
+
+(deftest token-usage-is-normalized-per-provider
+  (is (= {:input-tokens  10
+          :output-tokens 4
+          :total-tokens  14
+          :cost          nil
+          :raw           {:prompt_eval_count 10 :eval_count 4}}
+         (providers/token-usage (:ollama clients)
+                                {:prompt_eval_count 10 :eval_count 4})))
+  (is (nil? (providers/token-usage (:ollama clients)
+                                   {:message {:role "assistant"}}))
+      "Ollama's streamed events carry no counts")
+  (is (= {:input-tokens        10
+          :output-tokens       4
+          :total-tokens        14
+          :cached-input-tokens 6
+          :reasoning-tokens    2
+          :cost                0.25
+          :raw                 {:prompt_tokens            10
+                                :completion_tokens       4
+                                :total_tokens            14
+                                :cost                    0.25
+                                :prompt_tokens_details   {:cached_tokens 6}
+                                :completion_tokens_details {:reasoning_tokens 2}}}
+         (providers/token-usage
+          (:openrouter clients)
+          {:usage {:prompt_tokens              10
+                   :completion_tokens         4
+                   :total_tokens              14
+                   :cost                      0.25
+                   :prompt_tokens_details     {:cached_tokens 6}
+                   :completion_tokens_details {:reasoning_tokens 2}}})))
+  (is (nil? (providers/token-usage (:openrouter clients) {}))))
+
+(deftest respond-keeps-the-raw-response-and-the-usage
+  (let [response {:message           {:role "assistant" :content "pong"}
+                  :prompt_eval_count 3
+                  :eval_count        2}]
+    (with-redefs [ollama/chat (fn [_ _] response)]
+      (is (= {:message  {:role "assistant" :content "pong"}
+              :usage    {:input-tokens  3
+                         :output-tokens 2
+                         :total-tokens  5
+                         :cost          nil
+                         :raw           {:prompt_eval_count 3 :eval_count 2}}
+              :response response}
+             (providers/respond (:ollama clients)
+                                {:model   "gemma3"
+                                 :history [{:role "user" :content "ping"}]}))))))

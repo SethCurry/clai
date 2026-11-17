@@ -122,7 +122,8 @@
 (defn throw-api-error
   "Raise an `ex-info` describing a failed response from `client`.
   The body is parsed as JSON when possible."
-  {:malli/schema [:-> :map :keyword :string :int [:maybe :any]]}
+  {:malli/schema [:-> :map :keyword :string :int [:maybe :any]
+                  [:maybe :any]]}
   [client method url status body]
   (let [^bytes raw (util/->bytes body)
         parsed (when (and (bytes? raw) (pos? (alength raw)))

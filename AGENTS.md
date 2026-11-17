@@ -10,3 +10,5 @@ Don't worry about backwards compatibility. There are no users. Just write the co
 
 Make sure that your Clojure is idiomatic and composable in pipes so that
 its nice for a user to use from the REPL.
+
+Never re-declare variables from other packages. Just import them and use them.

@@ -20,6 +20,11 @@
   the sequence fully to release the underlying HTTP connection. Pass
   `:stream false` in the request to receive a single response map instead.
 
+  The `Client` record implements `clai.agent.providers.protocol/Provider`,
+  so the agent chats through this provider without knowing which one it is; see
+  that namespace for the interface and `clai.agent.providers` for model-name
+  resolution.
+
   This namespace is the public facade. The implementation is split across
   `clai.agent.providers.ollama.schemas`, `.image`, `.generation`, `.models`,
   `.blobs`, and `.cloud`; the HTTP plumbing lives in
@@ -46,9 +51,11 @@
             [clai.agent.providers.ollama.image :as image]
             [clai.agent.providers.messages :as messages]
             [clai.agent.providers.ollama.models :as models]
+            [clai.agent.providers.protocol :as protocol]
             [clai.agent.providers.ollama.schemas :as schemas]
             [clai.events.schema :as events]
             [clai.log]
+            [clai.util :as util]
             [taoensso.telemere :as tel]))
 
 
@@ -156,7 +163,10 @@
   `:logprobs`, `:top_logprobs`.
 
   Streaming is the default: a lazy sequence of event maps is returned.
-  Pass `:stream false` to receive a single response map."
+  Pass `:stream false` to receive a single response map. This is also what
+  `clai.agent.providers.protocol/-chat` dispatches to, so a turn started by
+  [[request-body]] returns here; prefer `clai.agent.providers.protocol/respond`
+  when you want the reply, the token usage, and the raw response together."
   {:malli/schema [:function
                   [:=> [:cat #'schemas/chat-request]
                    [:or [:map] #'schemas/stream-response]]
@@ -394,6 +404,82 @@
   "The terminal status a tool call's recorded `result` implies: `failed` when
   the result is an error message, `completed` otherwise."
   messages/tool-result-status)
+
+;; ---------------------------------------------------------------------------
+;; The provider interface
+;; ---------------------------------------------------------------------------
+
+(def capabilities
+  "What the Ollama API supports, as the protocol's `Capabilities` map.
+
+  Ollama streams chat events, takes the OpenAI-style tool definitions the
+  registry produces, reasons through `:think`, accepts `:images`, and
+  constrains replies with `:format`. Its usage counts prompt and reply tokens
+  (`prompt_eval_count`/`eval_count`) but knows no price per token and reports
+  no cached- or reasoning-token split, so those usage flags are false."
+  {:provider          :ollama
+   :streaming         true
+   :tools             {:supported? true
+                       :format     :ollama
+                       :parallel   nil}
+   :usage             {:tokens?           true
+                       :cost?             false
+                       :cached-tokens?    false
+                       :reasoning-tokens? false}
+   :reasoning         true
+   :images            true
+   :structured-output true})
+
+(defn request-body
+  "Build the `/api/chat` body for one turn from the provider-neutral `spec`
+  (`:model`, `:history`, `:tools`, `:chat-opts`).
+
+  Ollama defined the stored history's message shape, so `:history` is sent
+  as-is, and its own option keys (`:options`, `:think`, `:format`, ...) go
+  into the body verbatim, so `:chat-opts` is merged straight in. `:tools` is
+  dropped when empty and the reply is always requested non-streaming."
+  {:malli/schema [:-> #'protocol/ChatSpec #'schemas/chat-request]}
+  [{:keys [model history tools chat-opts]}]
+  (merge (cond-> {:model    model
+                  :messages (vec history)
+                  :stream   false}
+           (seq tools) (assoc :tools (messages/tool-definitions tools)))
+         chat-opts))
+
+(defn token-usage
+  "Normalize the token accounting of an `/api/chat` or `/api/generate` response
+  into the protocol's `TokenUsage`.
+
+  Ollama counts input tokens in `prompt_eval_count` and output tokens in
+  `eval_count`, and reports timings rather than money, so `:cost` and the
+  cached- and reasoning-token splits stay nil. Only the final `done: true`
+  event of a stream carries counts, so a partial event yields nil."
+  {:malli/schema [:-> [:maybe :map] [:maybe #'protocol/TokenUsage]]}
+  [resp]
+  (let [input  (:prompt_eval_count resp)
+        output (:eval_count resp)]
+    (when (or input output)
+      {:input-tokens  input
+       :output-tokens output
+       :total-tokens  (+ (or input 0) (or output 0))
+       :cost          nil
+       :raw           (util/select-present
+                       resp
+                       [:prompt_eval_count :eval_count :total_duration
+                        :load_duration :prompt_eval_duration
+                        :eval_duration])})))
+
+;; The interface `clai.agent.providers` chats through, so the agent loop
+;; never sees Ollama's wire format.
+(extend-type Client
+  protocol/Provider
+  (-provider-id [_client] :ollama)
+  (-capabilities [_client] capabilities)
+  (-chat-request [_client spec] (request-body spec))
+  (-chat [client req] (chat client req))
+  (-assistant-message [_client resp] (messages/assistant-message resp))
+  (-tools [_client tool-specs] (messages/tool-definitions tool-specs))
+  (-token-usage [_client resp] (token-usage resp)))
 
 ;; ---------------------------------------------------------------------------
 ;; Convenience: bind a default client

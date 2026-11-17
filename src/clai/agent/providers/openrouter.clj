@@ -15,6 +15,11 @@
   Requests are non-streaming: the agent loop asks for one reply at a time, so
   `chat` always returns a single response map.
 
+  The `Client` record implements `clai.agent.providers.protocol/Provider`, so
+  the agent chats through this provider without knowing which one it is; see
+  that namespace for the interface and `clai.agent.providers` for model-name
+  resolution.
+
   Example:
 
       (require '[clai.agent.providers.openrouter :as openrouter])
@@ -25,6 +30,7 @@
       ;; => {:id \"gen-...\" :choices [{:message {:role \"assistant\" ...}}] ...}"
   (:require [clai.agent.providers.http :as http]
             [clai.agent.providers.messages :as messages]
+            [clai.agent.providers.protocol :as protocol]
             [clai.agent.tools.invoke :as invoke]
             [clai.events.schema :as events]
             [clai.log]
@@ -269,7 +275,7 @@
   (merge (cond-> {:model    model
                   :messages (history->messages history)
                   :stream   false}
-           (seq tools) (assoc :tools tools))
+           (seq tools) (assoc :tools (messages/tool-definitions tools)))
          (chat-options chat-opts)))
 
 ;; ---------------------------------------------------------------------------
@@ -320,7 +326,10 @@
   key (`:tools`, `:temperature`, `:reasoning`, ...) is forwarded verbatim.
 
   Always returns a single response map: `:stream` is forced to `false`, since
-  the agent loop wants one reply at a time."
+  the agent loop wants one reply at a time. This is also what
+  `clai.agent.providers.protocol/-chat` dispatches to, so a turn started by
+  [[request-body]] returns here; prefer `clai.agent.providers.protocol/respond`
+  when you want the reply, the token usage, and the raw response together."
   {:malli/schema [:function
                   [:=> [:cat chat-request] [:maybe :map]]
                   [:=> [:cat OpenRouterClient chat-request] [:maybe :map]]]}
@@ -370,6 +379,70 @@
 
       (seq (:tool_calls message))
       (assoc :tool_calls (mapv tool-call->message (:tool_calls message))))))
+
+;; ---------------------------------------------------------------------------
+;; The provider interface
+;; ---------------------------------------------------------------------------
+
+(def capabilities
+  "What the OpenRouter API supports, as the protocol's `Capabilities` map.
+
+  OpenRouter proxies models that call tools (in the OpenAI dialect, several
+  per turn), reason through its unified `:reasoning` control, accept images
+  as content blocks, and constrain replies with `response_format`. Its
+  usage block also prices the request, so it is the one provider that fills
+  every `TokenUsage` field."
+  {:provider          :openrouter
+   :streaming         true
+   :tools             {:supported? true
+                       :format     :openai
+                       :parallel   true}
+   :usage             {:tokens?           true
+                       :cost?             true
+                       :cached-tokens?    true
+                       :reasoning-tokens? true}
+   :reasoning         true
+   :images            true
+   :structured-output true})
+
+(defn token-usage
+  "Normalize the `:usage` block of a chat-completions response into the
+  protocol's `TokenUsage`.
+
+  OpenRouter reports prompt, completion, and total tokens, the request's
+  `:cost` in credits (US dollars), the cached part of the prompt
+  (`prompt_tokens_details.cached_tokens`), and the reasoning part of the
+  completion (`completion_tokens_details.reasoning_tokens`). A response
+  without a `:usage` block yields nil."
+  {:malli/schema [:-> [:maybe :map] [:maybe #'protocol/TokenUsage]]}
+  [resp]
+  (when-let [usage (:usage resp)]
+    (let [input  (:prompt_tokens usage)
+          output (:completion_tokens usage)]
+      {:input-tokens        input
+       :output-tokens       output
+       :total-tokens        (or (:total_tokens usage)
+                                (when (or input output)
+                                  (+ (or input 0) (or output 0))))
+       :cached-input-tokens (get-in usage
+                                    [:prompt_tokens_details :cached_tokens])
+       :reasoning-tokens    (get-in usage
+                                    [:completion_tokens_details
+                                     :reasoning_tokens])
+       :cost                (:cost usage)
+       :raw                 usage})))
+
+;; The interface `clai.agent.providers` chats through, so the agent loop
+;; never sees OpenRouter's wire format.
+(extend-type Client
+  protocol/Provider
+  (-provider-id [_client] :openrouter)
+  (-capabilities [_client] capabilities)
+  (-chat-request [_client spec] (request-body spec))
+  (-chat [client req] (chat client req))
+  (-assistant-message [_client resp] (assistant-message resp))
+  (-tools [_client tool-specs] (messages/tool-definitions tool-specs))
+  (-token-usage [_client resp] (token-usage resp)))
 
 ;; ---------------------------------------------------------------------------
 ;; Entry point

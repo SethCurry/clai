@@ -6,6 +6,7 @@
             [clai.agent.core :as agent]
             [clai.agent.providers.ollama :as ollama]
             [clai.agent.providers.openrouter :as openrouter]
+            [clai.agent.titles :as titles]
             [clai.daemon.postgres.configs :as agent-configs]
             [clai.daemon.postgres.git :as git]
             [clai.daemon.postgres.sessions :as sessions]
@@ -121,6 +122,12 @@
         (is (= "from openrouter"
                (events/content->text (:content (last @updates)))))))))
 
+(defn- title-request?
+  "True when `req` is the direct title call `clai.agent.titles` makes -- the
+  one request that carries no tools and opens with the title instruction."
+  [req]
+  (str/includes? (str (-> req :messages first :content)) titles/instruction))
+
 (defn- run-with-stubbed-ollama
   "Run `f` with `/api/chat` stubbed. `f` receives the agent plus atoms
   collecting the chat request bodies (`requests`) and the event updates sent
@@ -139,7 +146,7 @@
          updates  (atom [])]
      (with-redefs [ollama/chat
                    (fn [_client req]
-                     (if-not (contains? req :tools)
+                     (if (title-request? req)
                        {:message {:role "assistant" :content "stub title"}}
                        (do
                          (swap! requests conj req)
@@ -365,8 +372,8 @@
            (prompt! handler sessionId "ping" updates)
            (let [request (first @requests)]
              (is (= "tiny" (:model request)))
-             (is (= [] (:tools request))
-                 "an empty tool list disables every tool")
+             (is (not (contains? request :tools))
+                 "an empty tool list disables every tool, so none are offered")
              (is (= {:temperature 0} (:options request)))
              (is (true? (:think request)))
              (is (= "json" (:format request))))))))))

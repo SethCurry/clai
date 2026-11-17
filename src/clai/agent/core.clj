@@ -1051,7 +1051,8 @@
 
 (defn- chat-once
   "Send one non-streaming chat request for `history` through the session's
-  provider client.
+  provider client, logging the token usage the provider reported along with
+  the turn.
 
   Returns `{:message <assistant message>}` on success or `{:error <text>}` on
   failure, so the loop can relay the failure to the caller instead of
@@ -1067,10 +1068,21 @@
                      :tools     (count tool-specs)}}
             "Sending chat request")
   (try
-    {:message (providers/complete client {:model     model
-                                          :history   history
-                                          :tools     tool-specs
-                                          :chat-opts chat-opts})}
+    (let [{:keys [message usage]} (providers/respond client
+                                                     {:model     model
+                                                      :history   history
+                                                      :tools     tool-specs
+                                                      :chat-opts chat-opts})]
+      (when usage
+        (tel/log! {:level :debug
+                   :id    ::chat-usage
+                   :data  {:sessionId    session-id
+                           :round        round
+                           :inputTokens  (:input-tokens usage)
+                           :outputTokens (:output-tokens usage)
+                           :cost         (:cost usage)}}
+                  "Chat turn token usage"))
+      {:message message})
     (catch Throwable e
       (tel/error! {:id   ::chat-request-failed
                    :data {:sessionId session-id
