@@ -3,9 +3,6 @@
 
   A session is named from its first message: [[generate-title]] asks the model
   the session chats with for a 1 to 5 word title, in one direct provider call.
-  That call is deliberately outside the agent loop -- it carries no tools, no
-  session history, and nothing about it is recorded -- so naming a session
-  costs one small chat turn and leaves the conversation untouched.
 
   Models do not always obey a request for a bare title, so [[clean-title]]
   normalizes the reply: the first non-blank line, without quoting, list
@@ -24,18 +21,13 @@
 ;; ---------------------------------------------------------------------------
 
 (def max-title-words
-  "The most words a generated title keeps. A longer reply is truncated, since
-  a model asked for a short title sometimes answers with a sentence."
   5)
 
 (def max-prompt-chars
-  "The most characters of the first message a title request quotes. A first
-  message can be a pasted file, and the gist is all a title needs."
   2000)
 
 (def instruction
-  "The instruction that turns a session's first message into a title. It lives
-  here so the request and the parsing of its reply are described together."
+  "The instruction that turns a session's first message into a title."
   (str "Write a title for this chat session in 1 to 5 words. "
        "Use the language of the message and name what the session is about. "
        "Reply with the title only: no quotes, no trailing punctuation, "
@@ -66,7 +58,7 @@
 
 (defn- strip-markup
   "Remove the list markers, quoting, and trailing punctuation a model wraps a
-  title in. `text` is one line with its whitespace already collapsed."
+  title in."
   {:malli/schema [:-> :string :string]}
   [text]
   (-> text
@@ -78,12 +70,7 @@
       str/trim))
 
 (defn clean-title
-  "The usable title inside a model's `reply` to a title request.
-
-  Only the first non-blank line is kept, its markup stripped by
-  [[strip-markup]], its whitespace collapsed to single spaces, and anything
-  past [[max-title-words]] words dropped. Returns nil when nothing usable
-  remains, so a blank or evasive reply simply leaves the session untitled."
+  "The usable title inside a model's `reply` to a title request."
   {:malli/schema [:-> :any [:maybe :string]]}
   [reply]
   (when-let [line (->> (events/content->text reply)
