@@ -62,13 +62,13 @@ Hooks run in priority order: lower `priority` values first, then by plugin
 name, then in the order they appear in the plugin's `:hooks` map. Every hook
 receives a `:plugin` key containing `{:name ... :config ...}`.
 
-| Hook | Contract |
-| ---- | -------- |
-| `:namespace-builder` | Middleware around `clai.repl/namespace-builder`. Receives `{:opts ... :plugin ...}` and `next`; returns a namespace. Call `(next ctx)` to continue. |
-| `:system-prompt` | Middleware around system-prompt assembly. `ctx` has `:sys-prompt`, `:cwd`, and `:agents-md`; call `(next ctx)` for the default prompt, then return the final string. |
-| `:user-prompt-pre` | Runs before user messages are persisted. Receives `{:session ... :messages [...]}`. Return replacement message(s), or nil to keep them unchanged. |
-| `:user-prompt-post` | Runs after user messages are persisted and before the model call. Receives the same context. Return message(s) to append, or nil. |
-| `:agent-message-pre` | Runs before the final assistant message is persisted. Receives `{:session ... :message ...}`. Return a replacement message map, or nil. |
+| Hook                  | Contract                                                                                                                                                                 |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `:namespace-builder`  | Middleware around `clai.repl/namespace-builder`. Receives `{:opts ... :plugin ...}` and `next`; returns a namespace. Call `(next ctx)` to continue.                      |
+| `:system-prompt`      | Middleware around system-prompt assembly. `ctx` has `:sys-prompt`, `:cwd`, and `:agents-md`; call `(next ctx)` for the default prompt, then return the final string.     |
+| `:user-prompt-pre`    | Runs before user messages are persisted. Receives `{:session ... :messages [...]}`. Return replacement message(s), or nil to keep them unchanged.                        |
+| `:user-prompt-post`   | Runs after user messages are persisted and before the model call. Receives the same context. Return message(s) to append, or nil.                                        |
+| `:agent-message-pre`  | Runs before the final assistant message is persisted. Receives `{:session ... :message ...}`. Return a replacement message map, or nil.                                  |
 | `:agent-message-post` | Runs after the assistant message is persisted and before its event is sent. Receives `{:session ... :message ... :update ...}`. Return a replacement update map, or nil. |
 
 A message hook may return a single message map or a sequence of message maps.
@@ -128,11 +128,11 @@ Every enabled plugin is registered at startup, but an agent can narrow which
 plugins actually run. The `agent_config.plugins` column lists plugin names (or
 database ids) that are active for sessions selecting that configuration:
 
-| Value | Meaning |
-| ----- | ------- |
-| `NULL` | Every registered plugin runs. |
-| `[]` | No plugins run. |
-| `["todays-date", "audit"]` | Only the named plugins run. |
+| Value                      | Meaning                       |
+| -------------------------- | ----------------------------- |
+| `NULL`                     | Every registered plugin runs. |
+| `[]`                       | No plugins run.               |
+| `["todays-date", "audit"]` | Only the named plugins run.   |
 
 The config file's `:plugins` key sets the agent-wide default in the same way.
 A session's stored agent configuration overrides that default. The web UI's

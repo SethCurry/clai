@@ -1,0 +1,11 @@
+[en]
+  label = "English"
+  locale = "en-US"
+  contentDir = "content"
+  weight = 10
+  [en.params]
+    languageISO = "EN"
+    languageTag = "en-US"
+    locale = "en-US"
+    footer = ''
+    alertText = '<a class="alert-link stretched-link fw-normal" href="/blog/why-clai/">Why clai runs the agent in your own JVM</a>'
